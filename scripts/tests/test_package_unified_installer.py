@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import hashlib
 import importlib.util
 import json
@@ -20,6 +21,18 @@ SOURCE = "a" * 40
 CONTRACT = {"min_generation": 1, "max_generation": 1}
 
 class UnifiedInstallerTests(unittest.TestCase):
+    def test_linux_packaging_helpers_keep_python310_fstring_grammar(self):
+        for name in ("package_unified_installer.py", "collect_unified_installer_inputs.py", "prepare_release_metadata.py", "runtime_installer_manifest.py"):
+            path = SCRIPT.with_name(name)
+            source = path.read_text(encoding="utf-8")
+            with self.subTest(helper=name):
+                tree = ast.parse(source, filename=str(path), feature_version=(3, 10))
+                # Python 3.12's older feature_version still accepts PEP 701 backslashes.
+                for node in ast.walk(tree):
+                    if isinstance(node, ast.FormattedValue):
+                        expression = ast.get_source_segment(source, node.value)
+                        self.assertNotIn("\\", expression, f"Python 3.10 forbids backslashes in f-string expressions: {name}:{node.lineno}")
+
     def test_preinstall_rejects_tampered_candidate_cli_before_execution(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

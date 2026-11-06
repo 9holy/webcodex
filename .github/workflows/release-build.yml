@@ -1242,7 +1242,6 @@ jobs:
           cargo build --manifest-path apps/desktop/src-tauri/Cargo.toml --locked --release --features tauri/custom-protocol
           desktop="$CARGO_TARGET_DIR/release/webcodex-desktop"
           test -x "$desktop"
-          install -m 0755 "$desktop" native-input/artifacts/bin/webcodex-desktop
       - name: Collect and package macOS installer
         env:
           WEBCODEX_MACOS_CERTIFICATE_SHA1: ${{ vars.MACOS_CERTIFICATE_SHA1 }}
@@ -1283,16 +1282,14 @@ jobs:
             spctl --assess --type execute "$app"
             xcrun stapler validate "$app"
           fi
-          rm native-input/artifacts/bin/webcodex-desktop
-          cp "$app/Contents/MacOS/WebCodex" native-input/artifacts/bin/webcodex-desktop
           mkdir -p native-input/artifacts/desktop
           cp -R "$app" native-input/artifacts/desktop/WebCodex.app
           python3 scripts/collect_unified_installer_inputs.py \
             --platform "$PLATFORM" --input-root native-input \
-            --webcodex artifacts/bin/webcodex \
-            --webcodex-server artifacts/bin/webcodex-server \
-            --webcodex-runner artifacts/bin/webcodex-runner \
-            --webcodex-desktop artifacts/bin/webcodex-desktop \
+            --webcodex artifacts/desktop/WebCodex.app/Contents/Resources/webcodex-runtime/webcodex \
+            --webcodex-server artifacts/desktop/WebCodex.app/Contents/Resources/webcodex-runtime/webcodex-server \
+            --webcodex-runner artifacts/desktop/WebCodex.app/Contents/Resources/webcodex-runtime/webcodex-runner \
+            --webcodex-desktop artifacts/desktop/WebCodex.app/Contents/MacOS/WebCodex \
             --desktop-payload artifacts/desktop/WebCodex.app \
             --desktop-executable Contents/MacOS/WebCodex \
             --version "$VERSION" --source-sha "$SOURCE_SHA" \

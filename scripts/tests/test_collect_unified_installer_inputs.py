@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -111,6 +112,64 @@ class NativeManifestCollectorTests(unittest.TestCase):
             args.platform = "linux-arm64"
             with self.assertRaisesRegex(collector.CollectionError, "exact native platform"):
                 collector.collect(args)
+
+    def test_macos_collection_binds_and_stages_the_bundle_executable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths = self.fixture(root, target="aarch64-apple-darwin", architecture="aarch64")
+            standalone = root / "artifacts/bin/webcodex-desktop"
+            standalone.parent.mkdir(parents=True)
+            shutil.copy2(paths["webcodex-desktop"], standalone)
+            paths["webcodex-desktop"] = standalone
+            bundle = root / "artifacts/desktop/WebCodex.app"
+            executable = bundle / "Contents/MacOS/WebCodex"
+            resources = bundle / "Contents/Resources/webcodex-runtime"
+            executable.parent.mkdir(parents=True)
+            resources.mkdir(parents=True)
+            shutil.copy2(paths["webcodex-desktop"], executable)
+            for name in collector.RUNTIMES:
+                shutil.copy2(paths[name], resources / name)
+            with (resources / "webcodex-runner").open("a", encoding="utf-8") as signed_runner:
+                signed_runner.write("\n# finalized signing bytes\n")
+            (bundle / "Contents/Info.plist").write_text("fixture bundle metadata", encoding="utf-8")
+            output = root / "installer-input"
+            args = self.args(root, paths, root / "archive-input", platform="darwin-arm64", desktop_executable="Contents/MacOS/WebCodex")
+            args.desktop_payload = bundle.relative_to(root).as_posix()
+            with mock.patch.object(collector, "detect_platform", return_value="darwin-arm64"):
+                with self.assertRaisesRegex(collector.CollectionError, "Desktop executable path does not match"):
+                    collector.collect(args)
+                self.assertFalse(args.output_dir.exists())
+                args.webcodex_desktop = executable.relative_to(root).as_posix()
+                archive_result = collector.collect(args)
+                archive_manifest = Path(archive_result["source_manifest"])
+                with self.assertRaisesRegex(collector.package.PackageError, "bundle runtime does not match webcodex-runner"):
+                    collector.package.validate_manifest(archive_manifest, args.output_dir / "SHA256SUMS", args.output_dir, "darwin-arm64")
+                archive_identity = json.loads(archive_manifest.read_text(encoding="utf-8"))["artifacts"]["webcodex-runner"]["build_info"]
+                workflow = (SCRIPTS.parent / ".github/workflows/release-build.yml").read_text(encoding="utf-8")
+                macos = workflow.split("      - name: Collect and package macOS installer", 1)[1].split("      - name:", 1)[0]
+                for name in collector.BINARIES:
+                    value = next(line.split()[1] for line in macos.splitlines() if line.strip().startswith(f"--{name} "))
+                    setattr(args, name.replace("-", "_"), value)
+                args.output_dir = output
+                result = collector.collect(args)
+            manifest_path = Path(result["source_manifest"])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            desktop = manifest["artifacts"]["webcodex-desktop"]
+            staged_relative = "artifacts/desktop/WebCodexDesktop.app/Contents/MacOS/WebCodex"
+            self.assertEqual(desktop["path"], staged_relative)
+            self.assertEqual(desktop["sha256"], collector.package.sha256_file(executable))
+            self.assertEqual(collector.package.sha256_file(output / staged_relative), desktop["sha256"])
+            for name in collector.RUNTIMES:
+                artifact = manifest["artifacts"][name]
+                self.assertEqual(artifact["sha256"], collector.package.sha256_file(resources / name))
+                self.assertEqual(collector.package.sha256_file(output / artifact["path"]), artifact["sha256"])
+            self.assertEqual(manifest["artifacts"]["webcodex-runner"]["build_info"], archive_identity)
+            staged_bundle = output / manifest["desktop_payload"]["path"]
+            self.assertEqual(manifest["desktop_payload"]["executable"], "Contents/MacOS/WebCodex")
+            self.assertEqual(manifest["desktop_payload"]["sha256"], collector.package.tree_digest(bundle))
+            self.assertEqual(collector.package.tree_digest(staged_bundle), collector.package.tree_digest(bundle))
+            validated = collector.package.validate_manifest(manifest_path, output / "SHA256SUMS", output, "darwin-arm64")
+            self.assertEqual(validated["desktop_payload"]["path"], manifest["desktop_payload"]["path"])
 
     def test_windows_collection_preserves_exe_paths_for_core_preflight(self):
         with tempfile.TemporaryDirectory() as temp:
