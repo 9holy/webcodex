@@ -342,6 +342,44 @@ OAuth 仍是独立的高级身份路径。
 
 同一个 canonical ToolRuntime 服务两种 MCP 投影。**Adaptive Runtime** 仍是包括 ChatGPT 在内的默认路径：canonical `ToolDefinition` rank 决定 direct tools；普通 model-visible long-tail tools 通过 `call_runtime_tool` 调用；server-owned protocol capability 与 MCP App admission 可以为对应请求加入 hidden extension。显式的请求级 CLI surface 只改变 discovery 与 presentation，配置见下文。`read_tool_manifest(tool_name=...)` 只负责 discovery，不会动态向 Host 注册一个新 tool。exact manifest 的 `route.primary` 给出首选 callable；普通 direct tool 还会给出经 `call_runtime_tool` 的 `route.fallback`，用于 Host 当前没有该 direct callable 的情况；显式 MCP App presentation tool 会标明 Apps enabled 时该 fallback 被禁止。direct/gateway 只改变 presentation，不会绕过目标工具的 authentication、Project authority、permission、Runner capability、Session 或 safety checks。
 
+### 浏览器发现与访问
+
+ChatGPT 和其他云端模型可能只看到 `read_tool_manifest`、`call_runtime_tool`，
+而在 `tools/list` 中看不到独立的 `observe_browser` 或 `control_browser`。
+浏览器工具使用既有 Adaptive Runtime gateway；缺少独立工具名称不代表 Browser Use
+不可用。按顺序发送以下 MCP `tools/call` 参数，发现已准入的浏览器工具并观察可用
+Runner 目标；这两步不会启动浏览器：
+
+```json
+{"name":"read_tool_manifest","arguments":{"category":"browser"}}
+```
+
+```json
+{"name":"call_runtime_tool","arguments":{"tool":"observe_browser","arguments":{"action":"targets"}}}
+```
+
+后续浏览器调用使用返回的精确 `client_id`，并遵循当前工具 manifest。
+工具发现和成功读取不授予控制权限。
+
+| 观察结果 | 含义与下一步 |
+| --- | --- |
+| 没有可用目标、`capability_unavailable` 或 `browser_unavailable` | 检查目标 Runner 的连接和声明的能力。启动自有浏览器要求该 Runner 安装受支持的 Chromium 系浏览器；目录中存在工具不代表后端可用。 |
+| 缺少 `browser:read`、`browser:control` 或 `browser:launch` scope | 对 shared-key `connect --auth oauth`，显式选择 `--oauth-browser-permissions` 并重新授权客户端。已有 grant 不会自动扩权；见 [OAuth2](#oauth2)。使用实际 connector 身份验证访问权限。 |
+| `browser_extension_bridge=false` 或没有共享标签页 offer | 接入已有登录态的 Chrome 标签页需要 native messaging host、Browser bridge 扩展，以及用户显式点击 **Share current tab**。安装和同意步骤独立于自有浏览器是否可用。 |
+
+通过 Bearer 使用 PAT 时，token scope 固定，OAuth flag 不会改变它。具有相应权限的账户管理者
+可通过 `POST /api/tokens/create` 签发新 PAT，提供目标 `username`、`name` 和显式
+`scopes` 数组：保留工作流所需的 scope，并按需选择用于观察的 `browser:read`、
+用于启动的 `browser:launch`、用于操作的 `browser:control`。API 只返回一次 token；
+妥善保管，显式更新 MCP 客户端的 Bearer 凭据，再用该凭据重做上述只读调用。
+支持的 CLI 替代方式见 [PAT 管理](CLI.md#credentials-and-accounts)。
+
+`control_browser(action=launch)` 使用临时 profile 打开自有临时浏览器；
+`mode=managed` 使用命名的私有持久化 profile。两者都不会复用用户普通 Chrome 的登录态。
+接入现有标签页时，先用 `observe_browser(action=discover)`，再用精确的有效 offer
+调用 `control_browser(action=attach)`。Profile 归属、扩展安装与同意边界见
+[Browser session continuity](architecture/browser-session-continuity.md)。
+
 ### 按客户端配置可选工作流工具
 
 Adaptive Runtime（包括 ChatGPT）的 Goal、Agent 续跑和 Job 续跑入口需要显式启用。

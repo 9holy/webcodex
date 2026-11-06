@@ -193,6 +193,48 @@ One canonical ToolRuntime serves both MCP projections. **Adaptive Runtime** rema
 
 When their workflow group is enabled, nine durable Agent and Goal operations have a stricter Host exposure contract: `create_agent_identity`, `rotate_agent_continuation_endpoint`, `list_agent_identities`, `prepare_goal_workflow`, `get_goal`, `checkpoint_goal`, `update_goal`, `bootstrap_agent_conversation`, and `consume_agent_wake` are independently exposed with their canonical input schemas, accurate effect annotations and applicable OAuth requirements. They require normal Host tool review before a new trial. If a Host does not load or rejects one of these dedicated descriptors, WebCodex does not substitute `call_runtime_tool`; that generic route is not a fallback for these operations. Their `_wc.control` forms for Goal checkpoints, Wake consumption and Goal completion are also rejected before any main or sidecar effect; use the standalone canonical tools. This bounded stage does not claim compliance for unrelated Plugin operations. This exposure policy does not grant authority or guarantee Host acceptance, and does not alter each operation's existing authentication, OAuth scopes, permissions, ownership, lifecycle, replay-safety, or effect checks. The cause of a prior Host refusal remains unknown; this contract does not claim to resolve it. Other ordinary direct tools retain their existing gateway fallback, and hidden App methods remain hidden.
 
+### Browser discovery and access
+
+ChatGPT and other cloud models may see `read_tool_manifest` and `call_runtime_tool`
+without separate `observe_browser` or `control_browser` entries in `tools/list`.
+Browser tools use the existing Adaptive Runtime gateway; missing individual names
+does not establish that Browser Use is unavailable. Send these MCP `tools/call`
+parameters in order to discover the admitted Browser tools and observe available
+Runner targets without launching a browser:
+
+```json
+{"name":"read_tool_manifest","arguments":{"category":"browser"}}
+```
+
+```json
+{"name":"call_runtime_tool","arguments":{"tool":"observe_browser","arguments":{"action":"targets"}}}
+```
+
+Use a returned exact `client_id` and the current tool manifest for subsequent
+Browser calls. Discovery and a successful read do not grant control authority.
+
+| Observation | Meaning and next step |
+| --- | --- |
+| No usable target, `capability_unavailable`, or `browser_unavailable` | Check the intended Runner's connection and advertised capabilities. Owned Browser launch requires an installed supported Chromium-family browser on that Runner; a catalog entry alone does not prove backend availability. |
+| Missing `browser:read`, `browser:control`, or `browser:launch` scope | For shared-key `connect --auth oauth`, explicitly select `--oauth-browser-permissions` and reauthorize the client. Existing grants do not expand automatically; see [OAuth2](#oauth2). Use the actual connector identity to verify access. |
+| `browser_extension_bridge=false` or no shared-tab offer | Attaching an existing logged-in Chrome tab requires the native messaging host, the Browser bridge extension, and the user's explicit **Share current tab** action. Install and consent steps are separate from owned-browser availability. |
+
+For PATs used as Bearer credentials, OAuth flags do not change their fixed scopes. An
+authorized account manager can issue a new PAT through `POST /api/tokens/create`
+with the intended `username`, a `name`, and an explicit `scopes` array: retain the
+workflow's necessary scopes and select `browser:read` for observation,
+`browser:launch` for launch, and `browser:control` for effects as needed. The API
+returns the token once; keep it private, explicitly update the MCP client's Bearer
+credential, and repeat the read-only calls above with that credential. See
+[PAT management](CLI.md#credentials-and-accounts) for supported CLI alternatives.
+
+`control_browser(action=launch)` opens an owned ephemeral browser with a temporary
+profile; `mode=managed` uses a named private persistent profile. Neither reuses the
+user's ordinary Chrome login. Existing-tab attachment uses `observe_browser(action=discover)`
+followed by `control_browser(action=attach)` with the exact live offer. See
+[Browser session continuity](architecture/browser-session-continuity.md) for
+profile ownership, extension setup, and consent boundaries.
+
 ### Optional workflow tools per client
 
 Adaptive Runtime (including ChatGPT) keeps model-facing Goal, Agent continuation
