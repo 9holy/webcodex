@@ -587,6 +587,8 @@ fn forced_config_is_reasserted_after_caller_side_effects() {
 fn global_forced_config_is_multi_provider_admission_policy() {
     let temp = crate::tests::executable_tempdir();
     let (exe, args) = fake_agent(&temp, "forced_configs");
+    let mut limited_args = args.clone();
+    *limited_args.last_mut().unwrap() = "end".to_string();
     let mut cfg = fake_config(exe.clone(), args);
     cfg.forced_config.insert(
         "model".to_string(),
@@ -596,7 +598,7 @@ fn global_forced_config_is_multi_provider_admission_policy() {
         id: "limited".to_string(),
         name: "Limited".to_string(),
         executable: exe,
-        args: vec!["end".to_string()],
+        args: limited_args,
         env_from_env: BTreeMap::new(),
         allowed_config_options: vec!["mode".to_string()],
     });
