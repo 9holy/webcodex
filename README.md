@@ -93,6 +93,7 @@ The unified installer targets Windows NSIS, macOS, and Debian 12 / Ubuntu 22.04+
 - [Desktop Runtime compatibility](docs/DESKTOP_RUNTIME_COMPATIBILITY.md) — compatible Runtime selection, diagnostics, and rollback
 - [Runtime Console](docs/runtime-console.md) — browser-based activity, projects, Sessions, and Agent communication
 - [Session continuity](docs/SESSION_CONTINUITY.md) — explicitly save and resume authorized work across conversations
+- [Optional Windows Codex chat bridge](integrations/codex/live-chat-bridge/README.md) — exchange messages between live WebCodex Codex tasks and Codex Desktop chats
 - [Desktop development](docs/DESKTOP_DEVELOPMENT.md) — run from source on Linux, Windows, and macOS; build local packages
 - [Full Setup](docs/PERSONAL_SETUP.md) — CLI, existing Server, Linux, and advanced regular Server + Runner setup
 - [Quick Trial](docs/QUICK_START.md) — temporarily try one repository with `share`

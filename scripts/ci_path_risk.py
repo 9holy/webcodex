@@ -233,7 +233,13 @@ def _classify_path(risk: Risk, path: str) -> None:
             "plugin-sdk" if path.startswith("npm/plugin-sdk/") else "plugin-sdk-dogfood"
         )
         return
-    if path.startswith("integrations/codex/") and path.endswith(".py"):
+    if path.startswith("integrations/codex/") and (
+        path.endswith(".py")
+        or (
+            path.startswith("integrations/codex/live-chat-bridge/")
+            and path.endswith((".mjs", ".json", ".ps1"))
+        )
+    ):
         _mark_windows_core(risk, "codex-adapter")
         return
     if path == "scripts/check_production_warnings.py":

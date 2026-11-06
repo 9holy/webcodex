@@ -93,6 +93,7 @@ WebCodex Server
 - [Desktop Runtime 兼容说明](docs/DESKTOP_RUNTIME_COMPATIBILITY.zh-CN.md) —— 兼容 Runtime 选择、诊断与回滚
 - [Runtime Console](docs/runtime-console.md) —— 浏览器中的活动、项目、Session 与 Agent 通信
 - [任务接续](docs/SESSION_CONTINUITY.zh-CN.md) —— 显式保存并跨对话继续有权访问的工作
+- [可选 Windows Codex 会话桥接](integrations/codex/live-chat-bridge/README.zh-CN.md) —— 在运行中的 WebCodex Codex 任务与 Codex Desktop 会话之间收发消息
 - [Desktop 开发与打包](docs/DESKTOP_DEVELOPMENT.zh-CN.md) —— 在 Linux、Windows、macOS 从源码运行，以及本地打包
 - [完整使用指南](docs/PERSONAL_SETUP.zh-CN.md) —— CLI、已有 Server、Linux 与高级普通 Server + Runner 配置
 - [快速试用](docs/QUICK_START.zh-CN.md) —— 用 `share` 临时体验一个仓库

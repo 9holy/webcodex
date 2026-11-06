@@ -801,6 +801,18 @@ jobs:
         run: python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_desktop_runtime_manifest scripts.tests.test_desktop_frontend_build
       - name: Test optional Codex observation adapter on Windows
         run: python -m unittest discover -s integrations/codex -p 'test_*.py' -v
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+      - name: Test optional Codex live chat bridge on Windows
+        run: |
+          node integrations/codex/live-chat-bridge/test-bridge.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Codex chat bridge tests failed" }
+          node integrations/codex/live-chat-bridge/test-acp-proxy.mjs
+          if ($LASTEXITCODE -ne 0) { throw "Codex ACP relay tests failed" }
+          .\integrations\codex\live-chat-bridge\test-install.ps1
+          & "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -File integrations/codex/live-chat-bridge/test-install.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Codex bridge PowerShell 5.1 installer tests failed" }
       - name: Run Windows search fallback tests
         run: |
           cargo test --locked -p webcodex --lib search_project_text_grep

@@ -10,6 +10,10 @@ does not establish real two-sided UI acceptance.
 
 ## Choose the integration boundary
 
+For same-computer messages between a running WebCodex Codex task and Codex Desktop,
+see the optional [Windows live chat bridge](live-chat-bridge/README.md). This is
+separate from the Workflow Session observation and handoff adapters below.
+
 An external Codex that only calls WebCodex tools needs the supported MCP endpoint,
 an authorized credential with the target tool's scopes, and the exact registered
 Project. It does not need the adapters in this directory, a Workflow Session,
