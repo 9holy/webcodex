@@ -87,7 +87,7 @@ def log(x):
  with open(log_path,'a',encoding='utf-8') as f: f.write(json.dumps(x,separators=(',',':'))+'\n')
 def send(x):
  log({'send':x}); print(json.dumps(x),flush=True)
-log({'startup_pid':os.getpid(),'env_keys':sorted(k for k in os.environ if k.startswith('WEBCODEX_TEST_ACP_') or k=='ACP_VISIBLE')})
+log({'startup_pid':os.getpid(),'interpreter':sys.executable,'env_keys':sorted(k for k in os.environ if k.startswith('WEBCODEX_TEST_ACP_') or k=='ACP_VISIBLE')})
 for line in sys.stdin:
  m=json.loads(line); log({'recv':m}); method=m.get('method'); rid=m.get('id')
  if method=='initialize':
@@ -193,9 +193,18 @@ for line in sys.stdin:
     let mut perms = fs::metadata(&path).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&path, perms).unwrap();
+    // Resolve the host-selected interpreter before the provider clears its environment.
+    let python = Command::new("python3")
+        .args(["-c", "import sys; print(sys.executable)"])
+        .stdin(Stdio::null())
+        .output()
+        .expect("ACP fixtures require Python 3");
+    assert!(python.status.success(), "resolve ACP fixture interpreter");
+    let executable = String::from_utf8(python.stdout).unwrap().trim().to_string();
+    assert!(Path::new(&executable).is_absolute());
     (
-        path.to_string_lossy().to_string(),
-        vec![scenario.to_string()],
+        executable,
+        vec![path.to_string_lossy().to_string(), scenario.to_string()],
     )
 }
 

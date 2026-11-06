@@ -388,6 +388,43 @@ fn project_binding_accepts_windows_case_and_verbatim_disk_identity() {
 
 #[test]
 #[cfg(unix)]
+fn declared_interpreter_runs_the_fixture_with_a_cleared_environment() {
+    let temp = crate::tests::executable_tempdir();
+    let (executable, args) = fake_agent(&temp, "end");
+    let script = temp.path().join("fake-acp.py");
+    let source = fs::read_to_string(&script).unwrap();
+    let (_, body) = source.split_once('\n').unwrap();
+    fs::write(
+        &script,
+        format!("#!/missing-acp-fixture-interpreter\n{body}"),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o600)).unwrap();
+    let cfg = fake_config(executable.clone(), args);
+    let projects = project_fixture(&temp);
+    let root = temp.path().join("repo");
+    let manager = CodingAgentManager::with_store(&cfg, temp.path().join("store")).unwrap();
+    let run = "wc_agent_run_declaredpython01";
+    assert!(manager
+        .handle(
+            start_request(&manager, &root, run, BTreeMap::new()),
+            &projects
+        )
+        .error
+        .is_none());
+    let completed = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+    assert_eq!(completed.state, CodingAgentRunState::Completed);
+    let startup = wire_log(&temp)
+        .into_iter()
+        .find(|entry| entry.get("startup_pid").is_some())
+        .unwrap();
+    assert_eq!(startup["interpreter"], json!(executable));
+    assert_eq!(startup["env_keys"], json!([]));
+    assert_eq!(prompt_count(&temp), 1);
+}
+
+#[test]
+#[cfg(unix)]
 fn child_environment_is_cleared_and_missing_mapping_never_spawns() {
     crate::tests::IsolatedEnv::new()
         .set("WEBCODEX_TEST_ACP_VISIBLE", "visible-value")

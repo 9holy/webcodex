@@ -300,24 +300,22 @@ fn explicit_path_mapping_restores_an_interpreter_outside_default_search_paths() 
         .run("inherited", || {
             let temp = crate::tests::executable_tempdir();
             let runtime = PathBuf::from(std::env::var_os("ACP_TEST_RUNTIME_PATH").unwrap());
-            let (exe, args) = fake_agent(&temp, "end");
+            let (python, mut args) = fake_agent(&temp, "end");
+            let script_path = args.remove(0);
+            assert_eq!(Path::new(&script_path), temp.path().join("fake-acp.py"));
             // A unique interpreter name prevents system Node from masking this
             // /usr/bin/env lookup regression on CI hosts.
             let interpreter = format!("wc-acp-node-{}", Uuid::new_v4().simple());
-            let python = std::env::split_paths(&std::env::var_os("PATH").unwrap())
-                .map(|directory| directory.join("python3"))
-                .find(|path| path.is_file())
-                .expect("existing ACP fixtures require Python");
             std::os::unix::fs::symlink(python, runtime.join(&interpreter)).unwrap();
-            let script = fs::read_to_string(&exe).unwrap().replacen(
+            let script = fs::read_to_string(&script_path).unwrap().replacen(
                 "#!/usr/bin/env python3",
                 &format!("#!/usr/bin/env {interpreter}"),
                 1,
             );
-            fs::write(&exe, script).unwrap();
+            fs::write(&script_path, script).unwrap();
             let projects = project_fixture(&temp);
             let root = temp.path().join("repo");
-            let mut cfg = fake_config(exe, args);
+            let mut cfg = fake_config(script_path, args);
             let manager =
                 CodingAgentManager::with_store(&cfg, temp.path().join("unmapped-store")).unwrap();
             let run = "wc_agent_run_unmappedruntime01";
