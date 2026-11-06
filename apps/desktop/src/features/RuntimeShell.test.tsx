@@ -541,31 +541,34 @@ describe("Diagnostics are explicit and secret-free", () => {
 it("keeps the six localized navigation labels and task-based Settings categories", async () => {
   localStorage.setItem("webcodex.desktop.locale", "zh-CN");
   render(wrap(<><Sidebar navigation="settings" setNavigation={vi.fn()} state={state} /><SettingsPanel state={state} onState={vi.fn()} onChangeSetup={vi.fn()} /></>));
-  for (const label of ["首页", "项目", "活动", "连接", "扩展", "设置"]) expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+  const navigation = within(screen.getByRole("navigation"));
+  const categories = within(screen.getByRole("tablist"));
+  for (const label of ["首页", "项目", "活动", "连接", "扩展", "设置"]) expect(navigation.getByRole("button", { name: label })).toBeInTheDocument();
   expect(screen.getByRole("heading", { name: "Desktop 设置" })).toBeInTheDocument();
   expect(await screen.findByRole("checkbox", { name: "登录时启动 WebCodex" })).toBeInTheDocument();
   for (const label of ["文件访问与权限", "故障排查", "Runtime 与服务", "网络", "关于与更新"]) {
-    expect(screen.getByRole("tab", { name: label })).toHaveAttribute("aria-selected", "false");
+    expect(categories.getByRole("tab", { name: label })).toHaveAttribute("aria-selected", "false");
   }
-  const diagnostics = screen.getByRole("tab", { name: "故障排查" });
+  const diagnostics = categories.getByRole("tab", { name: "故障排查" });
   expect(diagnostics).toHaveAttribute("aria-controls", "desktop-settings-diagnostics");
   fireEvent.click(diagnostics);
   expect(diagnostics).toHaveAttribute("aria-selected", "true");
-  const diagnosticsPanel = document.getElementById("desktop-settings-diagnostics");
+  const diagnosticsPanel = document.getElementById("desktop-settings-diagnostics")!;
   expect(diagnosticsPanel).toBeVisible();
   expect(diagnosticsPanel).not.toHaveAttribute("role", "region");
   expect(screen.queryByRole("checkbox", { name: "登录时启动 WebCodex" })).not.toBeInTheDocument();
-  expect(await screen.findByRole("combobox", { name: "工具请求追踪" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "Runtime Console" })).toHaveAttribute("aria-keyshortcuts", "Control+7 Meta+7");
-  expect(screen.getByRole("button", { name: "复制诊断报告" })).toBeInTheDocument();
+  expect(await within(diagnosticsPanel).findByRole("combobox", { name: "工具请求追踪" })).toBeInTheDocument();
+  expect(navigation.getByRole("button", { name: "Runtime Console" })).toHaveAttribute("aria-keyshortcuts", "Control+7 Meta+7");
+  expect(within(diagnosticsPanel).getByRole("button", { name: "复制诊断报告" })).toBeInTheDocument();
 
-  const runtimeTab = screen.getByRole("tab", { name: "Runtime 与服务" });
+  const runtimeTab = categories.getByRole("tab", { name: "Runtime 与服务" });
   expect(runtimeTab).toHaveAttribute("aria-controls", "desktop-settings-runtime");
   fireEvent.click(runtimeTab);
   expect(runtimeTab).toHaveAttribute("aria-selected", "true");
-  expect(await screen.findByRole("button", { name: "选择 Runtime 文件夹…" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "使用内置 Runtime" })).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "重新检查 Runtime" })).toBeInTheDocument();
+  const runtimePanel = within(document.getElementById("desktop-settings-runtime")!);
+  expect(await runtimePanel.findByRole("button", { name: "选择 Runtime 文件夹…" })).toBeInTheDocument();
+  expect(runtimePanel.getByRole("button", { name: "使用内置 Runtime" })).toBeInTheDocument();
+  expect(runtimePanel.getByRole("button", { name: "重新检查 Runtime" })).toBeInTheDocument();
 });
 
 it("preserves network and tracing drafts while categories change without applying effects", async () => {
@@ -591,24 +594,28 @@ it("preserves network and tracing drafts while categories change without applyin
 
 it("opens requested recovery categories and supports keyboard category navigation", async () => {
   const view = render(wrap(<SettingsPanel state={state} onState={vi.fn()} initialSection="diagnostics" />));
-  expect(screen.getByRole("tab", { name: "Troubleshooting" })).toHaveAttribute("aria-selected", "true");
-  await screen.findByRole("combobox", { name: "Tool request tracing" });
+  const categories = within(screen.getByRole("tablist"));
+  const diagnosticsTab = categories.getByRole("tab", { name: "Troubleshooting" });
+  expect(diagnosticsTab).toHaveAttribute("aria-selected", "true");
+  await within(document.getElementById("desktop-settings-diagnostics")!).findByRole("combobox", { name: "Tool request tracing" });
   view.rerender(wrap(<SettingsPanel state={state} onState={vi.fn()} initialSection="runtime" />));
-  const runtimeTab = screen.getByRole("tab", { name: "Runtime & services" });
+  const runtimeTab = categories.getByRole("tab", { name: "Runtime & services" });
   expect(runtimeTab).toHaveAttribute("aria-selected", "true");
   fireEvent.keyDown(runtimeTab, { key: "ArrowDown" });
-  const configurationTab = screen.getByRole("tab", { name: "Configuration & data" });
+  const configurationTab = categories.getByRole("tab", { name: "Configuration & data" });
   expect(configurationTab).toHaveFocus();
-  await screen.findByRole("button", { name: "Export path inventory" });
+  await within(document.getElementById("desktop-settings-configuration")!).findByRole("button", { name: "Export path inventory" });
   fireEvent.keyDown(configurationTab, { key: "ArrowDown" });
-  expect(screen.getByRole("tab", { name: "Troubleshooting" })).toHaveFocus();
+  expect(diagnosticsTab).toHaveFocus();
   fireEvent.keyDown(runtimeTab, { key: "Home" });
-  expect(screen.getByRole("tab", { name: "General" })).toHaveFocus();
-  fireEvent.keyDown(screen.getByRole("tab", { name: "General" }), { key: "ArrowDown" });
-  expect(screen.getByRole("tab", { name: "Files & permissions" })).toHaveFocus();
-  expect(screen.getByRole("button", { name: "Authorize folder" })).toBeInTheDocument();
-  fireEvent.keyDown(screen.getByRole("tab", { name: "Files & permissions" }), { key: "End" });
-  expect(screen.getByRole("tab", { name: "About & updates" })).toHaveFocus();
+  const generalTab = categories.getByRole("tab", { name: "General" });
+  expect(generalTab).toHaveFocus();
+  fireEvent.keyDown(generalTab, { key: "ArrowDown" });
+  const accessTab = categories.getByRole("tab", { name: "Files & permissions" });
+  expect(accessTab).toHaveFocus();
+  expect(within(document.getElementById("desktop-settings-access")!).getByRole("button", { name: "Authorize folder" })).toBeInTheDocument();
+  fireEvent.keyDown(accessTab, { key: "End" });
+  expect(categories.getByRole("tab", { name: "About & updates" })).toHaveFocus();
 });
 
 it("explains configured Tunnel mode, detected proxy, and effective Auto connection path", async () => {
