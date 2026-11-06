@@ -24,6 +24,27 @@ SECOND_TOKEN = "c" * 64
 
 
 class DeploymentAssetTests(unittest.TestCase):
+    def test_dockerfile_pins_default_and_forwards_release_repository_to_cargo(self) -> None:
+        dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+        default_repository = dockerfile.split("ARG WEBCODEX_RELEASE_REPOSITORY=", 1)[1].splitlines()[0]
+        self.assertEqual(default_repository, "yyjeqhc/webcodex")
+        build = "WEBCODEX_GIT_COMMIT" + dockerfile.split("RUN WEBCODEX_GIT_COMMIT", 1)[1].split("\n\nFROM", 1)[0]
+        self.assertIn('WEBCODEX_RELEASE_REPOSITORY="$WEBCODEX_RELEASE_REPOSITORY"', build)
+        self.assertIn("cargo build --locked --release --bins -p webcodex -p webcodex-cli", build)
+        with tempfile.TemporaryDirectory() as temp:
+            cargo = Path(temp) / "cargo"
+            cargo.write_text('#!/bin/sh\nprintf "%s" "$WEBCODEX_RELEASE_REPOSITORY"\n', encoding="utf-8")
+            cargo.chmod(0o755)
+            for repository in (default_repository, "9holy/webcodex"):
+                with self.subTest(repository=repository):
+                    result = subprocess.run(
+                        ["sh", "-ec", build], input="", capture_output=True, text=True, timeout=5,
+                        env={**os.environ, "PATH": f"{temp}{os.pathsep}{os.environ['PATH']}",
+                             "WEBCODEX_RELEASE_REPOSITORY": repository},
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout, repository)
+
     def test_release_bootstrap_embeds_digest_pinned_compose_without_duplicate_validation(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

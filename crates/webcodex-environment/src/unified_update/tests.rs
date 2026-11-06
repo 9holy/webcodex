@@ -158,7 +158,10 @@ fn duplicate_json_keys_and_unbounded_manifest_fail_closed() {
 fn urls_cannot_smuggle_paths_credentials_ports_or_redirect_hosts() {
     assert_eq!(
         release_asset_url("1.2.3", "manifest.json").unwrap(),
-        "https://github.com/yyjeqhc/webcodex/releases/download/v1.2.3/manifest.json"
+        format!(
+            "https://github.com/{}/releases/download/v1.2.3/manifest.json",
+            crate::unified_update::OFFICIAL_REPOSITORY
+        )
     );
     for value in [
         "../manifest.json",
@@ -239,7 +242,7 @@ pub(crate) fn source(platform: RuntimePlatform) -> Value {
         ]
         .map(|path| json!({"path":path,"sha256":"b".repeat(64)})));
     }
-    json!({"schema_version":1,"version":"1.2.3","source_sha":"a".repeat(40),"platform":platform,"target":platform.target(),"architecture":platform.architecture(),"source_workflow_run_id":123,"source_workflow_ref":"yyjeqhc/webcodex/.github/workflows/release-build.yml@refs/tags/v1.2.3","desktop_runtime_contract":{"min_generation":1,"max_generation":1},"artifacts":components,"desktop_payload":desktop})
+    json!({"schema_version":1,"version":"1.2.3","source_sha":"a".repeat(40),"platform":platform,"target":platform.target(),"architecture":platform.architecture(),"source_workflow_run_id":123,"source_workflow_ref":format!("{}/.github/workflows/release-build.yml@refs/tags/v1.2.3", crate::unified_update::OFFICIAL_REPOSITORY),"desktop_runtime_contract":{"min_generation":1,"max_generation":1},"artifacts":components,"desktop_payload":desktop})
 }
 
 #[test]
@@ -289,6 +292,26 @@ fn source_verification_binds_all_four_native_components_not_just_a_checksum() {
                 .is_err()
         );
     }
+}
+
+#[test]
+fn compiled_publisher_rejects_foreign_release_sources() {
+    let platform = RuntimePlatform::LinuxX64;
+    let mut value = source(platform);
+    value["source_workflow_ref"] =
+        "foreign/webcodex/.github/workflows/release-build.yml@refs/tags/v1.2.3".into();
+    assert!(
+        verify_source_manifest(&serde_json::to_vec(&value).unwrap(), "1.2.3", platform).is_err()
+    );
+    let mut notice = discovery::project_release(
+        &serde_json::from_value(json!({"tag_name":"v1.2.3","draft":false,"prerelease":false}))
+            .unwrap(),
+        None,
+    )
+    .unwrap();
+    assert!(discovery::valid_notice(&notice));
+    notice.release_url = "https://github.com/foreign/webcodex/releases/tag/v1.2.3".into();
+    assert!(!discovery::valid_notice(&notice));
 }
 
 #[test]

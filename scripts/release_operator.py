@@ -38,6 +38,7 @@ def build_parser() -> argparse.ArgumentParser:
     preflight.add_argument("--root", type=Path, default=Path.cwd())
     preflight.add_argument("--repo", default=collector.DEFAULT_REPO)
     preflight.add_argument("--timeout", type=float, default=30.0)
+    preflight.add_argument("--github-only", action="store_true", help="check GitHub publication only; do not access npm")
 
     reclaim_tag = subparsers.add_parser(
         "reclaim-tag",
@@ -180,6 +181,7 @@ def main(argv: list[str] | None = None) -> int:
                 source_ref=args.source_ref,
                 root=args.root,
                 timeout=args.timeout,
+                github_only=args.github_only,
             )
         except (collector.CollectionError, publication.PublicationError) as exc:
             print(f"release operator preflight failed: {exc}", file=sys.stderr)

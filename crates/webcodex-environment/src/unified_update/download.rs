@@ -536,7 +536,8 @@ impl UpdateManager {
         }
         if notice.release_url
             != format!(
-                "https://github.com/yyjeqhc/webcodex/releases/tag/v{}",
+                "https://github.com/{}/releases/tag/v{}",
+                super::OFFICIAL_REPOSITORY,
                 notice.version
             )
         {

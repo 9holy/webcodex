@@ -323,7 +323,7 @@ fn guarded_fixture() -> (
         "programs":[],"data":null,"data_snapshot":null,
         "candidate":{"version":"1.2.3","source_sha":"a".repeat(40),
             "platform":"linux-x64","source_workflow_run_id":1,
-            "source_workflow_ref":"yyjeqhc/webcodex/.github/workflows/release-build.yml@main",
+            "source_workflow_ref":format!("{}/.github/workflows/release-build.yml@main", crate::unified_update::OFFICIAL_REPOSITORY),
             "manifest_sha256":target.manifest_sha256,"root":store.root(),"artifacts":{}}
     })).unwrap();
     let cache = PrivateUpdateCache::open(manager.root.clone()).unwrap();

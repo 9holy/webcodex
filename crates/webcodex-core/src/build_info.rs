@@ -2,6 +2,13 @@
 //! owned by webcodex-build-info at the executable composition boundary.
 use serde::Serialize;
 
+/// Release workflows pin the publisher at compile time; runtime configuration
+/// and downloaded manifests cannot select a different update authority.
+pub const RELEASE_REPOSITORY: &str = match option_env!("WEBCODEX_RELEASE_REPOSITORY") {
+    Some(repository) => repository,
+    None => "yyjeqhc/webcodex",
+};
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BuildInfo {
     pub version: &'static str,

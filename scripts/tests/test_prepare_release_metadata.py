@@ -143,7 +143,7 @@ class PrepareReleaseMetadataInstallerTests(unittest.TestCase):
         env = {**os.environ, "METADATA_SCRIPT": str(metadata.ROOT / "scripts/prepare_release_metadata.py"),
                "ARTIFACT_DIR": str(self.artifacts), "OUTPUT_DIR": str(self.output),
                "PACKAGE_JSON": str(self.package), "VERSION": "0.3.0", "SOURCE_SHA": "a" * 40,
-               "GITHUB_RUN_ID": "123", "GITHUB_WORKFLOW_REF": "repo/.github/workflows/release-build.yml@refs/tags/v0.3.0"}
+               "GITHUB_REPOSITORY": "9holy/webcodex", "GITHUB_RUN_ID": "123", "GITHUB_WORKFLOW_REF": "repo/.github/workflows/release-build.yml@refs/tags/v0.3.0"}
         for include in (False, True):
             with self.subTest(include=include):
                 result = subprocess.run(["bash", "-euc", script], cwd=self.root,
@@ -154,7 +154,9 @@ class PrepareReleaseMetadataInstallerTests(unittest.TestCase):
                     self.assertIn("required unified installer set", result.stderr)
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
-                    self.assertNotIn("installers", json.loads((self.output / "manifest.json").read_text()))
+                    manifest = json.loads((self.output / "manifest.json").read_text())
+                    self.assertNotIn("installers", manifest)
+                    self.assertTrue(all("github.com/9holy/webcodex/" in item["url"] for item in manifest["artifacts"].values()))
 
     def test_rejects_partial_unified_installer_set(self):
         path = self.artifacts / metadata.installer_filename("0.3.0", next(iter(metadata.INSTALLER_TARGETS)))

@@ -2,7 +2,7 @@
 
 [English](README.md) | [简体中文](README.zh-CN.md)
 
-此本地适配器可让同一台 Windows 计算机上的**正在运行的 WebCodex Codex 编码代理任务**与 **Codex Desktop 聊天**互相交换消息。它提供 MCP 工具，用于列出、读取并显式发送双向消息。这是一个可选的源码集成，不属于打包发布功能。
+此本地适配器可让同一台 Windows 计算机上的**正在运行的 WebCodex Codex 编码代理任务**与 **Codex Desktop 聊天**互相交换消息。它提供 MCP 工具，用于列出、读取并显式发送双向消息。Windows Desktop 安装包会在 `WebCodex.exe` 旁的 `codex-live-chat-bridge` 目录中提供公开桥接文件和本指南。启用仍是可选的显式操作；仅安装 Desktop 不会修改 Codex 配置。
 
 CodingAgentRun 仍负责其任务预算、取消和生命周期。此适配器中继现有 ACP 连接并使用其 steering 扩展。它不会启动竞争写入方、唤醒已结束的 Run，也不会扩大 Server 权限范围。
 
@@ -12,6 +12,12 @@ CodingAgentRun 仍负责其任务预算、取消和生命周期。此适配器�
 
 ```powershell
 .\integrations\codex\live-chat-bridge\install.ps1
+```
+
+若已安装 Windows Desktop，则改为运行包内的安装脚本，并使用实际安装目录：
+
+```powershell
+& 'C:\path\to\WebCodex Desktop\codex-live-chat-bridge\install.ps1'
 ```
 
 默认适配器路径位于

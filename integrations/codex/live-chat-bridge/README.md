@@ -5,7 +5,9 @@
 This local adapter lets a **running WebCodex Codex coding-agent task** exchange
 messages with a **Codex Desktop chat** on the same Windows computer. It provides
 MCP tools for listing, reading and explicitly sending messages in both directions.
-This is an optional source integration, not a bundled release feature.
+Windows Desktop installers include the public bridge files and these guides in
+`codex-live-chat-bridge` beside `WebCodex.exe`. Activation remains optional and
+explicit; installing Desktop alone does not change Codex configuration.
 
 CodingAgentRun still owns its task budget, cancellation and lifecycle. The adapter
 relays the existing ACP connection and uses its steering extension. It does not
@@ -20,6 +22,13 @@ version 2.4.0.
 
 ```powershell
 .\integrations\codex\live-chat-bridge\install.ps1
+```
+
+From an installed Windows Desktop, run the packaged helper instead, using your
+actual installation directory:
+
+```powershell
+& 'C:\path\to\WebCodex Desktop\codex-live-chat-bridge\install.ps1'
 ```
 
 The default adapter path is under

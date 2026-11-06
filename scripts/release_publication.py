@@ -489,6 +489,7 @@ def preflight_release(
     source_ref: str = "main",
     root: Path,
     timeout: float,
+    github_only: bool = False,
 ) -> dict:
     release_version = normalize_version(version)
     release_source_ref = normalize_release_source_ref(source_ref, release_version)
@@ -513,22 +514,24 @@ def preflight_release(
     if _github_optional_json(client, f"/releases/tags/{encoded_tag}") is not None:
         raise PublicationError(f"GitHub Release already exists: {tag}")
 
-    encoded_package = urllib.parse.quote(PACKAGE, safe="")
-    npm_metadata = _fetch_public_json_optional(
-        f"{NPM_REGISTRY}{encoded_package}/{urllib.parse.quote(release_version, safe='')}",
-        timeout,
-    )
-    if npm_metadata is not None:
-        raise PublicationError(f"npm package version already exists: {PACKAGE}@{release_version}")
-
+    npm_user = None
+    if not github_only:
+        encoded_package = urllib.parse.quote(PACKAGE, safe="")
+        npm_metadata = _fetch_public_json_optional(
+            f"{NPM_REGISTRY}{encoded_package}/{urllib.parse.quote(release_version, safe='')}",
+            timeout,
+        )
+        if npm_metadata is not None:
+            raise PublicationError(f"npm package version already exists: {PACKAGE}@{release_version}")
     github_user = client.fetch_authenticated_user().get("login")
     if not isinstance(github_user, str) or not github_user:
         raise PublicationError("GitHub publication identity is unavailable")
-    npm_user = _run_capture(
-        ["npm", "whoami", "--registry", NPM_REGISTRY], timeout=min(timeout, 30.0)
-    )
-    if not npm_user or any(ch.isspace() for ch in npm_user):
-        raise PublicationError("npm publication identity is unavailable")
+    if not github_only:
+        npm_user = _run_capture(
+            ["npm", "whoami", "--registry", NPM_REGISTRY], timeout=min(timeout, 30.0)
+        )
+        if not npm_user or any(ch.isspace() for ch in npm_user):
+            raise PublicationError("npm publication identity is unavailable")
 
     return {
         "version": release_version,
@@ -538,9 +541,10 @@ def preflight_release(
         "github_source_ref_sha": source_ref_sha,
         "github_user": github_user,
         "npm_user": npm_user,
+        "github_only": github_only,
         "tag_available": True,
         "github_release_available": True,
-        "npm_version_available": True,
+        "npm_version_available": None if github_only else True,
     }
 
 

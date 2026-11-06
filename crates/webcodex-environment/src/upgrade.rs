@@ -1121,13 +1121,7 @@ pub fn verify_upgrade_candidate(root: &Path) -> SetupResultValue<UpgradeCandidat
         return Err(error("candidate_source", "Candidate source SHA is invalid"));
     }
     let workflow = string(&manifest, "source_workflow_ref")?;
-    if ![
-        "yyjeqhc/webcodex/.github/workflows/release-build.yml@",
-        "Xiiiing/webcodex/.github/workflows/release-build.yml@",
-    ]
-    .iter()
-    .any(|prefix| workflow.starts_with(prefix))
-    {
+    if approved_release_repository(workflow).is_none() {
         return Err(error(
             "candidate_provenance",
             "Candidate build provenance does not identify an approved release workflow",
@@ -3101,17 +3095,30 @@ fn tree_digest(root: &Path) -> SetupResultValue<String> {
     Ok(format!("{:x}", hash.finalize()))
 }
 
+fn approved_release_repository(workflow: &str) -> Option<&'static str> {
+    let repository = crate::unified_update::OFFICIAL_REPOSITORY;
+    if workflow.starts_with(&format!(
+        "{repository}/.github/workflows/release-build.yml@"
+    )) {
+        Some(repository)
+    } else if repository == "yyjeqhc/webcodex"
+        && workflow.starts_with("Xiiiing/webcodex/.github/workflows/release-build.yml@")
+    {
+        Some("Xiiiing/webcodex")
+    } else {
+        None
+    }
+}
+
 async fn verify_published_provenance(candidate: &UpgradeCandidate) -> SetupResultValue<()> {
     // The authoritative copy comes from the approved publisher over TLS, not
     // from the candidate's self-asserted manifest/checksum pair.
-    let repo = if candidate
-        .source_workflow_ref
-        .starts_with("yyjeqhc/webcodex/")
-    {
-        "yyjeqhc/webcodex"
-    } else {
-        "Xiiiing/webcodex"
-    };
+    let repo = approved_release_repository(&candidate.source_workflow_ref).ok_or_else(|| {
+        error(
+            "candidate_provenance",
+            "Candidate release publisher is not approved",
+        )
+    })?;
     let platform = crate::unified_update::RuntimePlatform::ALL
         .into_iter()
         .find(|p| p.as_str() == candidate.platform)
@@ -3189,6 +3196,37 @@ async fn verify_published_provenance(candidate: &UpgradeCandidate) -> SetupResul
 mod tests {
     use super::*;
 
+    #[test]
+    fn candidate_publisher_is_pinned_to_the_compiled_repository() {
+        let repository = crate::unified_update::OFFICIAL_REPOSITORY;
+        assert_eq!(
+            approved_release_repository(&format!(
+                "{repository}/.github/workflows/release-build.yml@refs/tags/v1.2.3"
+            )),
+            Some(repository)
+        );
+        assert_eq!(
+            approved_release_repository(
+                "foreign/webcodex/.github/workflows/release-build.yml@refs/tags/v1.2.3"
+            ),
+            None
+        );
+        assert_eq!(
+            approved_release_repository(
+                "Xiiiing/webcodex/.github/workflows/release-build.yml@main"
+            ),
+            (repository == "yyjeqhc/webcodex").then_some("Xiiiing/webcodex")
+        );
+        if repository != "yyjeqhc/webcodex" {
+            assert_eq!(
+                approved_release_repository(
+                    "yyjeqhc/webcodex/.github/workflows/release-build.yml@main"
+                ),
+                None
+            );
+        }
+    }
+
     pub(super) fn fixture(root: &Path, phase: Phase) -> UpgradeJournal {
         let account = LocalAccount {
             name: "owner".into(),
@@ -3210,8 +3248,10 @@ mod tests {
                 source_sha: "a".repeat(40),
                 platform: "linux-x64".into(),
                 source_workflow_run_id: 1,
-                source_workflow_ref: "yyjeqhc/webcodex/.github/workflows/release-build.yml@main"
-                    .into(),
+                source_workflow_ref: format!(
+                    "{}/.github/workflows/release-build.yml@main",
+                    crate::unified_update::OFFICIAL_REPOSITORY
+                ),
                 manifest_sha256: "b".repeat(64),
                 provenance_verified: true,
                 root: root.into(),

@@ -180,6 +180,31 @@ class GitHubClientIdentityTests(unittest.TestCase):
 
 
 class PreflightTests(unittest.TestCase):
+    def test_github_only_keeps_source_and_namespace_checks_without_npm(self) -> None:
+        client = mock.Mock()
+        client.fetch_authenticated_user.return_value = {"login": "fork-publisher"}
+        with mock.patch.object(publication, "_require_exact_clean_root"), mock.patch.object(
+            publication, "_package_versions", return_value=_versions()
+        ), mock.patch.object(publication.collector, "resolve_github_token", return_value="fake"), mock.patch.object(
+            publication.collector, "GitHubClient", return_value=client
+        ), mock.patch.object(publication, "_github_branch_sha", return_value=SOURCE), mock.patch.object(
+            publication, "_github_optional_json", return_value=None
+        ) as namespaces, mock.patch.object(publication, "_git", return_value=""), mock.patch.object(
+            publication, "_fetch_public_json_optional"
+        ) as npm_lookup, mock.patch.object(publication, "_run_capture") as npm_auth:
+            summary = publication.preflight_release(
+                repo="9holy/webcodex", version=VERSION, source_sha=SOURCE,
+                source_ref=SOURCE_REF, root=Path("/tmp/exact-release-source"),
+                timeout=5, github_only=True,
+            )
+        self.assertTrue(summary["github_only"])
+        self.assertEqual(summary["github_source_ref_sha"], SOURCE)
+        self.assertIsNone(summary["npm_user"])
+        self.assertIsNone(summary["npm_version_available"])
+        self.assertEqual(namespaces.call_count, 2)
+        npm_lookup.assert_not_called()
+        npm_auth.assert_not_called()
+
     def test_preflight_requires_exact_versions_and_unused_namespaces(self) -> None:
         client = mock.Mock()
         client.fetch_authenticated_user.return_value = {"login": "publisher"}
@@ -720,6 +745,15 @@ class NpmPublicationContractTests(unittest.TestCase):
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_release_publisher_is_pinned_in_native_and_container_builds(self) -> None:
+        workflow = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
+        self.assertIn("WEBCODEX_RELEASE_REPOSITORY: ${{ github.repository }}", workflow)
+        self.assertEqual(workflow.count("-e WEBCODEX_RELEASE_REPOSITORY"), 2)
+        metadata = workflow.split("python3 scripts/prepare_release_metadata.py", 1)[1].split("--output-dir release-bundle", 1)[0]
+        self.assertIn('--repo "$GITHUB_REPOSITORY"', metadata)
+        supplemental = Path(".github/workflows/release-desktop-darwin-x64.yml").read_text(encoding="utf-8")
+        self.assertIn("WEBCODEX_RELEASE_REPOSITORY: ${{ github.repository }}", supplemental)
+
     def test_release_build_exposes_durable_request_id(self) -> None:
         workflow = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
         self.assertIn("run-name: Release build ${{ inputs.tag }} ${{ inputs.request_id }}", workflow)
@@ -897,6 +931,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('gh release download "$TAG" --repo "$GITHUB_REPOSITORY"', image)
 
         self.assertIn("WEBCODEX_GIT_COMMIT=${{ needs.resolve.outputs.source_short }}", image)
+        native_image_build = image.split("      - name: Build and push native image by digest", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("file: ./Dockerfile", native_image_build)
+        self.assertIn("WEBCODEX_RELEASE_REPOSITORY=${{ github.repository }}", native_image_build)
         self.assertIn("--build-info-json", image)
         self.assertIn("source_sha.startswith(commit)", image)
         self.assertNotIn("expected_server=", image)

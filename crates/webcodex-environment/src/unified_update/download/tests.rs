@@ -384,7 +384,10 @@ async fn source_build_automatic_check_never_downloads_or_installs() {
     let notice = ReleaseNotice {
         version: "99.0.0".into(),
         runtime_version: "99.0.0".into(),
-        release_url: "https://github.com/yyjeqhc/webcodex/releases/tag/v99.0.0".into(),
+        release_url: format!(
+            "https://github.com/{}/releases/tag/v99.0.0",
+            crate::unified_update::OFFICIAL_REPOSITORY
+        ),
         compatibility: UpdateCompatibility::Unknown,
     };
     manager
@@ -424,7 +427,10 @@ async fn same_version_package_family_change_invalidates_old_target_cache() {
             Some(ReleaseNotice {
                 version: "99.0.0".into(),
                 runtime_version: "99.0.0".into(),
-                release_url: "https://github.com/yyjeqhc/webcodex/releases/tag/v99.0.0".into(),
+                release_url: format!(
+                    "https://github.com/{}/releases/tag/v99.0.0",
+                    crate::unified_update::OFFICIAL_REPOSITORY
+                ),
                 compatibility: UpdateCompatibility::Unknown,
             }),
             false,
@@ -505,7 +511,10 @@ async fn same_version_package_flavor_change_invalidates_old_target_cache() {
             Some(ReleaseNotice {
                 version: "99.0.0".into(),
                 runtime_version: "99.0.0".into(),
-                release_url: "https://github.com/yyjeqhc/webcodex/releases/tag/v99.0.0".into(),
+                release_url: format!(
+                    "https://github.com/{}/releases/tag/v99.0.0",
+                    crate::unified_update::OFFICIAL_REPOSITORY
+                ),
                 compatibility: UpdateCompatibility::Unknown,
             }),
             false,

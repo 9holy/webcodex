@@ -33,7 +33,9 @@ def filename(version: str, target: str) -> str:
     return f"webcodex-unified-v{version}-{platform}.{package_format}"
 
 
-def validate_manifest(value: object) -> dict:
+def validate_manifest(value: object, *, repo: str = "yyjeqhc/webcodex") -> dict:
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise ValueError("invalid GitHub repository")
     if not isinstance(value, dict):
         raise ValueError("release manifest must be a JSON object")
     version = value.get("version")
@@ -51,7 +53,7 @@ def validate_manifest(value: object) -> dict:
         }:
             raise ValueError(f"invalid installer entry for {target}")
         name = filename(version, target)
-        url = f"https://github.com/yyjeqhc/webcodex/releases/download/v{version}/{name}"
+        url = f"https://github.com/{repo}/releases/download/v{version}/{name}"
         if (item.get("platform"), item.get("format")) != (platform, package_format):
             raise ValueError(f"non-canonical installer identity for {target}")
         if item.get("filename") != name or item.get("url") != url:
@@ -59,7 +61,7 @@ def validate_manifest(value: object) -> dict:
         if not isinstance(item.get("sha256"), str) or not SHA256_RE.fullmatch(item["sha256"]):
             raise ValueError(f"invalid installer SHA-256 for {target}")
         source_name = f"webcodex-source-v{version}-{platform}.json"
-        source_url = f"https://github.com/yyjeqhc/webcodex/releases/download/v{version}/{source_name}"
+        source_url = f"https://github.com/{repo}/releases/download/v{version}/{source_name}"
         source_digest = item.get("source_manifest_sha256")
         if item.get("source_manifest_url") != source_url:
             raise ValueError(f"non-canonical source manifest URL for {target}")
@@ -71,8 +73,8 @@ def validate_manifest(value: object) -> dict:
     return value
 
 
-def build(manifest_path: Path, output_dir: Path, static_dir: Path) -> None:
-    manifest = validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
+def build(manifest_path: Path, output_dir: Path, static_dir: Path, *, repo: str = "yyjeqhc/webcodex") -> None:
+    manifest = validate_manifest(json.loads(manifest_path.read_text(encoding="utf-8")), repo=repo)
     if output_dir.exists():
         raise ValueError(f"output directory already exists: {output_dir}")
     output_dir.mkdir(parents=True)
@@ -80,18 +82,22 @@ def build(manifest_path: Path, output_dir: Path, static_dir: Path) -> None:
         source = static_dir / name
         if not source.is_file():
             raise ValueError(f"missing static download page asset: {source}")
-        shutil.copyfile(source, output_dir / name)
+        (output_dir / name).write_text(
+            source.read_text(encoding="utf-8").replace("https://github.com/yyjeqhc/webcodex", f"https://github.com/{repo}"),
+            encoding="utf-8",
+        )
     shutil.copyfile(manifest_path, output_dir / "manifest.json")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", default="yyjeqhc/webcodex")
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--static-dir", type=Path, default=Path(__file__).resolve().parent.parent / "download")
     args = parser.parse_args()
     try:
-        build(args.manifest, args.output_dir, args.static_dir)
+        build(args.manifest, args.output_dir, args.static_dir, repo=args.repo)
     except (OSError, json.JSONDecodeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
     print(f"static download page built for {json.loads(args.manifest.read_text(encoding='utf-8'))['version']}")

@@ -66,6 +66,7 @@ jobs:
         run: >-
           python3 scripts/build_download_page.py
           --manifest "$RUNNER_TEMP/release/manifest.json"
+          --repo "${{ github.repository }}"
           --output-dir "$RUNNER_TEMP/download-page"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: steps.manifest.outputs.has_installers == 'true'

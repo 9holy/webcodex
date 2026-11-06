@@ -24,11 +24,14 @@ pub fn url(url: &str) -> DesktopResult<()> {
         parsed.host_str(),
         Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
     );
+    let release_repository = format!("/{}", webcodex_core::build_info::RELEASE_REPOSITORY);
     let github = parsed.scheme() == "https"
         && parsed.host_str() == Some("github.com")
         && parsed.port().is_none()
         && (parsed.path() == "/yyjeqhc/webcodex"
-            || parsed.path().starts_with("/yyjeqhc/webcodex/"));
+            || parsed.path().starts_with("/yyjeqhc/webcodex/")
+            || parsed.path() == release_repository
+            || parsed.path().starts_with(&format!("{release_repository}/")));
     if (!local && !github)
         || !matches!(parsed.scheme(), "http" | "https")
         || !parsed.username().is_empty()

@@ -52,7 +52,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-pub const OFFICIAL_REPOSITORY: &str = "yyjeqhc/webcodex";
+pub const OFFICIAL_REPOSITORY: &str = webcodex_core::build_info::RELEASE_REPOSITORY;
 pub const MAX_MANIFEST_BYTES: u64 = 256 * 1024;
 pub const MAX_SOURCE_BYTES: u64 = 1024 * 1024;
 // Matches the retained release bundle's per-member ceiling.

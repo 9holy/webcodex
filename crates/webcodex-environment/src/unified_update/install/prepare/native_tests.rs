@@ -30,7 +30,7 @@ fn source(platform: RuntimePlatform) -> Vec<u8> {
     }
     serde_json::to_vec(&json!({"schema_version":1,"version":"99.0.0","source_sha":"a".repeat(40),"platform":platform,
         "target":platform.target(),"architecture":platform.architecture(),"source_workflow_run_id":123,
-        "source_workflow_ref":"yyjeqhc/webcodex/.github/workflows/release-build.yml@refs/tags/v99.0.0",
+        "source_workflow_ref":format!("{}/.github/workflows/release-build.yml@refs/tags/v99.0.0", crate::unified_update::OFFICIAL_REPOSITORY),
         "desktop_runtime_contract":{"min_generation":1,"max_generation":1},"artifacts":components,
         "desktop_payload":{"path":"artifacts/WebCodex Desktop.app","sha256":"c".repeat(64),"executable":"Contents/MacOS/webcodex-desktop"}})).unwrap()
 }

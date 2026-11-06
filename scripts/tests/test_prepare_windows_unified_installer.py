@@ -5,6 +5,7 @@ import base64
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,23 +47,32 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
     def setUp(self):
         # Fixture provenance must not inherit the CI job running this test.
         self.enterContext(mock.patch.dict(os.environ, CI_CONTEXT))
+        bridge_temp = tempfile.TemporaryDirectory(prefix="webcodex-public-bridge-")
+        self.addCleanup(bridge_temp.cleanup)
+        self.bridge = Path(bridge_temp.name)
+        for name in nsis.BRIDGE_FILES:
+            shutil.copyfile(nsis.BRIDGE_SOURCE / name, self.bridge / name)
+        for name in ("config.json", "bridge-token", "verification.json", "test-bridge.mjs"):
+            (self.bridge / name).write_text("fixture-only excluded content", encoding="utf-8")
+        self.enterContext(mock.patch.object(nsis, "BRIDGE_SOURCE", self.bridge))
 
-    def fixture(self, root: Path) -> dict:
+    def fixture(self, root: Path, platform="win32-x64") -> dict:
         bin_dir = root / "artifacts" / "bin"
         bin_dir.mkdir(parents=True)
         infos = {}
         records = {}
         sums = {}
+        target, architecture, machine = nsis.TARGETS[platform]
         for index, name in enumerate(nsis.BINARIES):
             info = {
                 "schema_version": 1, "binary": name, "version": "0.9.0", "git_commit": SOURCE,
-                "git_dirty": False, "built_at": str(100 + index), "target": "x86_64-pc-windows-msvc",
-                "architecture": "x86_64", "desktop_runtime_contract": CONTRACT, "environment_data_format": 1,
+                "git_dirty": False, "built_at": str(100 + index), "target": target,
+                "architecture": architecture, "desktop_runtime_contract": CONTRACT, "environment_data_format": 1,
             }
             if name == "webcodex": info["windows_guarded_bootstrap_contract"] = 1
             infos[name] = info
             path = bin_dir / f"{name}.exe"
-            path.write_bytes(pe(0x8664))
+            path.write_bytes(pe(machine))
             relative = path.relative_to(root).as_posix()
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             sums[relative] = digest
@@ -75,7 +85,7 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
             "schema_version": 1, "version": "0.9.0", "source_sha": SOURCE,
             "source_workflow_run_id": int(CI_CONTEXT["GITHUB_RUN_ID"]),
             "source_workflow_ref": CI_CONTEXT["GITHUB_WORKFLOW_REF"],
-            "platform": "win32-x64", "target": "x86_64-pc-windows-msvc", "architecture": "x86_64",
+            "platform": platform, "target": target, "architecture": architecture,
             "desktop_runtime_contract": CONTRACT, "artifacts": records,
             "desktop_payload": {
                 "path": "artifacts/bin/webcodex-desktop.exe", "sha256": payload_hash,
@@ -93,23 +103,79 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
         return infos
 
     def test_prepares_tauri_inner_resources_for_outer_lifecycle_bootstrap(self):
+        for platform in nsis.TARGETS:
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp) / "candidate"
+                root.mkdir()
+                infos = self.fixture(root, platform)
+                original_manifest = (root / "source-manifest.json").read_bytes()
+                original_sums = (root / "SHA256SUMS").read_bytes()
+                with mock.patch.object(nsis.collector, "probe", side_effect=lambda path, name: infos[name]):
+                    result = nsis.prepare(root, Path(temp) / "stage", platform)
+                output = Path(result["config"]).parent
+                overlay = json.loads(Path(result["config"]).read_text())
+                manifest = json.loads((root / "source-manifest.json").read_text(encoding="utf-8"))
+                self.assertEqual(overlay["bundle"]["windows"]["nsis"]["installMode"], "currentUser")
+                resources = overlay["bundle"]["resources"]
+                expected = {f"webcodex-runtime/{name}.exe" for name in nsis.RUNTIMES}
+                expected.update(f"codex-live-chat-bridge/{name}" for name in nsis.BRIDGE_FILES)
+                self.assertEqual(set(resources.values()), expected)
+                self.assertEqual(len(resources), 9)
+                for source, destination in resources.items():
+                    if destination.startswith("codex-live-chat-bridge/"):
+                        self.assertEqual(Path(source).read_bytes(), (self.bridge / Path(destination).name).read_bytes())
+                self.assertEqual({path.name for path in (output / "resources/codex-live-chat-bridge").iterdir()}, set(nsis.BRIDGE_FILES))
+                self.assertEqual((root / "source-manifest.json").read_bytes(), original_manifest)
+                self.assertEqual((root / "SHA256SUMS").read_bytes(), original_sums)
+                self.assertEqual(set(manifest["artifacts"]), set(nsis.BINARIES))
+                self.assertTrue((output / "resources/webcodex-runtime/webcodex.exe").is_file())
+                self.assertEqual(
+                    [item["path"] for item in manifest["desktop_payload"]["managed_files"]],
+                    sorted(nsis.MANAGED_INSTALL_FILES),
+                )
+                self.assertNotIn("installerHooks", overlay["bundle"]["windows"]["nsis"])
+
+    def test_missing_bridge_component_discards_incomplete_overlay(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "candidate"
-            root.mkdir()
             infos = self.fixture(root)
+            (self.bridge / "README.zh-CN.md").unlink()
+            output = Path(temp) / "stage"
             with mock.patch.object(nsis.collector, "probe", side_effect=lambda path, name: infos[name]):
-                result = nsis.prepare(root, Path(temp) / "stage", "win32-x64")
-            output = Path(result["config"]).parent
-            overlay = json.loads(Path(result["config"]).read_text())
-            manifest = json.loads((root / "source-manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(overlay["bundle"]["windows"]["nsis"]["installMode"], "currentUser")
-            self.assertEqual(len(overlay["bundle"]["resources"]), 3)
-            self.assertTrue((output / "resources/webcodex-runtime/webcodex.exe").is_file())
-            self.assertEqual(
-                [item["path"] for item in manifest["desktop_payload"]["managed_files"]],
-                sorted(nsis.MANAGED_INSTALL_FILES),
-            )
-            self.assertNotIn("installerHooks", overlay["bundle"]["windows"]["nsis"])
+                with self.assertRaises(FileNotFoundError):
+                    nsis.prepare(root, output, "win32-x64")
+            self.assertFalse(output.exists())
+
+    def test_bridge_copy_corruption_discards_incomplete_overlay(self):
+        original_copy = shutil.copyfile
+        def corrupt(source, destination):
+            original_copy(source, destination)
+            if Path(source).name == "bridge.mjs":
+                Path(destination).write_bytes(b"changed fixture bytes")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "candidate"
+            infos = self.fixture(root)
+            output = Path(temp) / "stage"
+            with mock.patch.object(nsis.collector, "probe", side_effect=lambda path, name: infos[name]), mock.patch.object(nsis.shutil, "copyfile", side_effect=corrupt):
+                with self.assertRaisesRegex(ValueError, "chat bridge byte verification failed"):
+                    nsis.prepare(root, output, "win32-x64")
+            self.assertFalse(output.exists())
+
+    def test_reparse_bridge_source_discards_incomplete_overlay(self):
+        source = self.bridge / "bridge.mjs"
+        source.unlink()
+        try:
+            source.symlink_to(self.bridge / "acp-proxy.mjs")
+        except OSError:
+            self.skipTest("symbolic-link privilege unavailable")
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "candidate"
+            infos = self.fixture(root)
+            output = Path(temp) / "stage"
+            with mock.patch.object(nsis.collector, "probe", side_effect=lambda path, name: infos[name]):
+                with self.assertRaisesRegex(ValueError, "regular non-reparse file"):
+                    nsis.prepare(root, output, "win32-x64")
+            self.assertFalse(output.exists())
 
     def test_rejects_mismatched_ci_context_before_probing_or_staging(self):
         for variable in CI_CONTEXT:

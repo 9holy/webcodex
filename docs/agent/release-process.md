@@ -82,6 +82,24 @@ results (if any), and any deferred checks.
 
 ---
 
+### GitHub-only fork distributions
+
+An explicitly requested fork distribution can use `preflight --github-only
+--repo <OWNER/REPO>` and the low-level readiness, build, collect, and draft
+verification commands. This selects the publication destination; it does not
+relax exact-source CI/readiness, immutable tags, native signing, archive
+architecture, checksum, or installer/source-manifest checks. Use
+`build-start --include-unified-installers` and keep
+`--require-unified-installers` on collection and verification when shipping the
+complete installer set. The high-level npm publication plan remains unchanged.
+
+After GitHub publication, use `verify_public_release.py <VERSION> --repo
+<OWNER/REPO> --github-only --require-unified-installers` for the selected bundle.
+No upstream npm publication is implied. Formal build workflows embed the
+selected publisher through compile-time `WEBCODEX_RELEASE_REPOSITORY`; manual
+fork builds must set that value too. Downloaded metadata and runtime environment
+variables cannot select a different publisher.
+
 ### Failed pre-publication tag reclaim
 
 A version tag may be reclaimed only when the human requester explicitly names that

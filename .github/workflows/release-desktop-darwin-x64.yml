@@ -19,6 +19,9 @@ concurrency:
   group: release-desktop-darwin-x64-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
+env:
+  WEBCODEX_RELEASE_REPOSITORY: ${{ github.repository }}
+
 jobs:
   resolve:
     runs-on: ubuntu-latest

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import contextlib
 import hashlib
 import json
 import struct
@@ -69,6 +70,74 @@ def synthetic_elf(machine: int, glibc: str = "2.17", needed: tuple[str, ...] = (
     data[64 : 64 + 56] = load
     data[120 : 120 + 56] = dynamic
     return bytes(data)
+
+
+class GitHubOnlyReleaseTests(unittest.TestCase):
+    def verify_fork(self, *, foreign_source=False, corrupt_installer=False):
+        from scripts.tests.test_collect_release_bundle import _write_bundle, VERSION
+        repo = "9holy/webcodex"
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            _write_bundle(root, f"v{VERSION}", "release", unified=True)
+            manifest_path = root / "manifest.json"
+            manifest = json.loads(manifest_path.read_text().replace(verifier.REPO, repo))
+            for platform in verifier.PLATFORMS:
+                source_name = verifier.canonical_source_manifest_name(VERSION, platform)
+                source = json.loads((root / source_name).read_text())
+                source["source_workflow_ref"] = f"{repo}/.github/workflows/release-build.yml@refs/tags/v{VERSION}"
+                if foreign_source and platform == "linux-x64":
+                    source["source_workflow_ref"] = source["source_workflow_ref"].replace(repo, "foreign/webcodex")
+                (root / source_name).write_text(json.dumps(source))
+                source_digest = hashlib.sha256((root / source_name).read_bytes()).hexdigest()
+                for target, (target_platform, _) in verifier.INSTALLER_TARGETS.items():
+                    if target_platform == platform:
+                        manifest["installers"][target]["source_manifest_sha256"] = source_digest
+                if platform.startswith("linux-"):
+                    payload = synthetic_elf(62 if platform.endswith("x64") else 183)
+                elif platform.startswith("win32-"):
+                    payload = synthetic_pe(0x8664 if platform.endswith("x64") else 0xAA64)
+                else:
+                    payload = b"\xcf\xfa\xed\xfe" + struct.pack("<I", 0x01000007 if platform.endswith("x64") else 0x0100000C) + b"\0" * 16
+                name = verifier.canonical_archive_name(VERSION, platform)
+                with tarfile.open(root / name, "w:gz") as archive:
+                    for binary in verifier.expected_binary_names(platform):
+                        member = tarfile.TarInfo(binary)
+                        member.size = len(payload)
+                        archive.addfile(member, io.BytesIO(payload))
+                manifest["artifacts"][platform]["sha256"] = hashlib.sha256((root / name).read_bytes()).hexdigest()
+            manifest_path.write_text(json.dumps(manifest))
+            names = list(verifier.parse_sha256sums((root / "SHA256SUMS").read_text(), VERSION, unified_installers=True))
+            (root / "SHA256SUMS").write_text("".join(f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n" for name in names))
+            assets = [{"name": name, "state": "uploaded", "size": (root / name).stat().st_size,
+                       "digest": "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest(),
+                       "browser_download_url": f"https://github.com/{repo}/releases/download/v{VERSION}/{name}"}
+                      for name in [*names, "SHA256SUMS"]]
+            release = {"tag_name": f"v{VERSION}", "draft": False, "prerelease": False, "assets": assets}
+            def read(url, *_):
+                self.assertTrue(url.startswith(f"https://github.com/{repo}/releases/download/v{VERSION}/"))
+                return (root / url.rsplit("/", 1)[1]).read_bytes()
+            def download(url, path, *args):
+                data = read(url)
+                if corrupt_installer and url.endswith("linux-x64.deb"):
+                    data += b"corrupt"
+                path.write_bytes(data)
+                return len(data), hashlib.sha256(data).hexdigest()
+            with mock.patch.object(verifier, "fetch_json", return_value=release) as metadata, mock.patch.object(
+                verifier, "fetch_bytes", side_effect=read
+            ), mock.patch.object(verifier, "download_file", side_effect=download), contextlib.redirect_stdout(io.StringIO()):
+                verifier.verify_public_release(VERSION, 5, repo=repo, github_only=True, require_unified_installers=True)
+            metadata.assert_called_once_with(f"https://api.github.com/repos/{repo}/releases/tags/v{VERSION}", 5)
+
+    def test_full_fork_release_verifies_all_platforms_without_npm(self):
+        self.verify_fork()
+
+    def test_foreign_publisher_is_rejected_even_with_matching_checksums(self):
+        with self.assertRaisesRegex(verifier.VerificationError, "publisher or build identity"):
+            self.verify_fork(foreign_source=True)
+
+    def test_github_only_keeps_installer_byte_verification(self):
+        with self.assertRaisesRegex(verifier.VerificationError, "installer SHA-256"):
+            self.verify_fork(corrupt_installer=True)
 
 
 class ManifestTests(unittest.TestCase):
@@ -175,6 +244,13 @@ class ManifestTests(unittest.TestCase):
             expected_base=expected_base,
         )
         self.assertEqual(validated["deployment_source_sha"], "2" * 40)
+
+        fork_metadata = dict(metadata, image="ghcr.io/9holy/webcodex-server")
+        fork_bootstrap = bootstrap.replace(verifier.SERVER_IMAGE.encode(), b"ghcr.io/9holy/webcodex-server")
+        fork_metadata["deployment_assets"] = {verifier.SERVER_BOOTSTRAP_ASSET: hashlib.sha256(fork_bootstrap).hexdigest()}
+        verifier.validate_server_image_release_record(fork_metadata, version, fork_bootstrap, repo="9holy/webcodex")
+        with self.assertRaises(verifier.VerificationError):
+            verifier.validate_server_image_release_record(fork_metadata, version, fork_bootstrap)
 
         drifted = dict(expected_base)
         drifted["digest"] = "sha256:" + "f" * 64

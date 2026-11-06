@@ -44,6 +44,17 @@ class BuildDownloadPageTests(unittest.TestCase):
         self.assertEqual(json.loads((output / "manifest.json").read_text()), self.manifest)
         self.assertTrue(all((output / name).is_file() for name in ("index.html", "styles.css", "app.js")))
 
+    def test_fork_page_requires_its_own_urls_and_routes_release_links(self):
+        fork = "9holy/webcodex"
+        self.manifest = json.loads(json.dumps(self.manifest).replace("yyjeqhc/webcodex", fork))
+        self.manifest_path.write_text(json.dumps(self.manifest), encoding="utf-8")
+        (self.static / "app.js").write_text("https://github.com/yyjeqhc/webcodex/releases", encoding="utf-8")
+        output = self.root / "fork"
+        build(self.manifest_path, output, self.static, repo=fork)
+        self.assertEqual((output / "app.js").read_text(), f"https://github.com/{fork}/releases")
+        with self.assertRaisesRegex(ValueError, "non-canonical"):
+            validate_manifest(self.manifest)
+
     def test_legacy_installer_schema_remains_strict_without_bootstrap_capability_fields(self):
         item = self.manifest["installers"]["win32-x64-exe"]
         self.assertEqual(len(item), 7)

@@ -3,7 +3,8 @@
 # This helper consumes already-built release binaries, verifies one exact
 # source/version/build identity, copies them into an ignored generated tree,
 # proves the copies are byte-for-byte identical, and writes a Tauri config
-# overlay that maps only those staged files into `webcodex-runtime`.
+# overlay that maps those staged files into `webcodex-runtime` and the public
+# optional Windows chat bridge into its separate resource directory.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)][string]$BinDir,
@@ -86,6 +87,29 @@ try {
             size = [Int64]$destinationItem.Length
             sha256 = $destinationHash
         }
+    }
+
+    $bridgeSourceDir = Join-Path (Split-Path -Parent $PSScriptRoot) "integrations\codex\live-chat-bridge"
+    $bridgeDir = Join-Path $OutputDir "resources\codex-live-chat-bridge"
+    New-Item -ItemType Directory -Force -Path $bridgeDir | Out-Null
+    foreach ($name in @("bridge.mjs", "acp-proxy.mjs", "tools.json", "install.ps1", "README.md", "README.zh-CN.md")) {
+        $source = Join-Path $bridgeSourceDir $name
+        if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+            throw "missing Desktop chat bridge file: $source"
+        }
+        $sourceItem = Get-Item -LiteralPath $source
+        if (($sourceItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "Desktop chat bridge source must be a regular non-reparse file: $source"
+        }
+        $sourceHash = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+        $destination = Join-Path $bridgeDir $name
+        Copy-Item -LiteralPath $source -Destination $destination
+        $destinationItem = Get-Item -LiteralPath $destination
+        $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($destinationItem.Length -ne $sourceItem.Length -or $destinationHash -ne $sourceHash) {
+            throw "staged Desktop chat bridge byte verification failed for $name"
+        }
+        $resourceMap[[System.IO.Path]::GetFullPath($destination)] = "codex-live-chat-bridge/$name"
     }
 
     $overlay = [ordered]@{

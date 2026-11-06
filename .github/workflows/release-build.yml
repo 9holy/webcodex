@@ -37,6 +37,7 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  WEBCODEX_RELEASE_REPOSITORY: ${{ github.repository }}
 
 jobs:
   preflight:
@@ -288,6 +289,7 @@ jobs:
             -e WEBCODEX_RELEASE_VERSION \
             -e WEBCODEX_GIT_COMMIT \
             -e WEBCODEX_GIT_DIRTY \
+            -e WEBCODEX_RELEASE_REPOSITORY \
             -e BUILD_KIND \
             -e ARCHIVE_STEM \
             -e WEBCODEX_RELEASE_PLATFORM \
@@ -1130,6 +1132,7 @@ jobs:
             -v "$GITHUB_WORKSPACE:/work" -w /work \
             -e VERSION -e SOURCE_SHA -e WEBCODEX_BUILT_AT -e WEBCODEX_RELEASE_VERSION \
             -e WEBCODEX_GIT_COMMIT -e WEBCODEX_GIT_DIRTY \
+            -e WEBCODEX_RELEASE_REPOSITORY \
             -e ARCHIVE_STEM -e PLATFORM -e GITHUB_RUN_ID -e GITHUB_WORKFLOW_REF -e GITHUB_SHA \
             ubuntu:22.04 bash -lc '
               set -euo pipefail
@@ -1584,6 +1587,7 @@ jobs:
             python3 scripts/prepare_release_metadata.py \
               "${metadata_options[@]}" \
               --version "$VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
               --source-sha "$SOURCE_SHA" \
               --workflow-run-id "$GITHUB_RUN_ID" \
               --workflow-ref "$GITHUB_WORKFLOW_REF" \

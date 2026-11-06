@@ -1,4 +1,4 @@
-use super::{UpdateError, UpdateResult};
+use super::{UpdateError, UpdateResult, OFFICIAL_REPOSITORY};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use webcodex_core::desktop_runtime_contract::{
@@ -47,11 +47,11 @@ pub fn valid_notice(notice: &ReleaseNotice) -> bool {
         return false;
     }
     let expected = format!(
-        "https://github.com/yyjeqhc/webcodex/releases/tag/v{}",
+        "https://github.com/{OFFICIAL_REPOSITORY}/releases/tag/v{}",
         notice.version
     );
     let alternate = format!(
-        "https://github.com/yyjeqhc/webcodex/releases/tag/{}",
+        "https://github.com/{OFFICIAL_REPOSITORY}/releases/tag/{}",
         notice.version
     );
     notice.release_url == expected || notice.release_url == alternate
@@ -89,7 +89,7 @@ pub fn project_release(release: &GithubRelease, manifest: Option<&[u8]>) -> Opti
         version: version.clone(),
         runtime_version: version.clone(),
         release_url: format!(
-            "https://github.com/yyjeqhc/webcodex/releases/tag/{}",
+            "https://github.com/{OFFICIAL_REPOSITORY}/releases/tag/{}",
             release.tag_name
         ),
         compatibility: UpdateCompatibility::Unknown,
@@ -162,7 +162,7 @@ pub async fn fetch_latest() -> UpdateResult<Option<ReleaseNotice>> {
             .map_err(|_| UpdateError::NetworkUnavailable)?;
         let bytes = bounded_json(
             &client,
-            "https://api.github.com/repos/yyjeqhc/webcodex/releases/latest",
+            &format!("https://api.github.com/repos/{OFFICIAL_REPOSITORY}/releases/latest"),
         )
         .await?;
         let release: GithubRelease =
@@ -179,7 +179,7 @@ pub async fn fetch_latest() -> UpdateResult<Option<ReleaseNotice>> {
             // Never trust browser_download_url from cache or an unrecognized
             // asset. Construct the fixed official repository/tag asset route.
             let url = format!(
-                "https://github.com/yyjeqhc/webcodex/releases/download/{}/{MANIFEST_NAME}",
+                "https://github.com/{OFFICIAL_REPOSITORY}/releases/download/{}/{MANIFEST_NAME}",
                 release.tag_name
             );
             bounded_json(&client, &url).await.ok()

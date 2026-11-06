@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import stat
 from pathlib import Path, PurePosixPath
 
 import collect_unified_installer_inputs as collector
@@ -21,6 +22,8 @@ TARGETS = {
 MANAGED_INSTALL_FILES = collector.WINDOWS_MANAGED_INSTALL_FILES
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SOURCE_RE = re.compile(r"^[0-9a-f]{40}$")
+BRIDGE_SOURCE = Path(__file__).resolve().parents[1] / "integrations" / "codex" / "live-chat-bridge"
+BRIDGE_FILES = ("bridge.mjs", "acp-proxy.mjs", "tools.json", "install.ps1", "README.md", "README.zh-CN.md")
 
 
 def sha256(path: Path) -> str:
@@ -181,6 +184,21 @@ def prepare(candidate_dir: Path, output_dir: Path, platform_name: str) -> dict:
             if sha256(destination) != manifest["artifacts"][name]["sha256"]:
                 raise ValueError(f"staged WebCodex runtime digest mismatch: {name}")
             resource_map[str(destination.resolve())] = f"webcodex-runtime/{name}.exe"
+        bridge = output_dir / "resources" / "codex-live-chat-bridge"
+        bridge.mkdir()
+        for name in BRIDGE_FILES:
+            source = BRIDGE_SOURCE / name
+            source_info = source.lstat()
+            if not stat.S_ISREG(source_info.st_mode) or (
+                os.name == "nt" and source_info.st_file_attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise ValueError(f"Desktop chat bridge source must be a regular non-reparse file: {name}")
+            source_hash = sha256(source)
+            destination = bridge / name
+            shutil.copyfile(source, destination)
+            if destination.stat().st_size != source_info.st_size or sha256(destination) != source_hash:
+                raise ValueError(f"staged Desktop chat bridge byte verification failed: {name}")
+            resource_map[str(destination.resolve())] = f"codex-live-chat-bridge/{name}"
         config = {
             "version": manifest["version"],
             "bundle": {
