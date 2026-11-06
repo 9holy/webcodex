@@ -1,6 +1,8 @@
 //! Named SSH open/exec/status and immutable transport-binding validation.
 
 use super::*;
+#[cfg(any(unix, windows))]
+use webcodex_persistent_shell::ShellTransport;
 
 impl PersistentShellManager {
     #[cfg(any(unix, windows))]
@@ -89,6 +91,7 @@ impl PersistentShellManager {
         // login directory. It never reaches later commands. No local profile
         // env or init script is sent to the remote host.
         let initialization = remote_shell_bootstrap(effective_cwd.as_deref());
+        let stderr = transport.stderr().clone();
         let transport_box: Box<dyn webcodex_persistent_shell::ShellTransport> = Box::new(transport);
         match self.processes.open_with_transport(
             identity,
@@ -99,7 +102,14 @@ impl PersistentShellManager {
             transport_box,
         ) {
             Ok(summary) => summary_result(summary, "opened", false),
-            Err(error) => shell_error_result(operation, error),
+            Err(error) => {
+                // Inspect retained SSH stderr after cleanup without returning private output.
+                let (stderr, _) = stderr
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .snapshot_since(0);
+                shell_error_result(operation, ssh_initialization_error(error, &stderr))
+            }
         }
     }
 
@@ -252,6 +262,59 @@ impl PersistentShellManager {
     }
 }
 
+#[cfg(any(unix, windows))]
+fn ssh_initialization_error(error: ShellError, stderr: &str) -> ShellError {
+    if !matches!(
+        error.code,
+        "persistent_shell_exited" | "persistent_shell_write_failed"
+    ) {
+        return error;
+    }
+    let mut authentication_failed = false;
+    for line in stderr.lines() {
+        if line == "WARNING: UNPROTECTED PRIVATE KEY FILE!"
+            || line.starts_with("Bad owner or permissions on ")
+            || (line.starts_with("Load key \"") && line.ends_with("\": Permission denied"))
+        {
+            return ShellError::new(
+                "ssh_client_permission_denied",
+                "SSH cannot use its local key or configuration because of file permissions. Check the Runner account's SSH configuration and key ownership and permissions.",
+            );
+        }
+        if line == "Host key verification failed." {
+            return ShellError::new(
+                "ssh_host_key_verification_failed",
+                "SSH host key verification failed before the remote shell opened. Verify the target host key in the Runner account's known_hosts.",
+            );
+        }
+        if let Some((destination, methods)) = line
+            .strip_suffix(").")
+            .and_then(|line| line.rsplit_once(": Permission denied ("))
+        {
+            authentication_failed |= destination.contains('@')
+                && !destination.chars().any(char::is_whitespace)
+                && methods.split(',').all(|method| {
+                    matches!(
+                        method,
+                        "publickey"
+                            | "password"
+                            | "keyboard-interactive"
+                            | "hostbased"
+                            | "gssapi-keyex"
+                            | "gssapi-with-mic"
+                    )
+                });
+        }
+    }
+    if authentication_failed {
+        return ShellError::new(
+            "ssh_authentication_failed",
+            "SSH authentication failed before the remote shell opened. Check the target account and the Runner account's SSH key or agent; non-interactive SSH cannot prompt for credentials.",
+        );
+    }
+    error
+}
+
 /// Confirm the SSH binding this shell opened against is still current. The
 /// binding captures the named resource and the Runner configuration generation
 /// at open time (stored as transport metadata on the shared shell entry), and
@@ -343,4 +406,83 @@ fn validate_ssh_binding_current(
         ));
     }
     Ok(())
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_initialization_reports_precise_errors_without_private_stderr() {
+        for (stderr, expected_code) in [
+            (
+                "private-user@private-host: Permission denied (publickey,password).\r\n",
+                "ssh_authentication_failed",
+            ),
+            (
+                "private-host\nHost key verification failed.\n",
+                "ssh_host_key_verification_failed",
+            ),
+            (
+                "Load key \"/private-key\": Permission denied\nprivate-user@private-host: Permission denied (publickey).",
+                "ssh_client_permission_denied",
+            ),
+            (
+                "Bad owner or permissions on /private-config\n",
+                "ssh_client_permission_denied",
+            ),
+            (
+                "WARNING: UNPROTECTED PRIVATE KEY FILE!\n/private-key",
+                "ssh_client_permission_denied",
+            ),
+        ] {
+            for code in ["persistent_shell_exited", "persistent_shell_write_failed"] {
+                let error = ssh_initialization_error(
+                    ShellError::new(code, "persistent shell exited during initialization"),
+                    &format!("private-command --secret=private-secret\n{stderr}"),
+                );
+                assert_eq!(error.code, expected_code);
+                assert!(error.message.contains("Runner account"));
+                assert!(!error.to_string().contains("private-"));
+            }
+        }
+    }
+
+    #[test]
+    fn ssh_initialization_keeps_unknown_and_remote_command_errors() {
+        let original = ShellError::new(
+            "persistent_shell_exited",
+            "persistent shell exited during initialization",
+        );
+        for stderr in [
+            "",
+            "sh: /private-script: Permission denied",
+            "sudo: a password is required",
+            "sh: private-user@private-host: Permission denied (publickey).",
+            "private-user@private-host: Permission denied (unknown-method).",
+            "Host key verification failed. private-command",
+            "unexpected private-secret",
+        ] {
+            assert_eq!(ssh_initialization_error(original.clone(), stderr), original);
+        }
+    }
+
+    #[test]
+    fn ssh_initialization_preserves_timeout_and_non_initialization_failures() {
+        for code in [
+            "shell_reset_required",
+            "persistent_shell_initialization_failed",
+            "persistent_shell_already_open",
+            "raw_shell_disabled",
+        ] {
+            let original = ShellError::new(code, "original failure");
+            assert_eq!(
+                ssh_initialization_error(
+                    original.clone(),
+                    "private-user@private-host: Permission denied (publickey)."
+                ),
+                original
+            );
+        }
+    }
 }
