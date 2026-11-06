@@ -546,7 +546,7 @@ jobs:
       matrix:
         include:
           - platform: darwin-arm64
-            runner: macos-15
+            runner: macos-26
             host_arch: arm64
             rust_host: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
@@ -587,7 +587,7 @@ jobs:
       matrix:
         include:
           - platform: darwin-arm64
-            runner: macos-15
+            runner: macos-26
             host_arch: arm64
             rust_host: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
