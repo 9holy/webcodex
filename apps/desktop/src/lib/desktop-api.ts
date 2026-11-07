@@ -15,7 +15,7 @@ import type {
 } from "../models/topology";
 
 import type { CloudflareConnectionRequest, CloudflareConnectionStatus, CloudflareOAuthHandoff, McpProviderRequest, TunnelProfileAction, TunnelProfileRequest } from "../models/connections-tools";
-import type { CodingAgentRequest, SshRegisterRequest, SshResourcesSnapshot, SshMutationResult, RunnerCapabilityAuthorizationSnapshot } from "../models/runner-capabilities";
+import type { CodexPrepareRequest, PreparedCodexAgent, CodingAgentRequest, SshRegisterRequest, SshResourcesSnapshot, SshMutationResult, RunnerCapabilityAuthorizationSnapshot } from "../models/runner-capabilities";
 
 export const desktopApi = {
   shellRestoreOnly: () => invoke<boolean>("desktop_shell_restore_only"),
@@ -54,14 +54,15 @@ export const desktopApi = {
   installVerifiedUpdate: (version: string, confirmed: boolean, confirmation: UpdateConfirmation) => invoke<void>("install_verified_update", { version, confirmed, confirmation }),
   remindUpdateLater: () => invoke<UpdateStatus>("remind_update_later"),
   openLatestRelease: () => invoke<void>("open_latest_release"),
+  prepareCodexCodingAgent: (request: CodexPrepareRequest) => invoke<PreparedCodexAgent>("prepare_codex_coding_agent", { request }),
   saveCodingAgent: (request: CodingAgentRequest) => invoke<DesktopState>("save_coding_agent", { request }),
   removeCodingAgent: (target: SettingsTarget, providerId: string, expectedRevision: number) =>
     invoke<DesktopState>("remove_coding_agent", { request: { target, provider_id: providerId, expected_revision: expectedRevision } }),
   sshResources: () => invoke<SshResourcesSnapshot>("ssh_resource_list"),
   runnerCapabilityAuthorization: (expected: SettingsTarget) =>
     invoke<RunnerCapabilityAuthorizationSnapshot>("runner_capability_authorization", { expected }),
-  authorizeRunnerCapabilities: (expected: SettingsTarget) =>
-    invoke<RunnerCapabilityAuthorizationSnapshot>("authorize_runner_capabilities", { request: { expected, confirmed: true } }),
+  authorizeRunnerCapabilities: (expected: SettingsTarget, permissionApproval = false) =>
+    invoke<RunnerCapabilityAuthorizationSnapshot>("authorize_runner_capabilities", { request: { expected, confirmed: true, ...(permissionApproval ? { permission_approval: true } : {}) } }),
   registerSshResource: (request: SshRegisterRequest) => invoke<SshMutationResult>("ssh_resource_register", { request }),
   removeSshResource: (expected: SettingsTarget, observationId: string, name: string) =>
     invoke<SshMutationResult>("ssh_resource_remove", { request: { expected, observation_id: observationId, name } }),

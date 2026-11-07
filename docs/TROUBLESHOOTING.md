@@ -67,7 +67,7 @@ policy, build, and configured provider inventory.
 | `invalid_authority_mode:...` | Check the Server environment. Remove the retired `WEBCODEX_PERMISSION_MODE` variable entirely, even if empty, and select a valid current mode. Inspect locally without sharing environment values. |
 | Read-only Session or Project/path `policy_rejected` | Check the selected Session, exact registered Project, allowed roots, `allow_patch`, and Runner command policy. Select or configure the intended writable Project/Session through its normal owner workflow. Scope grants do not override these restrictions. |
 | `capability_unavailable` or an unavailable provider | Compare the active Runner's build and advertised capabilities with the Server. A saved Desktop setting is not active until the documented Runner restart/reload has applied it. See [Runner capabilities](agent/desktop-runner-capabilities.md). |
-| ACP `waiting_permission` / `permission_request` | The current ACP adapter has no permission-response UI/API. It waits for a bounded deadline and returns ACP `Cancelled` to the provider; `trusted_agent` does not approve this nested request. Observe or explicitly cancel the same Run. Interactive approval requires an integration that implements the provider's approval exchange. See [ACP permission behavior](agent/acp-coding-agent-run.md#8-permission-request-exceptional-path). |
+| ACP `waiting_permission` / `permission_request` | Open Runtime **Approvals** or the Desktop approval panel and review the complete pending action. The current trusted client needs the independently granted `coding_agent:approve`, plus `coding_agent:run` and `project:write`; the exact Runner must advertise `coding_agent_permission_responses`. Select one advertised option or cancel. Timeout/cancellation still returns ACP `Cancelled`; `trusted_agent` never chooses an option. A receipt is not provider completion: observe the same Run. See [ACP permission behavior](agent/acp-coding-agent-run.md#8-permission-request-exceptional-path). |
 | Native `EACCES`, filesystem read-only errors, or OS screen/input permission denial | Inspect the actual Runner service user, filesystem ownership/mounts, and platform permissions. Server scopes cannot grant operating-system access. |
 
 Grant capabilities by workflow. Ordinary coding uses runtime/project/Job scopes;
@@ -81,6 +81,16 @@ For shared-key OAuth, the documented `--oauth-browser-permissions`,
 delegation categories. Existing OAuth clients do not silently acquire new scopes.
 See the [authentication model](AUTH_MODEL.md) for the exact credential and consent
 contracts.
+
+The ordinary Runner-capability grant does not grant ACP approval. Local Desktop
+offers a separate, initially unchecked approval grant for the current trusted
+client. Remote managed clients need an explicit credential/client scope update
+and new OAuth authorization. Giving that approval-capable credential to another
+client also authorizes that client to submit decisions; a scope is not proof that
+a human clicked. The default permission wait is 300 seconds (configurable from
+1 to 600), further limited by the Run's remaining budget. Providers must supply
+complete bounded action details; incomplete or oversized callbacks are cancelled
+rather than presented as abbreviated approval requests.
 
 ### ChatGPT says developer MCP is disabled or unsupported
 

@@ -147,6 +147,32 @@ explicit grant or reauthorization through their supported enrollment/OAuth flow.
 See [Troubleshooting](TROUBLESHOOTING.md) to distinguish scope failures from
 Session, path, native OS and Host restrictions.
 
+## ACP callback approval authorization
+
+Starting or observing a delegated coding Run does not authorize answering its
+provider's permission requests. `respond_coding_agent_permission` requires the
+independent `coding_agent:approve` scope together with `coding_agent:run` and
+`project:write`, the original Run owner, its current writable Project and exact
+Runner/provider instance. Only managed-user PAT/OAuth or bootstrap authority can
+use this entry. Anonymous, shared-key, project-share and Runner-transport
+credentials cannot act as approval principals. `trusted_agent` never selects a
+provider option, and auth-disabled operation supplies no approval principal.
+
+Approval is absent from default pairing, local-user and shared-key profiles and
+from the ordinary SSH/Run capability grant. Local Desktop provides a separate
+opt-in for the exact current trusted client. For managed OAuth, independently
+allow this scope on the client and reauthorize using a credential that can grant
+it; an old grant or refresh does not acquire it. This scope authorizes the client
+holding the credential to submit decisions; it does not prove human presence.
+Copying the same credential to another client gives that client the same approval
+capability.
+
+The direct tool has its own Host review contract and cannot be tunneled through
+`call_runtime_tool`. The fixed Desktop/Runtime approval UI uses the same canonical
+authorization. Each request refers to one live callback and one advertised
+option, with cancellation and expiry failing closed. Full details, lifetime,
+replay and compatibility rules are in the [ACP Run contract](agent/acp-coding-agent-run.md#8-permission-request-exceptional-path).
+
 ## Computer observation and control authorization
 
 Computer Use permissions are intentionally separate from ordinary project/runtime access. Read-only Computer observation requires `computer:read`; effectful control requires `computer:control`; launching applications uses `computer:launch`. Full-display, pointer, and global clipboard operations have additional explicit scopes and are not silently inherited by older credentials.

@@ -1150,6 +1150,13 @@ runner_capabilities! {
         #[serde(default, skip_serializing_if = "is_false")]
         pub coding_agent_runs: bool = false;
     }
+    /// Explicit responses to live ACP callbacks. Older Runners remain
+    /// fail-closed and are never inferred to support approval from Run support.
+    CodingAgentPermissionResponses => RUNNER_CAPABILITY_CODING_AGENT_PERMISSION_RESPONSES("coding_agent_permission_responses"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub coding_agent_permission_responses: bool = false;
+    }
     /// Runner-owned native Tool Plugin gateway and explicit dynamic reload support.
     /// Missing on older Runners is false and is never inferred from MCP inventory.
     NativeToolPlugins => RUNNER_CAPABILITY_NATIVE_TOOL_PLUGINS("native_tool_plugins"),
@@ -3039,6 +3046,7 @@ mod envelope_tests {
                 computer_text_input: false,
                 job_state_reconciliation: false,
                 coding_agent_runs: false,
+                coding_agent_permission_responses: false,
                 native_tool_plugins: false,
                 mcp_gateway_resource_links: false,
                 managed_ssh_resources: false,

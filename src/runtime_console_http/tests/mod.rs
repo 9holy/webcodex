@@ -18,6 +18,7 @@ use salvo::test::{ResponseExt, TestClient};
 use salvo::Service;
 use serde_json::json;
 
+mod coding_agents;
 mod communication;
 mod goals;
 mod http_responses;

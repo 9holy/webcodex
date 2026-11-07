@@ -11,6 +11,8 @@ use tokio::io::AsyncReadExt;
 pub struct GrantRequest {
     pub expected: crate::webcodex::settings::SettingsTarget,
     pub confirmed: bool,
+    #[serde(default)]
+    pub permission_approval: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -19,6 +21,8 @@ pub struct AuthorizationSnapshot {
     pub can_authorize: bool,
     pub coding_agents: bool,
     pub ssh_resources: bool,
+    pub permission_approval_granted: bool,
+    pub permission_approval_grant_available: bool,
 }
 
 #[derive(Deserialize)]
@@ -26,6 +30,8 @@ pub struct AuthorizationSnapshot {
 struct ScopeStatus {
     coding_agents: bool,
     ssh_resources: bool,
+    #[serde(default)]
+    permission_approval: Option<bool>,
 }
 
 /// Read with the current user token, never operator authority. No Runner, SSH
@@ -68,6 +74,9 @@ pub async fn observe(runtime: &StoredRuntime) -> DesktopResult<AuthorizationSnap
         can_authorize: can_authorize(runtime),
         coding_agents: status.coding_agents,
         ssh_resources: status.ssh_resources,
+        permission_approval_granted: status.permission_approval.unwrap_or(false),
+        permission_approval_grant_available: can_authorize(runtime)
+            && status.permission_approval == Some(false),
     })
 }
 
@@ -166,6 +175,8 @@ pub(crate) fn operator_token(content: &str) -> DesktopResult<String> {
 struct NativeGrant<'a> {
     client_id: &'a str,
     user_token_hash: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    permission_approval: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -175,7 +186,11 @@ struct GrantResponse {
     applied_scopes: Vec<String>,
 }
 
-pub async fn grant(runtime: &StoredRuntime, operator_token: String) -> DesktopResult<()> {
+pub async fn grant(
+    runtime: &StoredRuntime,
+    operator_token: String,
+    permission_approval: bool,
+) -> DesktopResult<()> {
     let mut url = local_url(runtime)?;
     url.set_path("/api/pairing/runner-capabilities");
     let runner = runtime
@@ -198,21 +213,25 @@ pub async fn grant(runtime: &StoredRuntime, operator_token: String) -> DesktopRe
         .json(&NativeGrant {
             client_id: runner,
             user_token_hash,
+            permission_approval: permission_approval.then_some(true),
         })
         .send()
         .await;
     drop(operator_token);
     let response: GrantResponse = bounded_response(result.map_err(|_| unavailable())?).await?;
+    let expected_scopes: &[&str] = if permission_approval {
+        &["coding_agent:approve"]
+    } else {
+        &["ssh:local", "coding_agent:run"]
+    };
     if !response.success
-        || response.applied_scopes.len() != 2
-        || !response
-            .applied_scopes
-            .iter()
-            .any(|scope| scope == "ssh:local")
-        || !response
-            .applied_scopes
-            .iter()
-            .any(|scope| scope == "coding_agent:run")
+        || response.applied_scopes.len() != expected_scopes.len()
+        || !expected_scopes.iter().all(|expected| {
+            response
+                .applied_scopes
+                .iter()
+                .any(|actual| actual.as_str() == *expected)
+        })
     {
         return Err(unavailable());
     }

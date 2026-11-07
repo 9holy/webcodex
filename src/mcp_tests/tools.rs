@@ -220,6 +220,12 @@ async fn mcp_tools_list_uses_adaptive_inventory_in_both_schema_modes() {
             if direct.name == crate::plugin_gateway::PLUGIN_TOOL_NAME {
                 continue;
             }
+            if direct.name == "respond_coding_agent_permission" {
+                // This individually reviewed operation requires an explicit
+                // managed approval principal even on the legacy open surface.
+                assert!(!names.contains(&direct.name.as_str()));
+                continue;
+            }
             assert!(
                 names.contains(&direct.name.as_str()),
                 "missing {}",
@@ -250,6 +256,7 @@ async fn mcp_tools_list_uses_adaptive_inventory_in_both_schema_modes() {
         assert!(!stateless_names.contains(&"read_skill_file"));
         assert!(!stateless_names.contains(&"search_memory"));
         assert!(!stateless_names.contains(&"read_tool_trace"));
+        assert!(!stateless_names.contains(&"respond_coding_agent_permission"));
         for tool in stateless_tools {
             let properties = tool["inputSchema"]["properties"].as_object().unwrap();
             assert!(properties.contains_key("_wc"), "{}", tool["name"]);
@@ -272,6 +279,56 @@ async fn mcp_tools_list_uses_adaptive_inventory_in_both_schema_modes() {
                 assert!(tool.get("outputSchema").is_none(), "{}", tool["name"]);
             } else {
                 assert!(tool["outputSchema"].is_object(), "{}", tool["name"]);
+            }
+        }
+
+        // A normal managed client does not acquire approval through Run access.
+        // With the independent scope, the same canonical callable is advertised
+        // on both protocol eras and in both schema modes.
+        for approval_granted in [false, true] {
+            let mut auth = crate::auth::AuthContext::new(crate::auth::AuthKind::ApiToken);
+            auth.user_id = Some("approval-owner".to_string());
+            auth.username = Some("approval-owner".to_string());
+            auth.scopes = [
+                crate::auth::SCOPE_RUNTIME_READ,
+                crate::auth::SCOPE_CODING_AGENT_RUN,
+                crate::auth::SCOPE_PROJECT_WRITE,
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect();
+            if approval_granted {
+                auth.scopes
+                    .push(webcodex_core::authority::SCOPE_CODING_AGENT_APPROVE.to_string());
+            }
+            for stateless in [false, true] {
+                let params = if stateless {
+                    mcp_2026_params(json!({}))
+                } else {
+                    json!({})
+                };
+                let outcome = handle_mcp_request(
+                    &runtime,
+                    rpc("tools/list", Some(Value::from(3004)), params),
+                    Some(&auth),
+                )
+                .await;
+                let McpOutcome::Ok(value) = outcome else {
+                    panic!("expected managed tools/list success");
+                };
+                let advertised = value["result"]["tools"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find(|tool| tool["name"] == "respond_coding_agent_permission");
+                assert_eq!(
+                    advertised.is_some(),
+                    approval_granted,
+                    "compact={compact}, stateless={stateless}, approval_granted={approval_granted}"
+                );
+                if let Some(tool) = advertised {
+                    assert_eq!(tool.get("outputSchema").is_none(), compact);
+                }
             }
         }
     }
@@ -2492,28 +2549,30 @@ fn mcp_coding_agent_permission_guidance_survives_compact_discovery() {
         }
         crate::mcp::discovery::compact_tool(&mut descriptor);
         let description = descriptor["description"].as_str().unwrap();
-        if app_only {
-            assert!(description.len() <= 100);
-            for fact in [
+        let facts: &[&str] = if app_only {
+            // The App consumes the exact typed response schema. Its transport
+            // descriptor retains the selection boundary without duplicating
+            // the full model-facing operational guidance.
+            assert!(description.chars().count() <= 100);
+            &[
                 "same Run",
-                "never redispatch",
+                "pending_permission",
+                "separate approval",
+                "Timeout/cancel fail closed",
+            ]
+        } else {
+            assert_eq!(description, canonical);
+            &[
                 "waiting_permission",
-                "no approval UI/API",
-                "ACP Cancelled",
-            ] {
-                assert!(description.contains(fact), "{fact}: {description}");
-            }
-            continue;
-        }
-        assert_eq!(description, canonical);
-        for fact in [
-            "waiting_permission",
-            "no WebCodex approval UI/API",
-            "answers ACP Cancelled",
-            "same Run",
-            "cancel_coding_agent",
-            "never starts, retries, resumes or approves",
-        ] {
+                "pending_permission",
+                "explicit human review",
+                "separate approval authority",
+                "Timeout/cancel fail closed",
+                "same Run",
+                "never starts, retries, resumes or approves",
+            ]
+        };
+        for &fact in facts {
             assert!(description.contains(fact), "{fact}: {description}");
         }
     }

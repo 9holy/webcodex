@@ -135,6 +135,18 @@ Paths appear as individual rows. Pick a file or folder, or enter its full path. 
 
 Saving paths or registering a Plugin does not start it or silently restart the Runner. **Restart Desktop-owned Runner** explicitly applies saved configuration, interrupts its current work, and keeps Server and regular Tunnel processes. An independently managed Runner must be restarted by its actual owner.
 
+## Configure Codex and review coding approvals
+
+In **Extensions → Coding agents**, choose **Configure Codex (experimental)**, then **Check and prepare**. Desktop finds the installed Python and Codex executables automatically. Python 3.10+ and an existing Codex login or API configuration are required. If detection fails, **Advanced** lets you select the executables; normal setup does not require editing TOML or entering launcher arguments.
+
+After the compatibility check succeeds, choose **Save and enable Codex**. Desktop saves the checked configuration through the same ownership and revision checks as other coding agents. Then use **Restart Runner** in the apply bar. Preparation itself creates a disabled draft and never grants permissions, starts a Run, or restarts a service. Saving a replacement for an existing Desktop-managed Codex profile is explicit. Exact version, launcher and environment-variable names are available under **Details**. An incompatible Codex upgrade requires preparation again; see the [adapter guide](../integrations/codex_app_server/README.md).
+
+Choose **Review approvals** in the same Coding agents page, or **Runtime → Approvals** in the browser Runtime Console, to see pending requests. Each request shows the complete action details, provider, Project, and expiry. Review those details before choosing **Allow once**, **Deny once**, or **Cancel request**. Available one-time choices come from that specific provider request. A receipt means the decision was accepted; the panel observes the Run afterward to show its current state. Expired or already handled requests cannot be submitted as fresh requests, and uncertain writes are not retried automatically.
+
+Delegating work and deciding approval requests are separate permissions. The existing **Authorize Runner capabilities** action grants coding delegation and SSH resource access. **Authorize coding approvals** is a separate local operator action with an unchecked consent box; it grants only approval access, and existing delegation and Project write access are still required. This enables an approval capability for the trusted client, not proof of a human identity. Every client given the same credential shares its approval capability. Existing OAuth client grants are not widened automatically. A remote connection needs authorization from its Server operator.
+
+New installations wait up to five minutes for a permission response, subject to the Run's remaining deadline. An existing shorter saved timeout remains in force. You can change the timeout under a coding agent's **Advanced → Global settings**; supported values are 1–600 seconds.
+
 ## macOS permission guidance
 
 The first foreground launch with missing Desktop permissions presents an explanation with **Request Accessibility**, **Request screen recording**, and a continue action. Background/login launches do not open a permission dialog over other applications. Requests require an explicit button press; denying or dismissing them does not prevent ordinary project work. Recheck from Settings after changing system permissions.

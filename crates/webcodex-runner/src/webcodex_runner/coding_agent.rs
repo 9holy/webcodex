@@ -66,6 +66,7 @@ struct LiveRunState {
     events: VecDeque<CodingAgentEvent>,
     first_retained_sequence: u64,
     next_sequence: u64,
+    permissions: permission::PermissionState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +82,9 @@ struct RunEntry {
     cancel_requested: AtomicBool,
     prompt_dispatch: Mutex<PromptDispatchGateState>,
     terminal_transition: Mutex<()>,
+    /// Live-only pinned root/registry for callback responses. Recovery never
+    /// reconstructs pending callbacks or makes an old decision executable.
+    permission_project: Option<(PathBuf, PathBuf)>,
 }
 
 impl RunEntry {
@@ -91,11 +95,13 @@ impl RunEntry {
                 events: VecDeque::new(),
                 first_retained_sequence: 1,
                 next_sequence: 1,
+                permissions: permission::PermissionState::default(),
             }),
             changed: Condvar::new(),
             cancel_requested: AtomicBool::new(false),
             prompt_dispatch: Mutex::new(PromptDispatchGateState::PrePrompt),
             terminal_transition: Mutex::new(()),
+            permission_project: None,
         }
     }
 
@@ -124,6 +130,7 @@ impl RunEntry {
         let mut state = self.state.lock().unwrap();
         snapshot.observation_revision = state.snapshot.observation_revision.saturating_add(2);
         state.snapshot = snapshot;
+        state.permissions.pending = None;
         event.sequence = state.next_sequence;
         state.next_sequence = state.next_sequence.saturating_add(1);
         state.events.push_back(event);
@@ -203,6 +210,17 @@ impl RunEntry {
             next_sequence: last,
             has_more,
             history_lost,
+            pending_permission: state
+                .permissions
+                .pending
+                .as_ref()
+                .filter(|pending| {
+                    pending.decision.is_none()
+                        && Instant::now() < pending.deadline
+                        && !self.cancel_requested.load(Ordering::Acquire)
+                        && state.snapshot.state == CodingAgentRunState::WaitingPermission
+                })
+                .map(|pending| pending.public.clone()),
         })
     }
 }
@@ -594,7 +612,10 @@ impl CodingAgentManager {
                         request.limit,
                         request.wait_secs,
                     ) {
-                        Ok(observation) => {
+                        Ok(mut observation) => {
+                            if !request.include_pending_permission {
+                                observation.pending_permission = None;
+                            }
                             CodingAgentResponse::success(CodingAgentResponsePayload::Observe {
                                 observation,
                             })
@@ -632,6 +653,9 @@ impl CodingAgentManager {
                         "reobserve",
                     ),
                 }
+            }
+            CodingAgentRequest::RespondPermission(request) => {
+                self.respond_permission(request, project_registry_dir)
             }
         }
     }
@@ -816,7 +840,11 @@ impl CodingAgentManager {
                 "retry_same",
             );
         }
-        let entry = Arc::new(RunEntry::new(record.snapshot(0)));
+        let mut entry = RunEntry::new(record.snapshot(0));
+        entry.permission_project = canonicalize_existing(Path::new(&request.project_root))
+            .ok()
+            .map(|root| (root, project_registry_dir.to_path_buf()));
+        let entry = Arc::new(entry);
         self.runs
             .lock()
             .unwrap()
@@ -862,6 +890,7 @@ impl CodingAgentManager {
 
 mod diagnose;
 mod lifecycle;
+mod permission;
 mod protocol;
 mod run;
 mod setup;

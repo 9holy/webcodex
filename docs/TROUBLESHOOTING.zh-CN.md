@@ -63,7 +63,7 @@ policy、build 和 provider 清单。
 | `invalid_authority_mode:...` | 检查 Server 环境，彻底移除已退役的 `WEBCODEX_PERMISSION_MODE`，即使其值为空也要删除，再选择有效的新模式。只在本机检查，不分享环境变量值。 |
 | 只读 Session，或 Project/path 的 `policy_rejected` | 检查所选 Session、确切注册的 Project、allowed roots、`allow_patch` 及 Runner 命令策略。通过正常所有者流程选择或配置所需的可写 Project/Session；增加 scope 不会覆盖这些限制。 |
 | `capability_unavailable` 或 provider 不可用 | 对比运行中 Runner 的 build、advertised capabilities 与 Server。Desktop 保存的设置要按文档重启/重载 Runner 后才会生效，见 [Runner capabilities](agent/desktop-runner-capabilities.md)。 |
-| ACP `waiting_permission` / `permission_request` | 当前 ACP 适配器没有回传审批的 UI/API，只会在有界等待后向 provider 返回 ACP `Cancelled`；`trusted_agent` 不会批准这个内部请求。观察或显式取消同一个 Run；交互审批需要接完整 provider 的审批交互，见 [ACP 权限行为](agent/acp-coding-agent-run.md#8-permission-request-exceptional-path)。 |
+| ACP `waiting_permission` / `permission_request` | 打开 Runtime **Approvals** 或 Desktop 审批面板，核对完整的待批准动作。当前受信任客户端须独立获得 `coding_agent:approve`，并持有 `coding_agent:run`、`project:write`；确切 Runner 须声明 `coding_agent_permission_responses`。显式选择一个 advertised option 或取消。超时/取消仍向 provider 返回 ACP `Cancelled`，`trusted_agent` 绝不会替你选择。收到决定不代表 provider 已完成执行，继续观察同一 Run。见 [ACP 权限行为](agent/acp-coding-agent-run.md#8-permission-request-exceptional-path)。 |
 | 原生 `EACCES`、文件系统只读，或操作系统拒绝屏幕/输入权限 | 检查实际 Runner 服务用户、文件所有权/挂载方式及系统权限。Server scope 不能授予操作系统权限。 |
 
 按实际工作流授予能力。普通编程使用 runtime/project/Job scopes；Browser、Computer、
@@ -74,6 +74,13 @@ Desktop enrollment 可以在提供该入口时显式使用 **Authorize Runner ca
 `--oauth-browser-permissions`、`--oauth-computer-permissions` 和 `--oauth-local-mcp`
 分别选择独立的委托类别；已有 OAuth client 不会静默获得新 scope。精确的凭据与同意
 规则见[认证模型](AUTH_MODEL.zh-CN.md)。
+
+原有 Runner-capability 授权不会附带 ACP 审批权限。本机 Desktop 为当前受信任客户端
+提供独立、默认未勾选的审批授权；远端 managed client 需显式修改凭据/client scope 并
+重新完成 OAuth 授权。把具有审批权限的凭据交给其他客户端，也意味着授权该客户端提交
+决定；scope 不能证明是谁点击了按钮。默认审批等待为 300 秒（可配置 1–600 秒），同时
+受 Run 剩余时间限制。Provider 必须提供完整、有界的动作详情；信息不完整或超界时会取消
+回调，不会截断成一个仍可批准的请求。
 
 ### ChatGPT 提示 developer MCP 被禁用或当前会话不支持
 

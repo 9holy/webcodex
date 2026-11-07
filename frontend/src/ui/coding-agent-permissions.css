@@ -1,0 +1,18 @@
+.coding-permission-panel { border: 1px solid var(--border, #d9dee7); border-radius: 12px; padding: 20px; margin: 18px 0; min-width: 0; }
+.coding-permission-panel > header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; }
+.coding-permission-panel h2 { font-size: 1.1rem; margin: 0 0 8px; }
+.coding-permission-panel h3 { font-size: 1rem; overflow-wrap: anywhere; margin: 0 0 10px; white-space: pre-wrap; }
+.coding-permission-panel p { line-height: 1.5; }
+.coding-permission-panel > header p { margin: 0; max-width: 65ch; }
+.coding-permission-authority { display: flex; gap: 24px; flex-wrap: wrap; }
+.coding-permission-authority dt { font-size: .85rem; opacity: .8; }
+.coding-permission-authority dd { margin: 4px 0 0; font-weight: 600; }
+.coding-permission-request { border-top: 1px solid var(--border, #d9dee7); padding: 18px 0; }
+.coding-permission-request:last-child { padding-bottom: 0; }
+.coding-permission-context, .coding-permission-note { font-size: .9rem; overflow-wrap: anywhere; }
+.coding-permission-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.coding-permission-actions button { min-height: 40px; display: flex; flex-direction: column; justify-content: center; }
+.coding-permission-actions small { font-size: .75rem; font-weight: normal; max-width: 24ch; overflow-wrap: anywhere; }
+
+.coding-permission-details h4 { font-size: .85rem; margin: 14px 0 6px; }
+.coding-permission-details pre { white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; font-size: .85rem; line-height: 1.6; margin: 0; padding: 12px; border: 1px solid var(--border, #d9dee7); border-radius: 8px; }

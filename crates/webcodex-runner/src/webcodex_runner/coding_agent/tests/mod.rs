@@ -166,12 +166,24 @@ for line in sys.stdin:
    for i in range(300): send({'jsonrpc':'2.0','method':'session/update','params':{'sessionId':'s1','update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'m'+str(i)}}}})
    send({'jsonrpc':'2.0','id':rid,'result':{'stopReason':'end_turn'}})
   elif scenario=='permission':
-   send({'jsonrpc':'2.0','id':99,'method':'session/request_permission','params':{'sessionId':'s1','toolCall':{'toolCallId':'t1','title':'permission','status':'pending'},'options':[{'optionId':'allow','name':'Allow','kind':'allow_once'}]}})
+   send({'jsonrpc':'2.0','id':99,'method':'session/request_permission','params':{'sessionId':'s1','toolCall':{'toolCallId':'t1','title':'permission','status':'pending','content':[{'type':'content','content':{'type':'text','text':'command: inspect\ncwd: '+os.getcwd()}}]},'options':[{'optionId':'allow','name':'Allow','kind':'allow_once'}]}})
    response=json.loads(sys.stdin.readline()); log({'recv':response})
    assert response['result']['outcome']['outcome']=='cancelled'
    send({'jsonrpc':'2.0','id':rid,'result':{'stopReason':'cancelled'}})
+  elif scenario in ('permission_select','permission_select_string'):
+   callback_id='private-permission-99' if scenario=='permission_select_string' else 99
+   send({'jsonrpc':'2.0','id':callback_id,'method':'session/request_permission','params':{'sessionId':'s1','toolCall':{'toolCallId':'t1','title':'permission','status':'pending','content':[{'type':'content','content':{'type':'text','text':'command: inspect\ncwd: '+os.getcwd()}}]},'options':[{'optionId':'allow','name':'Allow once','kind':'allow_once'},{'optionId':'reject','name':'Reject once','kind':'reject_once'}]}})
+   response=json.loads(sys.stdin.readline()); log({'recv':response})
+   assert response.get('id')==callback_id
+   outcome=response['result']['outcome']
+   if outcome['outcome']=='selected':
+    assert outcome['optionId'] in ('allow','reject')
+    stop='end_turn' if outcome['optionId']=='allow' else 'cancelled'
+   else:
+    assert outcome['outcome']=='cancelled'; stop='cancelled'
+   send({'jsonrpc':'2.0','id':rid,'result':{'stopReason':stop}})
   elif scenario=='permission_hold':
-   send({'jsonrpc':'2.0','id':99,'method':'session/request_permission','params':{'sessionId':'s1','toolCall':{'toolCallId':'t1','title':'permission','status':'pending'},'options':[{'optionId':'allow','name':'Allow','kind':'allow_once'}]}})
+   send({'jsonrpc':'2.0','id':99,'method':'session/request_permission','params':{'sessionId':'s1','toolCall':{'toolCallId':'t1','title':'permission','status':'pending','content':[{'type':'content','content':{'type':'text','text':'command: inspect\ncwd: '+os.getcwd()}}]},'options':[{'optionId':'allow','name':'Allow','kind':'allow_once'}]}})
    response=json.loads(sys.stdin.readline()); log({'recv':response})
    assert response['result']['outcome']['outcome']=='cancelled'
    cancel=json.loads(sys.stdin.readline()); log({'recv':cancel}); assert cancel.get('method')=='session/cancel'
@@ -208,7 +220,6 @@ for line in sys.stdin:
     )
 }
 
-#[cfg(unix)]
 fn project_fixture(temp: &TempDir) -> PathBuf {
     let root = temp.path().join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -222,7 +233,6 @@ fn project_fixture(temp: &TempDir) -> PathBuf {
     projects
 }
 
-#[cfg(unix)]
 fn start_request(
     manager: &CodingAgentManager,
     root: &Path,
@@ -306,7 +316,6 @@ fn wait_for_prompt_handoff(manager: &CodingAgentManager, run: &str) {
     }
 }
 
-#[cfg(unix)]
 fn wait_for_terminal_observation(
     manager: &CodingAgentManager,
     run: &str,
@@ -596,6 +605,7 @@ fn prompt_count(temp: &TempDir) -> usize {
         .count()
 }
 mod admission;
+mod codex_app_server;
 mod diagnostics;
 #[cfg(unix)]
 mod dogfood;
@@ -603,6 +613,8 @@ mod dogfood;
 mod lifecycle;
 #[cfg(unix)]
 mod model_gateway;
+#[cfg(unix)]
+mod permission;
 mod protocol;
 mod recovery;
 mod terminal;

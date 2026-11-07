@@ -329,6 +329,7 @@ async fn managed_user_coding_agent_inventory_does_not_cross_owner() {
                 capabilities: crate::test_support::current_runner_capabilities(
                     RunnerCapabilities {
                         coding_agent_runs: true,
+                        coding_agent_permission_responses: false,
                         ..Default::default()
                     },
                 ),

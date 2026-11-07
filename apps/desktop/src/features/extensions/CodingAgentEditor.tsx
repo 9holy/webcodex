@@ -28,7 +28,7 @@ export function CodingAgentEditor({ profile, revision, target, globals, onState,
   const [mapping, setMapping] = useState<Mapping[]>(() => Object.entries(profile?.env_from_env ?? {}).map(([child, runner], row) => ({ row, child, runner })));
   const [manageGlobals, setManageGlobals] = useState(globals !== null);
   const [concurrency, setConcurrency] = useState(globals?.max_concurrent_runs ?? 1);
-  const [timeout, setTimeout] = useState(globals?.permission_timeout_secs ?? 5);
+  const [timeout, setTimeout] = useState(globals?.permission_timeout_secs ?? 300);
   const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null);
   const submitting = useRef(false); const nextRow = useRef(mapping.length);
   const advanced = useRef<HTMLDetailsElement>(null);
@@ -94,7 +94,7 @@ export function CodingAgentEditor({ profile, revision, target, globals, onState,
         <div className="field-group"><label htmlFor="coding-agent-options">{r("allowedOptions")}</label><textarea id="coding-agent-options" value={options} onChange={event => setOptions(event.target.value)} rows={2} maxLength={16384} required disabled={busy} spellCheck={false} /></div>
         <label className="profile-checkbox" htmlFor="coding-global-settings"><input id="coding-global-settings" type="checkbox" checked={manageGlobals} onChange={event => setManageGlobals(event.target.checked)} disabled={busy} />{r("globalSettings")}</label>
         <p>{r("preserveGlobals")}</p>
-        {manageGlobals && <div className="mcp-environment-row"><div className="field-group"><label htmlFor="coding-concurrency">{r("maxConcurrent")}</label><input id="coding-concurrency" type="number" min={1} max={8} value={concurrency} onChange={event => setConcurrency(event.target.valueAsNumber)} required disabled={busy} /></div><div className="field-group"><label htmlFor="coding-timeout">{r("permissionTimeout")}</label><input id="coding-timeout" type="number" min={1} max={60} value={timeout} onChange={event => setTimeout(event.target.valueAsNumber)} required disabled={busy} /></div></div>}
+        {manageGlobals && <div className="mcp-environment-row"><div className="field-group"><label htmlFor="coding-concurrency">{r("maxConcurrent")}</label><input id="coding-concurrency" type="number" min={1} max={8} value={concurrency} onChange={event => setConcurrency(event.target.valueAsNumber)} required disabled={busy} /></div><div className="field-group"><label htmlFor="coding-timeout">{r("permissionTimeout")}</label><input id="coding-timeout" type="number" min={1} max={600} value={timeout} onChange={event => setTimeout(event.target.valueAsNumber)} required disabled={busy} /></div></div>}
       </details>
       {error && <p role="alert" className="workspace-notice">{error === "coding_agent_ownership_conflict" ? r("ownershipConflict") : error === "invalid_fields" ? c("invalidFields") : c("operationFailed")}</p>}
       <div className="connection-actions"><button className="primary-button" type="submit" aria-label="Save" disabled={busy}>{p("save")}</button><button className="secondary-button" type="button" disabled={busy} onClick={onClose}>{p("cancel")}</button></div>

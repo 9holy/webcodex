@@ -70,6 +70,8 @@ export interface ExtensionsSnapshot {
   plugins: { available: boolean; catalog?: { plugins: PluginSummary[]; truncated?: boolean } };
 }
 export type WorkspaceRequest =
+  | { kind: "coding_agent_runs"; expected: import("./topology").SettingsTarget }
+  | ({ kind: "coding_agent_permission"; expected: import("./topology").SettingsTarget } & import("../../../../frontend/src/ui/codingAgentPermissions").CodingAgentPermissionDecision)
   | { kind: "overview" | "projects" | "runner_details" | "browser_status" | "windows" }
   | { kind: "sessions" | "extensions" | "project_git"; project: string }
   | { kind: "session"; project: string; session_id: string }

@@ -138,6 +138,26 @@ capability 或用户的管理员 role，都不会补上凭据缺失的 scope。�
 配对、授权或 OAuth 流程显式授予权限或重新授权。Session、路径、原生操作系统与 Host
 限制的区别见[故障排查](TROUBLESHOOTING.zh-CN.md)。
 
+## ACP callback approval authorization
+
+能够启动或观察委托编程 Run，不代表能够回答 provider 的权限请求。
+`respond_coding_agent_permission` 独立要求 `coding_agent:approve`，同时要求
+`coding_agent:run`、`project:write`、原 Run 所有者、当前可写 Project，以及确切的
+Runner/provider 实例。只有 managed-user PAT/OAuth 或 bootstrap authority 可以使用；
+匿名、shared-key、project-share 与 Runner transport 凭据不能充当审批主体。
+`trusted_agent` 不会替 provider 选择选项，关闭认证也不会自动产生审批主体。
+
+默认配对、local-user/shared-key profile，以及原有 SSH/Run capability 授权都不包含
+审批权限。本机 Desktop 为当前确切受信任客户端提供独立 opt-in。Managed OAuth 需要
+在 client 上独立允许该 scope，并使用有权授予它的凭据重新授权；旧 grant 或 refresh
+不会附带获得权限。这个 scope 授权持有凭据的客户端提交决定，不能证明有人在场；把同一
+凭据交给其他客户端，也会把同样的审批能力交给它。
+
+此 direct tool 有自己的 Host review 契约，不能通过 `call_runtime_tool` 绕行。
+Desktop/Runtime 固定审批界面使用相同的 canonical 授权。每次提交只指向一个仍然有效的
+回调和一个 advertised option；取消或到期都会失败关闭。完整详情、时限、重放与兼容
+规则见 [ACP Run contract](agent/acp-coding-agent-run.md#8-permission-request-exceptional-path)。
+
 ## Computer observation and control authorization
 
 Computer Use 权限有意与普通 project/runtime 权限分开。只读 Computer observation 需要 `computer:read`，会产生 UI effect 的控制需要 `computer:control`，启动应用使用 `computer:launch`。全屏 display、pointer 与全局 clipboard 还拥有额外显式 scope，不会因为旧 credential 已经有普通 Computer 权限就自动继承。

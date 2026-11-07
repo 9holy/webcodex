@@ -770,7 +770,7 @@ fn agent_continuation_setup_descriptions_are_self_guiding_and_individually_revie
 }
 
 #[test]
-fn individual_host_review_is_bounded_to_the_nine_goal_continuation_operations() {
+fn individual_host_review_is_bounded_to_explicit_continuation_and_approval_operations() {
     let mut actual = crate::tool_definition::tool_definitions()
         .filter(|definition| definition.requires_individual_host_review())
         .map(|definition| definition.name)
@@ -785,6 +785,7 @@ fn individual_host_review_is_bounded_to_the_nine_goal_continuation_operations() 
         "update_goal",
         "bootstrap_agent_conversation",
         "consume_agent_wake",
+        "respond_coding_agent_permission",
     ];
     actual.sort_unstable();
     expected.sort_unstable();
@@ -796,11 +797,16 @@ fn individual_host_review_is_bounded_to_the_nine_goal_continuation_operations() 
             definition.adaptive_runtime_direct_reason(),
             Some(crate::tool_definition::ToolDirectReason::HostReview)
         );
-        assert_eq!(
-            definition.requires_permission(),
-            !definition.is_read_like(),
-            "{name}"
-        );
+        if name == "respond_coding_agent_permission" {
+            assert!(!definition.requires_permission(), "Provider callbacks never re-enter Run admission or infer approval from trusted_agent");
+            assert!(!definition.is_read_like());
+        } else {
+            assert_eq!(
+                definition.requires_permission(),
+                !definition.is_read_like(),
+                "{name}"
+            );
+        }
     }
 }
 

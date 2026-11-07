@@ -106,7 +106,8 @@ async fn legacy_coding_only_connection_can_observe_confirm_and_grant_without_ssh
     assert!(app
         .authorize_runner_capabilities(crate::runner_capability_grant::GrantRequest {
             expected: expected.clone(),
-            confirmed: false
+            confirmed: false,
+            permission_approval: false,
         })
         .await
         .is_err());
@@ -120,6 +121,7 @@ async fn legacy_coding_only_connection_can_observe_confirm_and_grant_without_ssh
         .authorize_runner_capabilities(crate::runner_capability_grant::GrantRequest {
             expected,
             confirmed: true,
+            permission_approval: false,
         })
         .await
         .unwrap();

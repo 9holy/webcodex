@@ -43,7 +43,9 @@ impl AppState {
             .await
             .map_err(|_| crate::runner_capability_grant::unavailable())??;
             self.ssh_resources.lock().await.invalidate();
-            let granted = crate::runner_capability_grant::grant(runtime, token).await;
+            let granted =
+                crate::runner_capability_grant::grant(runtime, token, request.permission_approval)
+                    .await;
             let observed = crate::runner_capability_grant::observe(runtime).await;
             granted?;
             observed

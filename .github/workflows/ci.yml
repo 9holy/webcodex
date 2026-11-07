@@ -416,6 +416,10 @@ jobs:
         run: python3 -B -m unittest discover -s plugins/project-knowledge -p 'test_*.py' -v
       - name: Test configured model API ACP adapter
         run: python3 -m unittest discover -s integrations/model_gateway/tests -p 'test_*.py' -v
+      - name: Test bundled Codex app-server provider
+        run: python3 -m unittest discover -s integrations/codex_app_server/tests -p 'test_*.py' -v
+      - name: Test self-contained Codex provider package
+        run: python3 -m unittest scripts.tests.test_codex_app_server_package -v
       # Keep the cheap deterministic release gate ahead of the optional full
       # workspace check so workflow/script drift is reported before a long Cargo pass.
       - name: Test deterministic release contract and tooling
@@ -576,6 +580,12 @@ jobs:
           retention-days: 7
       - name: Run native macOS Runner and Computer tests
         run: cargo test --locked -p webcodex-runner -p webcodex-lsp -p webcodex-computer --features runner-real-process-tests
+      - name: Test bundled Codex provider preparation on macOS
+        run: cargo test --locked -p webcodex-environment codex_app_server
+      - name: Test Codex app-server protocol and package on macOS
+        run: |
+          python3 -m unittest discover -s integrations/codex_app_server/tests -p 'test_*.py' -v
+          python3 -m unittest scripts.tests.test_codex_app_server_package -v
 
   test-macos-desktop:
     needs: changes
@@ -801,6 +811,14 @@ jobs:
         run: python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_desktop_runtime_manifest scripts.tests.test_desktop_frontend_build
       - name: Test optional Codex observation adapter on Windows
         run: python -m unittest discover -s integrations/codex -p 'test_*.py' -v
+      - name: Test bundled Codex provider preparation on Windows
+        run: cargo test --locked -p webcodex-environment codex_app_server
+      - name: Test Codex app-server protocol and package on Windows
+        run: |
+          python -m unittest discover -s integrations/codex_app_server/tests -p 'test_*.py' -v
+          if ($LASTEXITCODE -ne 0) { throw "Codex app-server adapter tests failed" }
+          python -m unittest scripts.tests.test_codex_app_server_package -v
+          if ($LASTEXITCODE -ne 0) { throw "Codex app-server package tests failed" }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22

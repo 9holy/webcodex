@@ -241,6 +241,16 @@ impl ToolCallAuditProjection for ToolCall {
             Self::CodingAgentCancel { run_id } => serde_json::json!({
                 "run_id": run_id,
             }),
+            Self::CodingAgentRespondPermission {
+                run_id,
+                request_id,
+                outcome,
+                ..
+            } => serde_json::json!({
+                "run_id": run_id,
+                "request_id": request_id,
+                "outcome": outcome,
+            }),
             Self::CodingAgentDiagnose {
                 project,
                 provider_id,

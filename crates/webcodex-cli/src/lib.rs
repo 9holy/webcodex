@@ -18,6 +18,7 @@ use std::ffi::OsString;
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
+mod coding_agent;
 mod environment;
 mod webcodex_cli;
 
@@ -109,6 +110,7 @@ fn default_runner_service_scope(effective_root: bool) -> ServiceScope {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CliAction {
     Environment(Vec<String>),
+    CodexPrepare(coding_agent::Options),
     Project(Vec<String>),
     Controller(ControllerCommand),
     ProjectRegister(ProjectRegisterOptions),
@@ -395,6 +397,16 @@ where
             Err(stderr) => CliAction::Exit { code: 2, stdout: String::new(), stderr },
         },
         "environment" => CliAction::Environment(args[1..].to_vec()),
+        "coding-agent" => {
+            if args[1..].iter().any(|arg| matches!(arg.as_str(), "--help" | "-h")) {
+                exit_help(coding_agent::usage())
+            } else {
+                match coding_agent::parse(&args[1..]) {
+                    Ok(options) => CliAction::CodexPrepare(options),
+                    Err(error) => cli_parse_error(error),
+                }
+            }
+        }
         "--help" | "-h" => CliAction::Exit {
             code: 0,
             stdout: usage().to_string(),
@@ -2850,6 +2862,36 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
     match cli_action(args) {
+        CliAction::CodexPrepare(options) => {
+            let json = options.json;
+            let result = tokio::task::spawn_blocking(move || coding_agent::run(options))
+                .await
+                .unwrap_or_else(|_| {
+                    Err(webcodex_environment::SetupDiagnostic::new(
+                        "codex_preparation_worker_failed",
+                        "Codex preparation could not finish",
+                        "Check the selected executables, then prepare the provider again",
+                    ))
+                });
+            match result {
+                Ok(output) => {
+                    println!("{output}");
+                    Ok(())
+                }
+                Err(error) => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({"status": "error", "kind": error.code,
+                            "message": error.message, "next_step": error.recovery})
+                        );
+                    } else {
+                        eprintln!("{error}");
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
         CliAction::Environment(args) => match environment::run(&args).await {
             Ok(output) => {
                 println!("{output}");

@@ -242,6 +242,23 @@ def _classify_path(risk: Risk, path: str) -> None:
     ):
         _mark_windows_core(risk, "codex-adapter")
         return
+    if path.startswith("integrations/codex_app_server/") or path in {
+        "scripts/package_codex_app_server_adapter.py",
+        "scripts/tests/test_codex_app_server_package.py",
+    }:
+        # Both core lanes check the embedded provider, native preparation and
+        # Python package. The Runner also consumes its runtime/shared fixtures.
+        _mark_windows_core(risk, "codex-app-server")
+        _mark_macos(risk, "codex-app-server")
+        if path in {
+            "integrations/codex_app_server/adapter.py",
+            "integrations/codex_app_server/compatibility.py",
+            "integrations/codex_app_server/__main__.py",
+            "integrations/codex_app_server/tests/fake_codex.py",
+            "integrations/codex_app_server/tests/schema_fixture.py",
+        }:
+            _mark_windows_runner(risk, "codex-app-server")
+        return
     if path == "scripts/check_production_warnings.py":
         # This gate executes directly in Linux tooling, Windows core and macOS
         # core. Linux tooling is unconditional, but an owner PR that changes the

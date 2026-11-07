@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { fireEvent, queryHelpers, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, queryHelpers, render, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { LocaleProvider } from "../i18n/locale";
 import { DesktopMantineProvider } from "../components/DesktopMantineProvider";
@@ -11,7 +11,7 @@ import { CodingAgentsPanel } from "./extensions/CodingAgentsPanel";
 import { SshResourcesPanel } from "./extensions/SshResourcesPanel";
 import { RunnerCapabilityAuthorization } from "./extensions/RunnerCapabilityAuthorization";
 
-const api = vi.hoisted(() => ({ saveCodingAgent: vi.fn(), removeCodingAgent: vi.fn(), runnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), registerSshResource: vi.fn(), removeSshResource: vi.fn(), authorizeRunnerCapabilities: vi.fn(), runnerCapabilityAuthorization: vi.fn() }));
+const api = vi.hoisted(() => ({ prepareCodexCodingAgent: vi.fn(), saveCodingAgent: vi.fn(), removeCodingAgent: vi.fn(), runnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), registerSshResource: vi.fn(), removeSshResource: vi.fn(), authorizeRunnerCapabilities: vi.fn(), runnerCapabilityAuthorization: vi.fn() }));
 const query = vi.hoisted(() => vi.fn());
 vi.mock("../lib/desktop-api", () => ({ desktopApi: api }));
 vi.mock("./workspace/WorkspaceContext", () => ({ workspaceQuery: query }));
@@ -330,4 +330,85 @@ it("provides every capability label in every supported locale", () => {
     expect(values).toHaveLength(PRODUCT_LOCALES.length);
     for (const locale of PRODUCT_LOCALES) expect(runnerCapabilitiesText(locale, key as keyof typeof RUNNER_CAPABILITIES_MESSAGES).trim()).not.toBe("");
   }
+});
+
+
+describe("Desktop approval and Codex setup flows", () => {
+  it("explicitly grants only approval capability and submits the exact selected callback through the native bridge", async () => {
+    let granted = false;
+    const authorization = () => ({ target, can_authorize: true, coding_agents: true, ssh_resources: false, permission_approval_granted: granted, permission_approval_grant_available: !granted });
+    api.runnerCapabilityAuthorization.mockImplementation(async () => authorization());
+    api.authorizeRunnerCapabilities.mockImplementation(async () => { granted = true; return authorization(); });
+    query.mockImplementation(async request => request.kind === "coding_agent_runs" ? {
+      authorization: { can_run: true, can_approve: granted },
+      runs: [{ run_id: "wc_agent_run_test", runtime_project_id: "agent:fixture:project", provider_id: "codex", state: "waiting_permission", observation_revision: 2, pending_permission: {
+        request_id: "wc_agent_permission_test", label: "Run the tests?", details: "npm test\nWorking directory: /fixture", expires_at: Math.floor(Date.now()/1000) + 300,
+        options: [{ option_id: "exact-provider-choice", name: "Approve command", kind: "allow_once" }],
+      } }],
+    } : request.kind === "coding_agent_permission" ? { success: true, output: { response_accepted: true } } : { client_id: "fixture", connected: true, coding_agent_providers: [] });
+    render(<Harness />); fireEvent.click(screen.getByRole("button", { name: "Review Coding Approvals" }));
+    await screen.findByText("Run the tests?");
+    expect(screen.getByRole("article", { name: "Run the tests?" }).querySelector("pre")?.textContent).toBe("npm test\nWorking directory: /fixture");
+    expect(screen.getByRole("button", { name: /Allow once/ })).toBeDisabled();
+    expect(api.authorizeRunnerCapabilities).not.toHaveBeenCalled();
+    fireEvent.click(await screen.findByRole("button", { name: "Authorize Coding Approvals" }));
+    const dialog = screen.getByRole("dialog"); const consent = within(dialog).getByRole("checkbox");
+    expect(consent).not.toBeChecked();
+    expect(within(dialog).getByText(/Any client that holds this credential/)).toBeInTheDocument();
+    const confirm = within(dialog).getByRole("button", { name: "Confirm Authorize Coding Approvals" });
+    expect(confirm).toBeDisabled(); fireEvent.click(consent); fireEvent.click(confirm); fireEvent.click(confirm);
+    await waitFor(() => expect(api.authorizeRunnerCapabilities).toHaveBeenCalledExactlyOnceWith(target, true));
+    await waitFor(() => expect(screen.getByRole("button", { name: /Allow once/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: /Allow once/ }));
+    await screen.findByText("One-time approval received — waiting for the agent to continue");
+    expect(query.mock.calls.filter(([request]) => request.kind === "coding_agent_permission")).toEqual([[{
+      kind: "coding_agent_permission", expected: target, run_id: "wc_agent_run_test", request_id: "wc_agent_permission_test", outcome: "selected", option_id: "exact-provider-choice",
+    }]]);
+    expect(api.restartOwnedRunner).not.toHaveBeenCalled();
+  });
+
+  it("prepares Codex automatically, saves and enables only on the next explicit action, then exposes Runner restart", async () => {
+    const generated: CodingAgentProfile = { provider_id: "codex-app-server", name: "Codex app-server (experimental)", executable: "/fixture/python3", args: ["/fixture/adapter.py", "serve", "--experimental", "--receipt", "/fixture/receipt.json"], enabled: false, env_from_env: { PATH: "PATH", HOME: "HOME" }, allowed_config_options: [] };
+    api.prepareCodexCodingAgent.mockResolvedValue({ target, expected_revision: 0, codex_version: "0.1.0-fixture", profile: generated });
+    const saved = state(); saved.coding_agents = { ...EMPTY_CODING_AGENTS, revision: 1, profiles: [{ ...generated, enabled: true }], restart_required: true };
+    api.saveCodingAgent.mockResolvedValue(saved);
+    render(<Harness />); fireEvent.click(screen.getByRole("button", { name: "Configure Codex" }));
+    expect(api.prepareCodexCodingAgent).not.toHaveBeenCalled();
+    expect(screen.getByLabelText("Python Executable").closest("details")).not.toHaveAttribute("open");
+    fireEvent.click(screen.getByRole("button", { name: "Prepare Codex Configuration" }));
+    const save = await screen.findByRole("button", { name: "Save and Enable Codex" });
+    expect(api.prepareCodexCodingAgent).toHaveBeenCalledExactlyOnceWith({ target, expected_revision: 0, codex_args: [] });
+    expect(api.saveCodingAgent).not.toHaveBeenCalled(); expect(api.authorizeRunnerCapabilities).not.toHaveBeenCalled(); expect(api.restartOwnedRunner).not.toHaveBeenCalled();
+    fireEvent.click(save); fireEvent.click(save);
+    await waitFor(() => expect(api.saveCodingAgent).toHaveBeenCalledExactlyOnceWith({ target, expected_revision: 0, previous_id: null, profile: { ...generated, enabled: true }, global_settings: null }));
+    await screen.findByText("Saved · Restart Runner to apply");
+    expect(generated.enabled).toBe(false); expect(api.restartOwnedRunner).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "Restart Runner" })).toBeEnabled();
+  });
+
+  it("does not expose arbitrary diagnostic text or retry unavailable Python automatically", async () => {
+    api.prepareCodexCodingAgent.mockRejectedValue({code: "codex_python_unavailable", message: "private-diagnostic-sentinel"});
+    render(<Harness />); fireEvent.click(screen.getByRole("button", { name: "Configure Codex" }));
+    fireEvent.click(screen.getByRole("button", { name: "Prepare Codex Configuration" }));
+    await screen.findByText(/Python 3.10\+ was not found/);
+    expect(screen.queryByText(/private-diagnostic-sentinel/)).not.toBeInTheDocument();
+    expect(api.prepareCodexCodingAgent).toHaveBeenCalledTimes(1); expect(api.saveCodingAgent).not.toHaveBeenCalled();
+  });
+
+  it("rejects more than the canonical eight launcher arguments before native setup", async () => {
+    render(<Harness />); fireEvent.click(screen.getByRole("button", { name: "Configure Codex" }));
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.change(screen.getByLabelText("Codex launcher arguments (JSON)"), {target:{value:JSON.stringify(Array(9).fill("argument"))}});
+    fireEvent.click(screen.getByRole("button", { name: "Prepare Codex Configuration" }));
+    await screen.findByRole("alert"); expect(api.prepareCodexCodingAgent).not.toHaveBeenCalled();
+  });
+
+  it("discards an old connection's prepared Codex profile before it can be saved", async () => {
+    let finish!: (value: unknown) => void; api.prepareCodexCodingAgent.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const draw = (value: RunnerSettings) => <LocaleProvider><DesktopMantineProvider><CodingAgentsPanel state={state()} onState={() => undefined} settings={value} onRestarted={() => undefined} /></DesktopMantineProvider></LocaleProvider>;
+    const view = render(draw(settings)); fireEvent.click(screen.getByRole("button", {name:"Configure Codex"})); fireEvent.click(screen.getByRole("button", {name:"Prepare Codex Configuration"}));
+    view.rerender(draw({...settings,target:{...target,client_id:"replacement"}}));
+    await act(async () => finish({ target, expected_revision: 0, codex_version: "fixture", profile: { ...profile, enabled: false } }));
+    expect(screen.queryByRole("button",{name:"Save and Enable Codex"})).not.toBeInTheDocument(); expect(api.saveCodingAgent).not.toHaveBeenCalled();
+  });
 });

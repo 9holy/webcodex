@@ -5,6 +5,7 @@ use super::*;
 use crate::runtime_http::require_runtime;
 #[cfg(test)]
 use serde_json::Value;
+use webcodex_core::authority::SCOPE_CODING_AGENT_APPROVE;
 use webcodex_store::Database;
 
 /// Observe only this credential's two capability scopes. This is independent of
@@ -45,6 +46,7 @@ pub(crate) async fn runner_capability_authorization(
     res.render(Json(json!({
         "coding_agents": auth.has_scope(SCOPE_CODING_AGENT_RUN),
         "ssh_resources": auth.has_scope(SCOPE_SSH_LOCAL),
+        "permission_approval": auth.has_scope(SCOPE_CODING_AGENT_APPROVE),
     })));
 }
 
@@ -54,6 +56,10 @@ struct GrantRequest {
     client_id: String,
     /// A native-only lookup; neither plaintext credential nor hash is returned.
     user_token_hash: String,
+    /// Explicit independent opt-in. True selects only callback approval;
+    /// omission preserves the existing SSH/Run grant and never adds approval.
+    #[serde(default)]
+    permission_approval: bool,
 }
 
 #[handler]
@@ -130,10 +136,11 @@ pub(crate) async fn grant_runner_capabilities(
         &body.user_token_hash,
         &owner,
         chrono::Utc::now().timestamp(),
+        body.permission_approval,
     ) {
         Ok(changed) => res.render(Json(json!({
             "success":true, "changed":changed,
-            "applied_scopes":[SCOPE_SSH_LOCAL, SCOPE_CODING_AGENT_RUN],
+            "applied_scopes": selected_grant_scopes(body.permission_approval),
         }))),
         Err(status) => grant_error(res, status),
     }
@@ -144,6 +151,7 @@ fn grant_for_owner(
     token_hash: &str,
     runner_owner: &str,
     now: i64,
+    permission_approval: bool,
 ) -> Result<bool, StatusCode> {
     let key = db
         .get_api_key_by_hash(token_hash)
@@ -166,7 +174,7 @@ fn grant_for_owner(
         .map(str::to_owned)
         .collect();
     let before = scopes.len();
-    for scope in [SCOPE_SSH_LOCAL, SCOPE_CODING_AGENT_RUN] {
+    for &scope in selected_grant_scopes(permission_approval) {
         if !scopes.iter().any(|existing| existing == scope) {
             scopes.push(scope.to_owned());
         }
@@ -187,6 +195,14 @@ fn grant_for_owner(
         Ok(true)
     } else {
         Err(StatusCode::CONFLICT)
+    }
+}
+
+fn selected_grant_scopes(permission_approval: bool) -> &'static [&'static str] {
+    if permission_approval {
+        &[SCOPE_CODING_AGENT_APPROVE]
+    } else {
+        &[SCOPE_SSH_LOCAL, SCOPE_CODING_AGENT_RUN]
     }
 }
 

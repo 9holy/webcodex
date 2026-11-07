@@ -338,6 +338,7 @@ fn event_ring_capacity_and_continuation_are_bounded() {
             after_sequence: Some(latest.saturating_add(1)),
             limit: 32,
             wait_secs: 0,
+            include_pending_permission: false,
         }),
         &projects,
     );
@@ -858,11 +859,12 @@ fn config_and_permission_paths_are_fail_closed() {
         .as_deref()
         .expect("permission limitation guidance");
     for fact in [
-        "no approval UI/API",
-        "bounded deadline",
-        "answers ACP Cancelled",
+        "explicit decision",
+        "pending_permission",
+        "respond_coding_agent_permission",
+        "Timeout and Run cancellation answer ACP Cancelled",
+        "trusted_agent never approves",
         "Observe this same Run",
-        "cancel_coding_agent",
         "do not redispatch",
     ] {
         assert!(text.contains(fact), "{fact}: {text}");

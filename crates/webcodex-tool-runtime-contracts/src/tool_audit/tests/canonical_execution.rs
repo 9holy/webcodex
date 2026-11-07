@@ -2,6 +2,22 @@ use super::*;
 use serde_json::json;
 
 #[test]
+fn permission_response_audit_retains_correlation_without_provider_option_payload() {
+    let call = ToolCall::CodingAgentRespondPermission {
+        run_id: "wc_agent_run_test".into(),
+        request_id: "wc_agent_permission_test".into(),
+        outcome: webcodex_core::coding_agent::CodingAgentPermissionOutcome::Selected,
+        option_id: Some("PRIVATE_PROVIDER_OPTION".into()),
+    };
+    let audit = call.session_log_arguments();
+    assert_eq!(
+        audit,
+        json!({"run_id":"wc_agent_run_test","request_id":"wc_agent_permission_test","outcome":"selected"})
+    );
+    assert!(!audit.to_string().contains("PRIVATE_PROVIDER_OPTION"));
+}
+
+#[test]
 fn validation_audit_keeps_bounded_counts_and_assertion_without_payloads() {
     let output = json!({
         "execution_state": "completed",

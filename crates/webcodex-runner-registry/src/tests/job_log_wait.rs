@@ -16,6 +16,7 @@ fn sequenced_job_capabilities() -> RunnerCapabilities {
         jobs: true,
         job_state_reconciliation: true,
         coding_agent_runs: false,
+        coding_agent_permission_responses: false,
         structured_validation_argv: true,
         ..Default::default()
     }

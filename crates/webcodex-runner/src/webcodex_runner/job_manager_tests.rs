@@ -6006,7 +6006,7 @@ fn job_manager_stop_all_clears_queue_and_requests_running_stop() {
     rejected_request.job_id = Some("job-after-shutdown".to_string());
 
     jobs.enqueue(
-        sink,
+        sink.clone(),
         PendingJobStart::from_wire(
             1,
             policy.clone(),
@@ -6036,9 +6036,25 @@ fn job_manager_stop_all_clears_queue_and_requests_running_stop() {
         "queued job started during shutdown"
     );
 
-    let (rejected_sink, mut rejected_rx) = ws_sink("ws-client");
+    // Process shutdown queues cancellation evidence for asynchronous delivery.
+    // Observe that terminal result on the same transport before exercising
+    // post-shutdown admission. Installing another sink here would reconnect the
+    // manager and legitimately deliver old pending evidence on the new stream.
+    let cancelled = match wait_for_job_envelope(&mut rx, "queued cancellation was sent") {
+        RunnerEnvelope::JobUpdate { payload } => payload,
+        other => panic!("expected job_update, got {:?}", other.kind()),
+    };
+    assert_eq!(cancelled.job_id, "queued-job");
+    assert_eq!(cancelled.status, "failed");
+    assert!(cancelled.finished);
+    assert_eq!(cancelled.error.as_deref(), Some("runner is shutting down"));
+    assert_eq!(
+        cancelled.command_execution_state,
+        Some(ShellCommandExecutionState::NotStarted)
+    );
+
     jobs.enqueue(
-        rejected_sink,
+        sink,
         PendingJobStart::from_wire(
             1,
             policy.clone(),
@@ -6051,7 +6067,7 @@ fn job_manager_stop_all_clears_queue_and_requests_running_stop() {
     assert!(jobs.queued.lock().unwrap().is_empty());
     let rejected = (0..2)
         .find_map(
-            |_| match wait_for_job_envelope(&mut rejected_rx, "shutdown update was sent") {
+            |_| match wait_for_job_envelope(&mut rx, "shutdown update was sent") {
                 RunnerEnvelope::JobUpdate { payload } if payload.finished => Some(payload),
                 RunnerEnvelope::JobUpdate { .. } => None,
                 other => panic!("expected job_update, got {:?}", other.kind()),

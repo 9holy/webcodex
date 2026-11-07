@@ -92,7 +92,10 @@ async fn capability_status_observes_scopes_without_runner_or_ssh_inventory_or_gr
             .await;
         assert_eq!(response.status_code.unwrap(), StatusCode::OK);
         let value: Value = response.take_json().await.unwrap();
-        assert_eq!(value, json!({"coding_agents":coding,"ssh_resources":ssh}));
+        assert_eq!(
+            value,
+            json!({"coding_agents":coding,"ssh_resources":ssh,"permission_approval":false})
+        );
     }
 }
 
@@ -180,16 +183,45 @@ fn fixture() -> (tempfile::TempDir, Database, ApiKeyRecord) {
 fn operator_grant_is_idempotent_and_preserves_token_identity_expiry_and_existing_scopes() {
     let (_dir, db, before) = fixture();
     let hash = hash_token("fixture-user-token");
-    assert!(grant_for_owner(&db, &hash, "alice", 10).unwrap());
+    assert!(grant_for_owner(&db, &hash, "alice", 10, false).unwrap());
     let after = db.get_api_key_by_hash(&hash).unwrap().unwrap();
     assert!(after.scopes.ends_with("ssh:local coding_agent:run"));
+    assert!(!after
+        .scopes
+        .split_ascii_whitespace()
+        .any(|scope| scope == SCOPE_CODING_AGENT_APPROVE));
     assert!(after.scopes.starts_with(&before.scopes));
     let mut expected = serde_json::to_value(before).unwrap();
     let mut actual = serde_json::to_value(after).unwrap();
     expected.as_object_mut().unwrap().remove("scopes");
     actual.as_object_mut().unwrap().remove("scopes");
     assert_eq!(actual, expected);
-    assert!(!grant_for_owner(&db, &hash, "alice", 10).unwrap());
+    assert!(!grant_for_owner(&db, &hash, "alice", 10, false).unwrap());
+}
+
+#[test]
+fn approval_opt_in_is_independent_idempotent_and_does_not_grant_run_or_ssh() {
+    let (_dir, db, before) = fixture();
+    let hash = hash_token("fixture-user-token");
+    assert!(grant_for_owner(&db, &hash, "alice", 10, true).unwrap());
+    assert!(!grant_for_owner(&db, &hash, "alice", 10, true).unwrap());
+    let after = db.get_api_key_by_hash(&hash).unwrap().unwrap();
+    assert_eq!(
+        after.scopes,
+        format!("{} coding_agent:approve", before.scopes)
+    );
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.expires_at, before.expires_at);
+    assert_eq!(selected_grant_scopes(true), &[SCOPE_CODING_AGENT_APPROVE]);
+    assert!(!selected_grant_scopes(false).contains(&SCOPE_CODING_AGENT_APPROVE));
+    assert_eq!(
+        grant_for_owner(&db, &hash, "bob", 10, true),
+        Err(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        grant_for_owner(&db, &hash, "alice", 1000, true),
+        Err(StatusCode::FORBIDDEN)
+    );
 }
 
 #[test]
@@ -197,11 +229,11 @@ fn operator_grant_rejects_another_runner_owner_and_nonlive_or_transport_keys() {
     let (_dir, db, original) = fixture();
     let hash = hash_token("fixture-user-token");
     assert_eq!(
-        grant_for_owner(&db, &hash, "bob", 10),
+        grant_for_owner(&db, &hash, "bob", 10, false),
         Err(StatusCode::FORBIDDEN)
     );
     assert_eq!(
-        grant_for_owner(&db, &hash, "alice", 1000),
+        grant_for_owner(&db, &hash, "alice", 1000, false),
         Err(StatusCode::FORBIDDEN)
     );
     for (index, mut key) in [
@@ -228,7 +260,7 @@ fn operator_grant_rejects_another_runner_owner_and_nonlive_or_transport_keys() {
         let hash = hash_token(&format!("fixture-{index}"));
         db.insert_api_key(&key, &hash).unwrap();
         assert_eq!(
-            grant_for_owner(&db, &hash, "alice", 10),
+            grant_for_owner(&db, &hash, "alice", 10, false),
             Err(StatusCode::FORBIDDEN)
         );
     }
@@ -249,7 +281,7 @@ fn operator_grant_scope_write_is_fenced_against_stale_or_revoked_keys() {
         .compare_and_swap_user_key_scopes(&key.id, &key.user_id, &key.scopes, "ssh:local", 10)
         .unwrap());
     assert_eq!(
-        grant_for_owner(&db, &hash_token("fixture-user-token"), "alice", 10),
+        grant_for_owner(&db, &hash_token("fixture-user-token"), "alice", 10, false),
         Err(StatusCode::FORBIDDEN)
     );
 }

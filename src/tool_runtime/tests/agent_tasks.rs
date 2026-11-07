@@ -69,6 +69,7 @@ async fn register_coding_agent_task_runner(
                 instance_id,
                 RunnerCapabilities {
                     coding_agent_runs: true,
+                    coding_agent_permission_responses: false,
                     ..Default::default()
                 },
             )

@@ -941,6 +941,26 @@ pub enum ToolCall {
         #[schemars(regex(pattern = "^wc_agent_run_[A-Za-z0-9_.-]+$"))]
         run_id: String,
     },
+    #[serde(rename = "respond_coding_agent_permission")]
+    CodingAgentRespondPermission {
+        /// Exact caller-owned Run. This never starts or resumes a prompt.
+        #[schemars(regex(pattern = "^wc_agent_run_[A-Za-z0-9_.-]+$"))]
+        run_id: String,
+        /// Exact opaque pending_permission.request_id from observing this Run.
+        /// It is a one-use callback identity, not a bearer grant.
+        #[schemars(regex(pattern = "^wc_agent_permission_[A-Za-z0-9_.-]+$"))]
+        #[schemars(length(max = 96))]
+        request_id: String,
+        /// Explicit user decision. selected requires exactly one advertised
+        /// option_id; cancelled forbids it. Never infer a choice from authority mode.
+        outcome: webcodex_core::coding_agent::CodingAgentPermissionOutcome,
+        /// Required only for selected; copy the exact advertised option id after
+        /// reviewing the complete pending action details. Reuse only the same
+        /// request and decision after uncertainty; a changed replay is rejected.
+        #[serde(default)]
+        #[schemars(length(min = 1, max = 128))]
+        option_id: Option<String>,
+    },
     #[serde(rename = "diagnose_coding_agent")]
     CodingAgentDiagnose {
         /// Exact registered Project id. It selects the authorized Project whose configured Runner

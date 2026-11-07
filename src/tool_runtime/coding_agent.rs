@@ -29,6 +29,10 @@ use webcodex_core::coding_agent::{
     CODING_AGENT_TIMEOUT_MAX_SECS, CODING_AGENT_TIMEOUT_MIN_SECS,
 };
 
+mod operator;
+
+mod permission;
+
 const IDEMPOTENCY_KEY_MAX_BYTES: usize = 256;
 const START_RESPONSE_WAIT_SECS: u64 = 32;
 const CONTROL_RESPONSE_WAIT_SECS: u64 = 65;
@@ -800,50 +804,77 @@ impl ToolRuntime {
         wait_secs: Option<u64>,
         auth: Option<&AuthContext>,
     ) -> ToolResult {
+        match self
+            .coding_agent_observe_typed(
+                run_id,
+                after_observation_token,
+                wait_secs,
+                Duration::from_secs(CONTROL_RESPONSE_WAIT_SECS),
+                auth,
+            )
+            .await
+        {
+            Ok((observation, reset)) => ToolResult::ok(observe_projection(
+                observation,
+                self.coding_agent_runs.as_ref(),
+                reset,
+            )),
+            Err(error) => error,
+        }
+    }
+
+    pub(super) async fn coding_agent_observe_typed(
+        &self,
+        run_id: String,
+        after_observation_token: Option<String>,
+        wait_secs: Option<u64>,
+        response_wait: Duration,
+        auth: Option<&AuthContext>,
+    ) -> Result<(CodingAgentObserveResult, bool), ToolResult> {
         let wait_secs = wait_secs
             .unwrap_or(0)
             .min(CODING_AGENT_OBSERVE_WAIT_MAX_SECS);
         let authority = match stable_principal(auth) {
             Ok(principal) => authority_fingerprint(&principal),
             Err(error) => {
-                return coding_agent_error(
+                return Err(coding_agent_error(
                     "coding_agent_identity_unavailable",
                     error,
                     "not_started",
                     RecoveryKind::FixInput,
                     Some(&run_id),
-                )
+                ))
             }
         };
         let binding = match self.reconcile_run(&run_id, &authority, auth).await {
             Ok(Some(binding)) => binding,
             Ok(None) => {
-                return coding_agent_error(
+                return Err(coding_agent_error(
                     "unknown_coding_agent_run",
                     "CodingAgentRun is not visible to this caller",
                     "not_started",
                     RecoveryKind::Reobserve,
                     Some(&run_id),
-                )
+                ))
             }
             Err(error) => {
-                return coding_agent_error(
+                return Err(coding_agent_error(
                     "coding_agent_observation_conflict",
                     error,
                     "outcome_unknown",
                     RecoveryKind::Reconcile,
                     Some(&run_id),
-                )
+                ))
             }
         };
         if binding.authority_fingerprint != authority {
-            return coding_agent_error(
+            return Err(coding_agent_error(
                 "unknown_coding_agent_run",
                 "CodingAgentRun is not visible to this caller",
                 "not_started",
                 RecoveryKind::Reobserve,
                 Some(&run_id),
-            );
+            ));
         }
         self.record_coding_agent_lifecycle_if_needed(&run_id).await;
         let (after_sequence, token_reset) = match after_observation_token.as_deref() {
@@ -858,13 +889,13 @@ impl ToolRuntime {
                     Err(TokenError::Invalid) => {
                         // Rejected locally after the binding was authorized.
                         // The token failure says nothing about prompt dispatch.
-                        return coding_agent_error(
+                        return Err(coding_agent_error(
                             "invalid_observation_token",
                             "observation token is invalid or belongs to another Run",
                             self.current_retained_execution_state(&binding).await,
                             RecoveryKind::FixInput,
                             Some(&run_id),
-                        );
+                        ));
                     }
                 }
             }
@@ -876,7 +907,7 @@ impl ToolRuntime {
                     .await
                     .unwrap_or_default()
         {
-            return ToolResult::ok(observe_projection(
+            return Ok((
                 CodingAgentObserveResult {
                     run: binding.snapshot.clone(),
                     events: Vec::new(),
@@ -884,8 +915,8 @@ impl ToolRuntime {
                     next_sequence: after_sequence.unwrap_or(0),
                     has_more: false,
                     history_lost: true,
+                    pending_permission: None,
                 },
-                self.coding_agent_runs.as_ref(),
                 token_reset,
             ));
         }
@@ -894,6 +925,17 @@ impl ToolRuntime {
             after_sequence,
             limit: CODING_AGENT_MAX_EVENTS_PER_RESPONSE,
             wait_secs,
+            include_pending_permission: self
+                .runner_registry
+                .get_runner_view_for_auth(
+                    &binding.client_id,
+                    crate::runner_http::runner_access_from_auth(auth).as_ref(),
+                )
+                .await
+                .is_some_and(|client| {
+                    client.runner_instance_id == binding.runner_instance_id
+                        && client.capabilities.coding_agent_permission_responses
+                }),
         });
         let (request_id, receiver) = match self
             .runner_registry
@@ -911,7 +953,7 @@ impl ToolRuntime {
             Ok(value) => value,
             Err(error) => {
                 if binding.snapshot.state.terminal() {
-                    return ToolResult::ok(observe_projection(
+                    return Ok((
                         CodingAgentObserveResult {
                             run: binding.snapshot.clone(),
                             events: Vec::new(),
@@ -919,49 +961,51 @@ impl ToolRuntime {
                             next_sequence: after_sequence.unwrap_or(0),
                             has_more: false,
                             history_lost: true,
+                            pending_permission: None,
                         },
-                        self.coding_agent_runs.as_ref(),
                         true,
                     ));
                 }
-                return coding_agent_error(
+                return Err(coding_agent_error(
                     "coding_agent_runner_unavailable",
                     error,
                     self.current_retained_execution_state(&binding).await,
                     RecoveryKind::Reobserve,
                     Some(&run_id),
-                );
+                ));
             }
         };
-        let response =
-            match tokio::time::timeout(Duration::from_secs(CONTROL_RESPONSE_WAIT_SECS), receiver)
-                .await
-            {
-                Ok(Ok(response)) => response,
-                _ => {
-                    let _ = self
-                        .runner_registry
-                        .cancel_request_dispatch_state(&request_id)
-                        .await;
-                    return coding_agent_error(
-                        "coding_agent_observe_timeout",
-                        "timed out waiting for bounded CodingAgentRun observation",
-                        self.current_retained_execution_state(&binding).await,
-                        RecoveryKind::Reobserve,
-                        Some(&run_id),
-                    );
-                }
-            };
+        let response = match tokio::time::timeout(
+            response_wait.min(Duration::from_secs(CONTROL_RESPONSE_WAIT_SECS)),
+            receiver,
+        )
+        .await
+        {
+            Ok(Ok(response)) => response,
+            _ => {
+                let _ = self
+                    .runner_registry
+                    .cancel_request_dispatch_state(&request_id)
+                    .await;
+                return Err(coding_agent_error(
+                    "coding_agent_observe_timeout",
+                    "timed out waiting for bounded CodingAgentRun observation",
+                    self.current_retained_execution_state(&binding).await,
+                    RecoveryKind::Reobserve,
+                    Some(&run_id),
+                ));
+            }
+        };
         match response.payload {
             Some(CodingAgentResponsePayload::Observe { mut observation }) => {
                 if !run_matches_binding_identity(&binding, &observation.run) {
-                    return coding_agent_error(
+                    return Err(coding_agent_error(
                         "invalid_runner_response",
                         "Runner returned mismatched CodingAgentRun identity",
                         self.current_retained_execution_state(&binding).await,
                         RecoveryKind::Reconcile,
                         Some(&run_id),
-                    );
+                    ));
                 }
                 if token_reset {
                     observation.history_lost = true;
@@ -978,22 +1022,22 @@ impl ToolRuntime {
                         client
                     }
                     Some(_) => {
-                        return coding_agent_error(
+                        return Err(coding_agent_error(
                             "invalid_runner_response",
                             "owning Runner instance changed while observation was in flight",
                             self.current_retained_execution_state(&binding).await,
                             RecoveryKind::Reconcile,
                             Some(&run_id),
-                        )
+                        ))
                     }
                     None => {
-                        return coding_agent_error(
+                        return Err(coding_agent_error(
                             "coding_agent_runner_unavailable",
                             "exact Runner became unavailable",
                             self.current_retained_execution_state(&binding).await,
                             RecoveryKind::Reobserve,
                             Some(&run_id),
-                        )
+                        ))
                     }
                 };
                 let merged = match self
@@ -1003,27 +1047,28 @@ impl ToolRuntime {
                 {
                     Ok(binding) => binding,
                     Err(error) => {
-                        return coding_agent_error(
+                        return Err(coding_agent_error(
                             "coding_agent_observation_conflict",
                             error,
                             self.current_retained_execution_state(&binding).await,
                             RecoveryKind::Reconcile,
                             Some(&run_id),
-                        )
+                        ))
                     }
                 };
+                if observation.run.observation_revision != merged.snapshot.observation_revision
+                    || merged.snapshot.state != CodingAgentRunState::WaitingPermission
+                {
+                    observation.pending_permission = None;
+                }
                 observation.run = merged.snapshot;
                 self.record_coding_agent_lifecycle_if_needed(&run_id).await;
-                ToolResult::ok(observe_projection(
-                    observation,
-                    self.coding_agent_runs.as_ref(),
-                    token_reset,
-                ))
+                Ok((observation, token_reset))
             }
             _ => {
                 let retained = self.current_retained_binding(&binding).await;
                 if runner_reports_unretained_run(&response) && retained.snapshot.state.terminal() {
-                    return ToolResult::ok(observe_projection(
+                    return Ok((
                         CodingAgentObserveResult {
                             run: retained.snapshot.clone(),
                             events: Vec::new(),
@@ -1031,12 +1076,16 @@ impl ToolRuntime {
                             next_sequence: after_sequence.unwrap_or(0),
                             has_more: false,
                             history_lost: true,
+                            pending_permission: None,
                         },
-                        self.coding_agent_runs.as_ref(),
                         token_reset,
                     ));
                 }
-                response_to_tool_error(response, Some(&run_id), &retained.snapshot)
+                Err(response_to_tool_error(
+                    response,
+                    Some(&run_id),
+                    &retained.snapshot,
+                ))
             }
         }
     }
@@ -2248,7 +2297,7 @@ fn observe_projection(
         .iter()
         .map(event_projection)
         .collect::<Vec<_>>();
-    json!({
+    let mut output = json!({
         "run_id": run.run_id,
         "project": run.runtime_project_id,
         "provider_id": run.provider_id,
@@ -2260,7 +2309,13 @@ fn observe_projection(
         "history_lost": observation.history_lost || reset,
         "first_retained_sequence": observation.first_retained_sequence,
         "terminal": terminal_projection(run),
-    })
+    });
+    if run.state == CodingAgentRunState::WaitingPermission {
+        if let Some(pending) = observation.pending_permission {
+            output["pending_permission"] = json!(pending);
+        }
+    }
+    output
 }
 
 fn event_projection(event: &CodingAgentEvent) -> Value {
@@ -2390,6 +2445,7 @@ fn response_to_tool_error(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod operator_inventory;
 
     fn test_server_binding(
         run_id: String,
@@ -2647,6 +2703,7 @@ mod tests {
                     next_sequence: 0,
                     has_more: false,
                     history_lost: state.terminal(),
+                    pending_permission: None,
                 },
                 &tokens,
                 false,
@@ -3040,6 +3097,7 @@ mod tests {
                 host_context: None,
                 capabilities: current_runner_capabilities(RunnerCapabilities {
                     coding_agent_runs: true,
+                    coding_agent_permission_responses: false,
                     ..Default::default()
                 }),
                 policy: None,

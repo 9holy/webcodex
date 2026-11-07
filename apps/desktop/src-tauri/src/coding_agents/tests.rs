@@ -153,7 +153,7 @@ fn coding_agents_public_state_contains_names_not_environment_values_or_owner_ide
 fn coding_agents_capacity_and_advanced_settings_are_bounded() {
     let dir = Scratch::new();
     let mut store = CodingAgentStore::load(&dir.0);
-    for (runs, timeout) in [(0, 5), (9, 5), (1, 0), (1, 61)] {
+    for (runs, timeout) in [(0, 5), (9, 5), (1, 0), (1, 601)] {
         let mut update = request("pi", 0);
         update.global_settings = Some(AcpGlobalSettings {
             max_concurrent_runs: runs,

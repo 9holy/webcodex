@@ -32,6 +32,20 @@ export interface CodingAgentRequest {
   profile: CodingAgentProfile;
   global_settings: AcpGlobalSettings | null;
 }
+export interface CodexPrepareRequest {
+  target: SettingsTarget;
+  expected_revision: number;
+  python_bin?: string;
+  codex_bin?: string;
+  codex_args: string[];
+  expected_version?: string;
+}
+export interface PreparedCodexAgent {
+  target: SettingsTarget;
+  expected_revision: number;
+  codex_version: string;
+  profile: CodingAgentProfile;
+}
 export interface SshResource {
   name: string;
   source: "static" | "managed";
@@ -47,6 +61,8 @@ export interface RunnerCapabilityAuthorizationSnapshot {
   can_authorize: boolean;
   coding_agents: boolean;
   ssh_resources: boolean;
+  permission_approval_granted: boolean;
+  permission_approval_grant_available: boolean;
 }
 export interface SshResourcesSnapshot {
   runner: string;

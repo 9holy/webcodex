@@ -34,6 +34,7 @@ const OAUTH_SCOPES_SUPPORTED: &[&str] = &[
     scopes::SCOPE_PLUGIN_MANAGE,
     scopes::SCOPE_SSH_LOCAL,
     scopes::SCOPE_CODING_AGENT_RUN,
+    scopes::SCOPE_CODING_AGENT_APPROVE,
     scopes::SCOPE_ACCOUNT_MANAGE,
 ];
 

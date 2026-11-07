@@ -329,11 +329,43 @@ pub(super) fn notification_frame(method: &str, params: Value) -> std::io::Result
     frame_message(&json!({"jsonrpc":"2.0","method":method,"params":params}))
 }
 
-pub(super) fn result_frame(id: u64, result: Value) -> std::io::Result<Vec<u8>> {
+/// Provider callback correlation remains private to this ACP connection.
+/// Numeric and bounded string JSON-RPC ids are echoed exactly; neither is a
+/// public permission identity or accepted from a Server/model response call.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub(super) enum AcpCallbackId {
+    Number(serde_json::Number),
+    String(String),
+}
+
+impl AcpCallbackId {
+    pub(super) fn from_value(value: &Value) -> Option<Self> {
+        match value {
+            Value::Number(value) if value.is_u64() || value.is_i64() => {
+                Some(Self::Number(value.clone()))
+            }
+            Value::String(value)
+                if !value.is_empty()
+                    && value.len() <= 128
+                    && !value.chars().any(char::is_control) =>
+            {
+                Some(Self::String(value.clone()))
+            }
+            _ => None,
+        }
+    }
+}
+
+pub(super) fn result_frame(id: &AcpCallbackId, result: Value) -> std::io::Result<Vec<u8>> {
     frame_message(&json!({"jsonrpc":"2.0","id":id,"result":result}))
 }
 
-pub(super) fn error_frame(id: u64, code: i64, message: &str) -> std::io::Result<Vec<u8>> {
+pub(super) fn error_frame(
+    id: &AcpCallbackId,
+    code: i64,
+    message: &str,
+) -> std::io::Result<Vec<u8>> {
     frame_message(&json!({"jsonrpc":"2.0","id":id,"error":{"code":code,"message":message}}))
 }
 
@@ -420,7 +452,7 @@ pub(super) fn permission_event(params: &Value) -> CodingAgentEvent {
         sequence: 0,
         kind: CodingAgentEventKind::PermissionRequest,
         text: Some(
-            "WebCodex has no approval UI/API for this ACP permission request. When the bounded deadline expires, the Runner answers ACP Cancelled. Observe this same Run for the provider's terminal outcome, or explicitly cancel_coding_agent; do not redispatch."
+            "Awaiting an explicit decision for this exact ACP callback. Inspect pending_permission and select one advertised option through respond_coding_agent_permission, or cancel it. Timeout and Run cancellation answer ACP Cancelled; trusted_agent never approves provider actions. Observe this same Run; do not redispatch."
                 .to_string(),
         ),
         label,

@@ -192,6 +192,20 @@ pub fn sample_tool_args_for_spec(spec: &ToolSpec) -> Value {
         validate_schema_instance(&value, &spec.input_schema).expect("canonical exact-edit fixture");
         return value;
     }
+    // A selected callback response has a semantic dependency on option_id.
+    // Supply one complete bounded sample instead of asking the generic schema
+    // generator to invent an opaque callback identity or an advertised choice.
+    if spec.name == "respond_coding_agent_permission" {
+        let value = json!({
+            "run_id": "wc_agent_run_sample_1234",
+            "request_id": "wc_agent_permission_sample_1234",
+            "outcome": "selected",
+            "option_id": "allow-once"
+        });
+        validate_schema_instance(&value, &spec.input_schema)
+            .expect("canonical explicit permission-response fixture");
+        return value;
+    }
 
     let mut value = generate(&spec.input_schema, 0, &mut 256, true)
         .unwrap_or_else(|error| panic!("{}: {error}", spec.name));

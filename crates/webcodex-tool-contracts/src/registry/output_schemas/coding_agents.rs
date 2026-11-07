@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 use webcodex_core::coding_agent::{
     CodingAgentEventKind, CodingAgentExecutionState, CodingAgentLiveAcpDiagnostic,
-    CodingAgentProviderSummary, CodingAgentRunState, CODING_AGENT_MAX_ENV_MAPPINGS,
+    CodingAgentPendingPermission, CodingAgentPermissionOutcome, CodingAgentProviderSummary,
+    CodingAgentRunState, CODING_AGENT_MAX_ENV_MAPPINGS,
 };
 
 use crate::schema_generation::typed_host_schema;
@@ -129,6 +130,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 ("has_more", schema_type("boolean", "True when retained newer events remain after this page.")),
                 ("history_lost", schema_type("boolean", "True when the requested cursor predates retained history or the Server epoch rebaselined.")),
                 ("first_retained_sequence", schema_type("integer", "First currently retained Runner event sequence.")),
+                ("pending_permission", typed_host_schema::<CodingAgentPendingPermission>()),
             ]);
             Some(wrapped_output_schema(fields))
         }
@@ -140,6 +142,15 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                     "True when cancellation was requested for a nonterminal Run.",
                 ),
             ));
+            Some(wrapped_output_schema(fields))
+        }
+        "respond_coding_agent_permission" => {
+            fields.extend([
+                ("request_id", schema_type("string", "Exact one-use callback identity; never ACP JSON-RPC/session identity.")),
+                ("outcome", typed_host_schema::<CodingAgentPermissionOutcome>()),
+                ("option_id", schema_type("string", "Selected exact provider-advertised option, present only for selected.")),
+                ("response_accepted", schema_type("boolean", "Receipt of the exact decision, not proof of provider execution or terminal completion. Observe the same Run.")),
+            ]);
             Some(wrapped_output_schema(fields))
         }
         "diagnose_coding_agent" => {
