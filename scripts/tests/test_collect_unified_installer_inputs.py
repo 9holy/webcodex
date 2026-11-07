@@ -196,7 +196,7 @@ class NativeManifestCollectorTests(unittest.TestCase):
                 source_name = f"webcodex-source-v0.9.0-{platform}.json"
                 self.assertEqual((root / "dist" / source_name).read_bytes(), manifest)
                 checksum = (root / "dist" / f"{source_name}.sha256").read_text(encoding="utf-8")
-                self.assertEqual(checksum, f"{hashlib.sha256(manifest).hexdigest()}  dist/{source_name}\n")
+                self.assertEqual(checksum, f"{hashlib.sha256(manifest).hexdigest()}  {source_name}\n")
 
     def test_windows_collection_preserves_exe_paths_for_core_preflight(self):
         with tempfile.TemporaryDirectory() as temp:

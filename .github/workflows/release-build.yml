@@ -1180,14 +1180,14 @@ jobs:
                 --output-dir unified-candidate
               source_name="webcodex-source-v$VERSION-$PLATFORM.json"
               cp unified-candidate/source-manifest.json "dist/$source_name"
-              sha256sum "dist/$source_name" > "dist/$source_name.sha256"
+              (cd dist && sha256sum "$source_name" > "$source_name.sha256")
               for suffix in deb rpm; do
                 python3 scripts/package_unified_installer.py \
                   --manifest unified-candidate/source-manifest.json --checksums unified-candidate/SHA256SUMS \
                   --input-root unified-candidate --platform "$PLATFORM" \
                   --output "dist/webcodex-unified-v$VERSION-$PLATFORM.$suffix"
                 filename="webcodex-unified-v$VERSION-$PLATFORM.$suffix"
-                sha256sum "dist/$filename" > "dist/$filename.sha256"
+                (cd dist && sha256sum "$filename" > "$filename.sha256")
               done
             '
       - name: Verify native host and prepare exact runtime inputs
@@ -1298,13 +1298,13 @@ jobs:
           mkdir -p dist
           source_name="webcodex-source-v$VERSION-$PLATFORM.json"
           cp unified-candidate/source-manifest.json "dist/$source_name"
-          shasum -a 256 "dist/$source_name" > "dist/$source_name.sha256"
+          (cd dist && shasum -a 256 "$source_name" > "$source_name.sha256")
           python3 scripts/package_unified_installer.py \
             --manifest unified-candidate/source-manifest.json \
             --checksums unified-candidate/SHA256SUMS --input-root unified-candidate \
             --platform "$PLATFORM" --output "dist/webcodex-unified-v$VERSION-$PLATFORM.pkg"
           filename="webcodex-unified-v$VERSION-$PLATFORM.pkg"
-          shasum -a 256 "dist/$filename" > "dist/$filename.sha256"
+          (cd dist && shasum -a 256 "$filename" > "$filename.sha256")
       - name: Upload native Linux/macOS unified installer
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
