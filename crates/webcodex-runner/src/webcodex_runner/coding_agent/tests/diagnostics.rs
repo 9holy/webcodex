@@ -363,80 +363,187 @@ fn explicit_path_mapping_restores_an_interpreter_outside_default_search_paths() 
         });
 }
 
+/// Echo each request through a real owned child before delivering an ACP
+/// response. The selected stage deliberately receives no response; cancellation
+/// is injected only after the child has echoed that exact request. This removes
+/// interpreter startup and filesystem marker polling from the tested boundary.
+#[cfg(unix)]
+struct SetupStageEcho {
+    stdin: std::process::ChildStdin,
+    stdout: std::process::ChildStdout,
+    responses: mpsc::SyncSender<ReaderEvent>,
+    received: Arc<Mutex<Vec<String>>>,
+    manager: Arc<CodingAgentManager>,
+    entry: Arc<RunEntry>,
+    run_id: &'static str,
+    blocked_stage: &'static str,
+    cancel: bool,
+}
+
+#[cfg(unix)]
+impl Write for SetupStageEcho {
+    fn write(&mut self, frame: &[u8]) -> std::io::Result<usize> {
+        assert!(
+            frame.len() <= 4096,
+            "setup fixture frame must remain bounded"
+        );
+        self.stdin.write_all(frame)?;
+        let mut echoed = vec![0; frame.len()];
+        std::io::Read::read_exact(&mut self.stdout, &mut echoed)?;
+        assert_eq!(echoed, frame, "owned child must receive the exact request");
+        let request: Value = serde_json::from_slice(&echoed).unwrap();
+        let method = request["method"].as_str().unwrap();
+        self.received.lock().unwrap().push(method.to_string());
+        if method == self.blocked_stage {
+            if self.cancel {
+                self.manager.request_cancel(self.run_id, &self.entry);
+            }
+        } else {
+            let options = json!([{
+                "id":"mode", "name":"Mode", "type":"select", "currentValue":"read-only",
+                "options":[{"value":"read-only", "name":"Read only"}]
+            }]);
+            let result = match method {
+                "initialize" => json!({"protocolVersion":1}),
+                "session/new" => json!({"sessionId":"fixture-session", "configOptions":options}),
+                "session/set_config_option" => json!({"configOptions":options}),
+                other => panic!("unexpected method before interrupted setup: {other}"),
+            };
+            self.responses
+                .send(ReaderEvent::Message(json!({
+                    "jsonrpc":"2.0", "id":request["id"], "result":result
+                })))
+                .unwrap();
+        }
+        Ok(frame.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.stdin.flush()
+    }
+}
+
 #[test]
 #[cfg(unix)]
 fn each_setup_stage_cancels_and_reports_its_deadline_without_prompt_dispatch() {
-    for stage in ["initialize", "session/new", "session/set_config_option"] {
+    let stages = ["initialize", "session/new", "session/set_config_option"];
+    for (stage_index, &stage) in stages.iter().enumerate() {
         for cancel in [true, false] {
             let temp = crate::tests::executable_tempdir();
-            let (exe, args) = diagnostic_agent(&temp, stage, "block");
-            let manager =
-                CodingAgentManager::with_store(&fake_config(exe, args), temp.path().join("store"))
-                    .unwrap();
-            let projects = project_fixture(&temp);
+            let manager = CodingAgentManager::with_store(
+                &fake_config("unused-provider".into(), Vec::new()),
+                temp.path().join("store"),
+            )
+            .unwrap();
+            let _projects = project_fixture(&temp);
             let run = "wc_agent_run_setupinterrupt01";
             let config = BTreeMap::from([(
                 "mode".into(),
                 CodingAgentConfigValue::String("read-only".into()),
             )]);
-            let budget = if cancel { 10 } else { 1 };
-            assert!(manager
-                .handle(
-                    start_request_with_timeout(
-                        &manager,
-                        &temp.path().join("repo"),
-                        run,
-                        config,
-                        budget
-                    ),
-                    &projects
-                )
-                .error
-                .is_none());
-            let deadline = Instant::now() + Duration::from_secs(3);
-            while !temp.path().join("setup-blocked").exists() {
-                assert!(
-                    Instant::now() < deadline,
-                    "provider did not reach setup stage"
-                );
-                thread::sleep(Duration::from_millis(10));
+            let CodingAgentRequest::Start(request) =
+                start_request(&manager, &temp.path().join("repo"), run, config)
+            else {
+                unreachable!()
+            };
+            let entry = seed_terminal_test_run(
+                &manager,
+                run,
+                DurableDispatchPhase::BeforePromptBarrier,
+                CodingAgentRunState::Starting,
+                CodingAgentExecutionState::NotStarted,
+            );
+            let provider = manager.providers.get("codex").unwrap();
+            let mut command = Command::new("/bin/cat");
+            command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            let mut child = ManagedChild::spawn(&mut command).unwrap();
+            let (responses, rx) = mpsc::sync_channel(4);
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let mut outbound = AcpOutboundWriter::spawn(
+                SetupStageEcho {
+                    stdin: child.child_mut().stdin.take().unwrap(),
+                    stdout: child.child_mut().stdout.take().unwrap(),
+                    responses,
+                    received: Arc::clone(&received),
+                    manager: Arc::clone(&manager),
+                    entry: Arc::clone(&entry),
+                    run_id: run,
+                    blocked_stage: stage,
+                    cancel,
+                },
+                &manager.worker_threads,
+            )
+            .unwrap();
+            if !cancel {
+                // Expire only after the actual selected request has crossed
+                // the child pipe. Real one-second total/cumulative deadline
+                // behavior remains covered by lifecycle.rs; this test checks
+                // stage attribution and pre-prompt termination deterministically.
+                *manager.setup_expire_test_stage.lock().unwrap() = Some(stage);
             }
-            if cancel {
-                assert!(manager
-                    .handle(
-                        CodingAgentRequest::Cancel(CodingAgentCancelRequest { run_id: run.into() }),
-                        &projects
+            assert!(
+                manager
+                    .initialize_session(
+                        &request,
+                        provider,
+                        &entry,
+                        &mut child,
+                        &mut outbound,
+                        &rx,
+                        Instant::now() + Duration::from_secs(10),
                     )
-                    .error
-                    .is_none());
-            }
-            let terminal = wait_for_snapshot(&manager, run, |snapshot| snapshot.state.terminal());
+                    .is_none(),
+                "{stage}: interrupted setup must not complete"
+            );
+            let expected_methods = stages[..=stage_index]
+                .iter()
+                .map(|method| method.to_string())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                *received.lock().unwrap(),
+                expected_methods,
+                "{stage}: actual dispatched stage"
+            );
+            assert_eq!(
+                *entry.prompt_dispatch.lock().unwrap(),
+                PromptDispatchGateState::PrePrompt
+            );
+            let terminal = entry.snapshot();
             assert_eq!(
                 terminal.execution_state,
-                CodingAgentExecutionState::NotStarted
+                CodingAgentExecutionState::NotStarted,
+                "{stage}"
             );
             if cancel {
-                assert_eq!(terminal.state, CodingAgentRunState::Cancelled);
-                assert_eq!(terminal.terminal.unwrap().error_code, None);
+                assert_eq!(terminal.state, CodingAgentRunState::Cancelled, "{stage}");
+                assert_eq!(terminal.terminal.unwrap().error_code, None, "{stage}");
             } else {
-                assert_eq!(terminal.state, CodingAgentRunState::Failed);
+                assert_eq!(terminal.state, CodingAgentRunState::Failed, "{stage}");
                 let error = terminal.terminal.unwrap();
                 assert_eq!(
                     error.error_code.as_deref(),
-                    Some("coding_agent_setup_timeout")
+                    Some("coding_agent_setup_timeout"),
+                    "{stage}"
                 );
                 assert!(error
                     .message
                     .unwrap()
                     .contains(&format!("during ACP {stage} before prompt dispatch")));
             }
-            assert!(!temp.path().join("prompt-dispatched").exists());
             assert_eq!(
-                manager
-                    .drain_workers_until(Instant::now() + Duration::from_secs(3))
-                    .timed_out,
-                0
+                manager.store.read(run).unwrap().unwrap().dispatch_phase,
+                DurableDispatchPhase::Terminal
             );
+            assert!(
+                child.try_wait().unwrap().is_some(),
+                "{stage}: owned child was not reaped"
+            );
+            let drained = manager.drain_workers_until(Instant::now() + Duration::from_secs(3));
+            assert_eq!(drained.timed_out, 0, "{stage}");
+            assert_eq!(drained.panicked, 0, "{stage}");
         }
     }
 }

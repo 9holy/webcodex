@@ -70,7 +70,11 @@ Guidance count and size limits, the 10 KiB instruction-content budget, and the
 hard 30 KiB startup / 20 KiB context budgets remain unchanged. Optional coding
 material uses the existing request order and trimming receipts; it has no new
 budget priority. Workflow version 32 removes the default review roles and points
-to the optional chapter. Existing conversations can request
+to the optional chapter. Version 33 adds bounded execution-denial recovery
+guidance that distinguishes the current credential, Host rejection, Runner and
+provider policy, SSH authentication, remote OS permissions, and deployment-service
+credentials. It grants no authority and never retries an uncertain deployment.
+Existing conversations can request
 `_wc.context=["webcodex.workflow"]` on supported MCP surfaces to refresh retained
 guidance. The output schema reflects the new envelope; there is no persisted
 data migration or Runner protocol change.

@@ -261,6 +261,8 @@ pub(crate) struct CodingAgentManager {
     #[cfg(test)]
     prompt_after_barrier_test_delay: Mutex<Option<Duration>>,
     #[cfg(test)]
+    setup_expire_test_stage: Mutex<Option<&'static str>>,
+    #[cfg(test)]
     initial_claim_writes: std::sync::atomic::AtomicUsize,
 }
 
@@ -421,6 +423,8 @@ impl CodingAgentManager {
             #[cfg(test)]
             prompt_after_barrier_test_delay: Mutex::new(None),
             #[cfg(test)]
+            setup_expire_test_stage: Mutex::new(None),
+            #[cfg(test)]
             initial_claim_writes: std::sync::atomic::AtomicUsize::new(0),
         });
         manager.recover()?;
@@ -464,6 +468,8 @@ impl CodingAgentManager {
             prompt_dispatch_test_barrier: Mutex::new(None),
             #[cfg(test)]
             prompt_after_barrier_test_delay: Mutex::new(None),
+            #[cfg(test)]
+            setup_expire_test_stage: Mutex::new(None),
             #[cfg(test)]
             initial_claim_writes: std::sync::atomic::AtomicUsize::new(0),
         });

@@ -22,6 +22,7 @@ const STORE_FILE: &str = "managed-ssh-resources.json";
 const LOCK_FILE: &str = "managed-ssh-resources.lock";
 
 mod connection;
+#[cfg(unix)]
 pub(crate) use connection::classify_failure as classify_ssh_connection_failure;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

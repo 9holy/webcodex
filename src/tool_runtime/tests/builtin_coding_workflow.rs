@@ -72,6 +72,35 @@ fn builtin_coding_workflow_defaults_are_required_but_soft_budgets_are_not_wire_l
 }
 
 #[test]
+fn execution_denial_guidance_is_required_bounded_and_does_not_grant_authority() {
+    let workflow = builtin_coding_workflow_projection(Default::default());
+    let schema = workflow_schema();
+    validate_schema_instance_for_test(&workflow, &schema).unwrap();
+    let guidance = workflow["model_protocol"]["execution_denials"]
+        .as_str()
+        .expect("execution denial recovery guidance");
+    for boundary in [
+        "this connection's credential",
+        "Host-side tool rejection",
+        "do not silently update existing OAuth grants",
+        "remote OS permissions",
+        "never claim a universal execution ban, bypass a denial, or replay an uncertain deployment",
+    ] {
+        assert!(guidance.contains(boundary), "{boundary}");
+    }
+
+    let mut missing = workflow.clone();
+    missing["model_protocol"]
+        .as_object_mut()
+        .unwrap()
+        .remove("execution_denials");
+    assert!(validate_schema_instance_for_test(&missing, &schema).is_err());
+    let mut oversized = workflow;
+    oversized["model_protocol"]["execution_denials"] = json!("x".repeat(721));
+    assert!(validate_schema_instance_for_test(&oversized, &schema).is_err());
+}
+
+#[test]
 fn builtin_workflow_defaults_are_shared_project_guidance_without_task_roles() {
     let workflow = builtin_coding_workflow_projection(Default::default());
     assert_eq!(

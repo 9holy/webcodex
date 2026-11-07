@@ -201,6 +201,30 @@ class ConnectionAcceptance(Smoke):
     def observe(self):
         return self.operator("list", {"runner": "ssh-setup-runner"})
 
+    def wait_loaded_resource(self):
+        # list_projects may retain the previous Runner's Project inventory.
+        # Only a fresh operator response from the replacement Runner proves it
+        # loaded the saved SSH resource. Retry bounded reads, never the save.
+        deadline = time.monotonic() + 30
+        last_kind = None
+        while time.monotonic() < deadline:
+            check(self.runner.poll() is None, "replacement Runner exited")
+            result = self.post("/api/runtime-console/ssh-resources/list",
+                               {"runner": "ssh-setup-runner"}, self.owner)
+            if result.get("success") is True:
+                output = result.get("output", {})
+                resources = output.get("resources", [])
+                if resources == [{"name": "password-fixture", "source": "managed",
+                                  "active": True, "pending_restart": False}]:
+                    return output
+                last_kind = "saved_resource_not_loaded"
+            else:
+                last_kind = result.get("output", {}).get("error_kind")
+                check(last_kind in {"ssh_resource_registry_unavailable", "runner_unavailable"},
+                      f"replacement Runner SSH observation failed: {last_kind}")
+            time.sleep(0.1)
+        raise AssertionError(f"replacement Runner did not load the saved resource: {last_kind}")
+
     def prepare(self):
         self.start_server()
         check(self.post("/api/users/create", {"username": "ssh-setup-owner"}, self.bootstrap).get("success"),
@@ -235,6 +259,7 @@ class ConnectionAcceptance(Smoke):
 
     def run(self):
         self.prepare()
+        self.initialize(self.owner)
         denied = self.post("/api/runtime-console/ssh-resources/list", {"runner": "ssh-setup-runner"}, self.restricted)
         check(denied.get("success") is not True, "missing ssh:local scope was accepted")
         binding = self.observe()["binding"]
@@ -286,14 +311,27 @@ class ConnectionAcceptance(Smoke):
         stop(self.runner)
         self.runner = self.launch("webcodex-runner", ["--config", str(self.config)], self.env)
         self.wait_ready(self.project, self.owner)
-        listed = self.observe()
+        listed = self.wait_loaded_resource()
         check(listed["resources"][0]["active"] and not listed["resources"][0]["pending_restart"],
               "saved connection was not loaded after Runner restart")
         session = self.tool("work_on_project", {"project": self.project,
-            "instruction": "Verify the disposable SSH execution target",
-            "execution_context": {"resource": "password-fixture", "default_cwd": str(self.ssh.remote)}}, self.owner)
-        output = self.tool("run_shell", {"project": session.get("project_ref", self.project),
-            "session_id": session.get("session_ref", session.get("session_id")),
+            "instruction": "Verify the disposable SSH execution target"}, self.owner)
+        check(session.get("resolved_project") == self.project,
+              "MCP startup selected a different Project")
+        session_id = session.get("session_id")
+        check(isinstance(session_id, str) and session_id.startswith("wc_sess_"),
+              "MCP startup did not return an explicit Workflow Session")
+        # Bootstrap and Session execution defaults are separate contracts.
+        # MCP receives only the loaded logical resource name and remote cwd;
+        # authentication and host-key trust remain in the operator flow.
+        execution_context = {"resource": "password-fixture", "default_cwd": str(self.ssh.remote)}
+        updated = self.tool("update_session_context", {"project": self.project,
+            "session_id": session_id, "execution_context": execution_context}, self.owner)
+        check(updated.get("project") == self.project and updated.get("session_id") == session_id
+              and updated.get("execution_context") == execution_context,
+              "MCP context update did not bind the exact Session and SSH resource")
+        output = self.tool("run_shell", {"project": self.project,
+            "session_id": session_id,
             "command": "printf 'SSH_PASSWORD_ROUTE_OK\\n' > remote-proof.txt; cat remote-proof.txt",
             "timeout_secs": 15}, self.owner)
         check((self.ssh.remote / "remote-proof.txt").read_text() == "SSH_PASSWORD_ROUTE_OK\n",

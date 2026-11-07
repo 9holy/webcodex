@@ -263,7 +263,7 @@ pub async fn grant(
 
 pub fn unavailable() -> DesktopError {
     DesktopError::new("runner_capability_grant_unavailable", "Runner capability authorization was not confirmed",
-        "Use the Desktop-owned local Server with operator authority, then refresh. Remote connections require a Server-operator-approved pairing code.")
+        "Use the Desktop-owned local Server with operator authority, then refresh. For remote connections, ask the Server operator to explicitly grant the required scopes to the authorized credential, then refresh or authorize the OAuth connection again.")
 }
 
 #[cfg(test)]
