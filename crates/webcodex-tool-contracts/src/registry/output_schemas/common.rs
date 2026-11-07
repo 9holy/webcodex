@@ -382,7 +382,7 @@ pub fn authority_profile_schema(description: &str) -> Value {
             "mode": {
                 "type": "string",
                 "enum": ["trusted_agent", "restricted", "invalid"],
-                "description": "Canonical authority mode. trusted_agent auto-authorizes consequential tools after hard safety checks; restricted requires human authorization; invalid means the configuration failed to resolve (fail closed)."
+                "description": "Construction-time authority mode used by the running tool evaluator. trusted_agent auto-authorizes consequential tools after hard safety checks; restricted denies them without an interactive approval queue; invalid means configuration failed to resolve (fail closed)."
             },
             "source": {
                 "type": "string",
@@ -419,7 +419,7 @@ pub fn authority_profile_schema(description: &str) -> Value {
             },
             "human_approval_required": {
                 "type": "boolean",
-                "description": "True when consequential tools require a human authorization step."
+                "description": "True when consequential tools are blocked pending an operator configuration decision; no interactive approval queue is available."
             }
         },
         "required": [

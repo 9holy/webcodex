@@ -528,6 +528,7 @@ async fn run_shell_session_events_record_exit_without_stdio_bodies() {
     assert_eq!(summary.counts.failed, 1);
     assert_eq!(summary.counts.shell_like, 2);
     let permission_summary = crate::tool_runtime::permissions::permission_summary_from_events(
+        &runtime.permission_evaluator,
         &summary.events,
         crate::tool_runtime::permissions::DEFAULT_PERMISSION_RECENT_LIMIT,
     );
@@ -1772,6 +1773,7 @@ async fn model_facing_stop_job_requires_confirm_without_stopping_or_approving() 
         .summary(&session.session_id, Some(20))
         .unwrap();
     let before_stop_permissions = crate::tool_runtime::permissions::permission_summary_from_events(
+        &runtime.permission_evaluator,
         &before_stop_summary.events,
         crate::tool_runtime::permissions::DEFAULT_PERMISSION_RECENT_LIMIT,
     );
@@ -1808,6 +1810,7 @@ async fn model_facing_stop_job_requires_confirm_without_stopping_or_approving() 
         .summary(&session.session_id, Some(20))
         .unwrap();
     let permissions = crate::tool_runtime::permissions::permission_summary_from_events(
+        &runtime.permission_evaluator,
         &summary.events,
         crate::tool_runtime::permissions::DEFAULT_PERMISSION_RECENT_LIMIT,
     );

@@ -188,6 +188,7 @@ impl ToolRuntime {
         let observed_workspace = workspace_observation(&workspace, true, changes_result.success);
         append_workspace_warnings(&workspace, &mut final_warnings);
         let permissions = permission_summary_from_events(
+            &self.permission_evaluator,
             &session_summary.events,
             crate::tool_runtime::permissions::DEFAULT_PERMISSION_RECENT_LIMIT,
         );

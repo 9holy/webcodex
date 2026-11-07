@@ -131,6 +131,22 @@ fail closed. The mode does not change credential identity or scope membership,
 and does not grant permission to publish or deploy outside the user's authorized
 task. See [Authority model](agent/permission-model.md) for maintainer-level detail.
 
+For permission diagnostics, use `get_runtime_status` with `compact=false` and
+`summary_only=false` through the connection that failed. Full status returns
+`authorization.credential_kind` and `authorization.granted_scopes` for that
+request, alongside the running Server's `authority` policy. Scope names are
+allowlisted and deduplicated; credential values, hashes, user/token IDs and
+unknown scope text are not returned. `admin` remains one super-scope, rather than
+being expanded into every scope. `none` means there is no explicit authentication
+context; it does not claim unrestricted access. Sparse status omits this block.
+
+Compare the failed tool's required scope with that connection's granted scopes.
+A trusted authority policy, enabled Runner capability, or an administrator user
+role alone does not add a missing credential scope. Existing credentials need an
+explicit grant or reauthorization through their supported enrollment/OAuth flow.
+See [Troubleshooting](TROUBLESHOOTING.md) to distinguish scope failures from
+Session, path, native OS and Host restrictions.
+
 ## Computer observation and control authorization
 
 Computer Use permissions are intentionally separate from ordinary project/runtime access. Read-only Computer observation requires `computer:read`; effectful control requires `computer:control`; launching applications uses `computer:launch`. Full-display, pointer, and global clipboard operations have additional explicit scopes and are not silently inherited by older credentials.

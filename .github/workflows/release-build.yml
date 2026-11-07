@@ -1295,6 +1295,7 @@ jobs:
             --version "$VERSION" --source-sha "$SOURCE_SHA" \
             --workflow-run-id "$GITHUB_RUN_ID" --workflow-ref "$GITHUB_WORKFLOW_REF" \
             --output-dir unified-candidate
+          mkdir -p dist
           source_name="webcodex-source-v$VERSION-$PLATFORM.json"
           cp unified-candidate/source-manifest.json "dist/$source_name"
           shasum -a 256 "dist/$source_name" > "dist/$source_name.sha256"

@@ -163,7 +163,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             .with_host_orchestration_hint(
                 super::ToolHostOrchestrationHint::independent_parallel_read(),
             ),
-            "Read runtime health and protocol/build/source alignment; exact client_id focuses one Runner and its Job concurrency. compact=true or summary_only=true selects sparse counts without inventories. Canonical/API default is full diagnostics; MCP defaults to sparse. Explicit compact=false adds bounded Server process and Session writer observations, not remote Runner resource measurements. Missing or unsupported measurements stay unavailable.",
+            "Read runtime health and protocol/build/source alignment; exact client_id focuses one Runner and its Job concurrency. compact=true or summary_only=true selects sparse counts without inventories. Canonical/API default is full diagnostics; MCP defaults to sparse. Explicit compact=false adds current-caller credential kind/granted scopes, the running authority policy, and bounded Server process and Session writer observations. Use full diagnostics to distinguish scope denials from authority policy; scopes do not bypass Project, Runner or OS checks. Resource measurements describe the Server, not remote Runners. Missing or unsupported measurements stay unavailable.",
         ).with_discovery_keywords(&["server", "runtime", "health", "runners", "connection", "status", "服务", "运行", "状态", "健康", "连接"]),
         20,
         super::ToolDirectReason::CoreWorkflow,

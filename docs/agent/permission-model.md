@@ -38,8 +38,11 @@ WEBCODEX_AUTHORITY_MODE = trusted_agent | restricted
 | Unknown non-empty value | Invalid configuration → consequential tools **fail closed** with reason `invalid_authority_mode:{value}` |
 | Retired configuration | v0.5 does not migrate `WEBCODEX_PERMISSION_MODE` or accept `dev_auto_approve` / `require_approval`. Any set retired variable, including empty, is invalid. Unset it and explicitly select `WEBCODEX_AUTHORITY_MODE=trusted_agent` or `restricted`; the rejection guard never falls back to automatic authorization. |
 
-The resolved mode and source are projected on `get_runtime_status` and on internal
-full startup diagnostics as the `authority` object. The canonical external
+The construction-time mode and source used by the execution evaluator are
+projected on full `get_runtime_status` and internal full startup diagnostics as
+the `authority` object. Status, startup and Session permission summaries use that
+same runtime snapshot; changing configuration requires restarting the Server.
+The canonical external
 `work_on_project` response intentionally keeps that full diagnostic block out of
 its sparse model-facing projection:
 
@@ -89,6 +92,9 @@ decision for consequential tools.
 
 - Consequential runtime tools are **denied** with `reason=restricted_requires_human_authorization`.
 - There is no separate Connector command-approval queue or host-side task approval namespace.
+- A request cannot grant itself an exception. The Server operator must review the
+  deployment's authority configuration; retrying or asking a Host to approve the
+  same call does not enable it.
 
 ### Invalid configuration
 

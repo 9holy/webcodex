@@ -376,6 +376,7 @@ jobs:
             --build-arg "WEBCODEX_GIT_COMMIT=$short_commit" \
             --build-arg WEBCODEX_GIT_DIRTY=false \
             --build-arg "WEBCODEX_BUILT_AT=$built_at" \
+            --build-arg "WEBCODEX_RELEASE_REPOSITORY=$GITHUB_REPOSITORY" \
             -t "$image" \
             -f Dockerfile \
             .
@@ -431,11 +432,14 @@ jobs:
             --bootstrap deploy/docker/bootstrap.sh \
             --output-dir "$deployment_dir" \
             --digest "$digest" \
+            --repo "$GITHUB_REPOSITORY" \
             --summary "$deployment_summary" >/dev/null
           bootstrap="$deployment_dir/webcodex-server-bootstrap.sh"
           sh -n "$bootstrap"
-          grep -Fq "ghcr.io/yyjeqhc/webcodex-server@$digest" "$bootstrap"
-          if grep -Fq "ghcr.io/yyjeqhc/webcodex-server:latest" "$bootstrap"; then
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          release_image="ghcr.io/${repository_owner,,}/webcodex-server"
+          grep -Fq "$release_image@$digest" "$bootstrap"
+          if grep -Fq "$release_image:latest" "$bootstrap"; then
             echo "Disposable release bootstrap retained a mutable latest image reference." >&2
             exit 1
           fi

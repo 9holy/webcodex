@@ -1,5 +1,6 @@
 //! Runtime observability metadata injected into `ToolRuntime`.
 
+mod authorization;
 mod resources;
 
 use super::runtime_compatibility::{
@@ -619,7 +620,11 @@ impl ToolRuntime {
         output.insert("tools".to_string(), tools);
         output.insert(
             "authority".to_string(),
-            permissions::authority_profile_payload(),
+            permissions::authority_profile_payload(&self.permission_evaluator),
+        );
+        output.insert(
+            "authorization".to_string(),
+            authorization::caller_authorization(auth),
         );
         output.insert("session_store".to_string(), json!(self.sessions.status()));
         let tunnels = self.runtime_info.tunnels.snapshot();
@@ -942,7 +947,11 @@ impl ToolRuntime {
         output.insert("tools".to_string(), tools);
         output.insert(
             "authority".to_string(),
-            permissions::authority_profile_payload(),
+            permissions::authority_profile_payload(&self.permission_evaluator),
+        );
+        output.insert(
+            "authorization".to_string(),
+            authorization::caller_authorization(auth),
         );
         ToolResult::ok(Value::Object(output))
     }

@@ -388,7 +388,7 @@ impl ToolRuntime {
             "created_at": summary.created_at,
             "updated_at": summary.updated_at,
             "counts": counts,
-            "permissions": permission_summary_from_events(&summary.events, DEFAULT_HANDOFF_LIMIT),
+            "permissions": permission_summary_from_events(&self.permission_evaluator, &summary.events, DEFAULT_HANDOFF_LIMIT),
             "open_todos": open_todos,
             "high_priority_open_todos": high_priority_open_todos,
             "recent_answers": recent_answers,

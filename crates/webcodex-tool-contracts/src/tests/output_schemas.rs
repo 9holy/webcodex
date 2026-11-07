@@ -2372,6 +2372,7 @@ fn key_tool_output_schemas_include_expected_fields() {
         "jobs",
         "tools",
         "authority",
+        "authorization",
         "quic",
     ] {
         assert!(

@@ -327,12 +327,19 @@ check 失败就重新生成 token。`rollback` 在 secret 已提交后会回到 
 开发场景，或首个公开 GHCR 镜像尚未完成启用之前，再 clone 源码并显式选择 source build：
 
 ```bash
-git clone https://github.com/yyjeqhc/webcodex.git
+# 使用 fork 时，先选择该 fork 的 owner/repository，再 clone 和构建。
+export WEBCODEX_RELEASE_REPOSITORY=yyjeqhc/webcodex
+git clone "https://github.com/$WEBCODEX_RELEASE_REPOSITORY.git" webcodex
 cd webcodex
 ./deploy/docker/bootstrap.sh https://webcodex.example.com --build-from-source
 # 后续源码重建继续显式带上 override：
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
+
+source-build override 会在构建时把 `WEBCODEX_RELEASE_REPOSITORY` 传入二进制，使其更新
+检查保持使用所选发布者；后续重建时也要保留同一个值。此变量不会选择预构建容器：单独使用
+`compose.yaml` 时仍默认拉取上游镜像；使用 fork 镜像需把 `WEBCODEX_SERVER_IMAGE` 设为
+该发布者已经验证的镜像，建议固定到 digest。
 
 默认绑定 `127.0.0.1:8080`。在前面配置 HTTPS 反向代理；bootstrap 已经验证本地 Server
 并创建第一枚短期 pairing code，使用该 code 接入持有仓库的机器。GitHub 首次创建 GHCR
@@ -480,7 +487,7 @@ Server 或 Runner 已离线的证据。先使用下面的 operator checks 独立
 
 ### Authority mode
 
-`WEBCODEX_AUTHORITY_MODE` 控制有后果的 runtime 工具是自动执行还是需要人工审批：
+`WEBCODEX_AUTHORITY_MODE` 控制有后果的 runtime 工具是自动执行还是由 Server 的 authority policy 拒绝：
 
 | 值 | 行为 |
 | --- | --- |

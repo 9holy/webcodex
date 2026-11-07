@@ -70,7 +70,6 @@ impl PermissionEvaluator {
         self
     }
 
-    #[cfg(test)]
     /// Construction-time resolved authority configuration for this runtime.
     pub(crate) fn config(&self) -> &EffectiveAuthorityConfig {
         &self.config

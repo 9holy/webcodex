@@ -39,7 +39,6 @@ pub(super) fn compact_tool(tool: &mut Value) {
             "create_goal" if workbench_app_only => "Create a caller-owned Goal with bounded completion criteria. Reuse the same key and unchanged input on uncertain results.",
             "update_goal" if workbench_app_only => "Edit an owned nonterminal Goal using its expected revision. Conflicts preserve the draft; reread before changing the revision. Replay only the same keyed input.",
             "read_agent_task" if workbench_app_only => "Read an owned canonical Task and its attempts; observation never authorizes redispatch.",
-            "observe_coding_agent" if workbench_app_only => "Observe an authorized exact coding run. Uncertain execution requires observation, not redispatch.",
             "cancel_coding_agent" if workbench_app_only => "Request cancellation of an authorized exact run. Request acceptance is not terminal cancellation; observe the same run.",
             "get_session_assignment" if workbench_app_only => "Read an authorized exact Session todo and current assignment fence; no implicit Session selection.",
             "complete_session_message" if workbench_app_only => "Complete an exact authorized todo with the current assignment fence. Reuse the same completion key and answer after uncertainty; stale fences fail closed.",

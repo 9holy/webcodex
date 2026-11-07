@@ -371,12 +371,20 @@ For development or before the first public GHCR image has been activated, clone
 the source and choose the explicit build path:
 
 ```bash
-git clone https://github.com/yyjeqhc/webcodex.git
+# For a fork, select its owner/repository before cloning and building.
+export WEBCODEX_RELEASE_REPOSITORY=yyjeqhc/webcodex
+git clone "https://github.com/$WEBCODEX_RELEASE_REPOSITORY.git" webcodex
 cd webcodex
 ./deploy/docker/bootstrap.sh https://webcodex.example.com --build-from-source
 # Later source rebuilds use the same explicit override:
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
+
+The source-build override passes `WEBCODEX_RELEASE_REPOSITORY` into the binaries
+at build time so their update checks retain the selected publisher. Keep the
+same value on later rebuilds. This does not select a prebuilt container: plain
+`compose.yaml` uses the upstream image unless `WEBCODEX_SERVER_IMAGE` names a
+verified image from your chosen publisher, preferably pinned by digest.
 
 The default binding is `127.0.0.1:8080`. Put an HTTPS reverse proxy in front;
 the bootstrap has already verified the local Server and created the first
@@ -547,7 +555,7 @@ projects, or restarting a healthy Runner.
 ### Authority mode
 
 `WEBCODEX_AUTHORITY_MODE` controls whether consequential runtime tools
-auto-execute or require human approval:
+auto-execute or are denied by the Server's authority policy:
 
 | Value | Behavior |
 | --- | --- |

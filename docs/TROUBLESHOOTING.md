@@ -42,6 +42,46 @@ The first row is important: if the ChatGPT Host refuses to dispatch
 `get_runtime_status` result. Restarting or reconfiguring the Runner cannot repair a
 request that never reached the Server.
 
+### Tools repeatedly report insufficient permissions
+
+First retain the exact tool name and the bounded `error_kind`, `failure_kind`,
+`missing_scope`, `reason`, and `execution_state` fields when present. Similar UI
+messages can describe different authorization boundaries; repeating a call or
+approving it in chat does not change those boundaries.
+
+From the same connection that failed, call
+`get_runtime_status(compact=false, summary_only=false)`. Its `authorization`
+object reports the caller's credential kind and explicit known granted scopes;
+`authority` reports the Server's effective execution policy. These are diagnostic
+facts, not a guarantee that a particular Project or tool is accessible. If the
+installed version does not expose `authorization`, use the credential's protected
+management view instead. For the exact Runner returned by discovery, inspect
+`list_runners(client_id=..., summary_only=false)` for its active capabilities,
+policy, build, and configured provider inventory.
+
+| Exact signal | What to check or change |
+| --- | --- |
+| HTTP 401 / invalid or expired credential | Reauthenticate the same connection. Verify the credential audience; a Runner token is not an MCP client credential. |
+| `insufficient_scope`, possibly with `missing_scope` | Have the owner grant the required scope to that credential/client. For OAuth, verify both the client allow-list and the authorizing credential, then reauthorize after a scope-ceiling change; refreshing an old grant does not add authority. |
+| `restricted_requires_human_authorization` | The Server is in `restricted` mode, which denies consequential tools and has no approval queue. The operator must decide whether the deployment should use `WEBCODEX_AUTHORITY_MODE=trusted_agent`, then restart the Server after changing its configuration. A chat confirmation cannot change this mode. |
+| `invalid_authority_mode:...` | Check the Server environment. Remove the retired `WEBCODEX_PERMISSION_MODE` variable entirely, even if empty, and select a valid current mode. Inspect locally without sharing environment values. |
+| Read-only Session or Project/path `policy_rejected` | Check the selected Session, exact registered Project, allowed roots, `allow_patch`, and Runner command policy. Select or configure the intended writable Project/Session through its normal owner workflow. Scope grants do not override these restrictions. |
+| `capability_unavailable` or an unavailable provider | Compare the active Runner's build and advertised capabilities with the Server. A saved Desktop setting is not active until the documented Runner restart/reload has applied it. See [Runner capabilities](agent/desktop-runner-capabilities.md). |
+| ACP `waiting_permission` / `permission_request` | The current ACP adapter has no permission-response UI/API. It waits for a bounded deadline and returns ACP `Cancelled` to the provider; `trusted_agent` does not approve this nested request. Observe or explicitly cancel the same Run. Interactive approval requires an integration that implements the provider's approval exchange. See [ACP permission behavior](agent/acp-coding-agent-run.md#8-permission-request-exceptional-path). |
+| Native `EACCES`, filesystem read-only errors, or OS screen/input permission denial | Inspect the actual Runner service user, filesystem ownership/mounts, and platform permissions. Server scopes cannot grant operating-system access. |
+
+Grant capabilities by workflow. Ordinary coding uses runtime/project/Job scopes;
+Browser, Computer, local MCP, Plugins, memory, SSH, and delegated coding each have
+their own scope requirements. New pairing with `--runner-capabilities` adds the
+SSH/delegated-coding grant; it is not an all-tools grant. Existing local Desktop
+enrollments can use the explicit **Authorize Runner capabilities** action where
+available. Remote enrollments require the operator's pairing/credential workflow.
+For shared-key OAuth, the documented `--oauth-browser-permissions`,
+`--oauth-computer-permissions`, and `--oauth-local-mcp` flags select independent
+delegation categories. Existing OAuth clients do not silently acquire new scopes.
+See the [authentication model](AUTH_MODEL.md) for the exact credential and consent
+contracts.
+
 ### ChatGPT says developer MCP is disabled or unsupported
 
 Reports in [Issue #500](https://github.com/yyjeqhc/webcodex/issues/500) include a
