@@ -355,6 +355,12 @@ The lanes above define test semantics; workflows decide when to run them.
   Manual real-process evidence remains separate and must never be inferred from a passing
   CI run. Follow [`RELEASE_CHECKLIST.md`](RELEASE_CHECKLIST.md) and
   `.github/workflows/release-readiness.yml`.
+- The GitHub-only Actions publication controller has focused tests in
+  `scripts/tests/test_release_github_actions.py`, included by the existing Python
+  tooling discovery. They cover machine identity, source/proof fences, retained
+  intent and recovery, immutable tag/asset handling, and the GitHub-only delivery
+  boundary. `.github/workflows/release-publish.yml` is an explicitly authorized
+  publication entry point, not another candidate builder or a pull-request test.
 
 ### CI cancellation versus required lane results
 

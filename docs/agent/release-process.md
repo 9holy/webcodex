@@ -93,6 +93,47 @@ architecture, checksum, or installer/source-manifest checks. Use
 `--require-unified-installers` on collection and verification when shipping the
 complete installer set. The high-level npm publication plan remains unchanged.
 
+For the explicitly authorized `9holy/webcodex` `v0.5.2` distribution,
+[`release-publish.yml`](../../.github/workflows/release-publish.yml) provides a
+repository-owned control host. A reviewed change to the fixed
+[`release request`](../../.github/release-requests/v0.5.2.json) on `main` starts
+that publication; ordinary code pushes and pull requests do not. The request
+pins the repository and owner IDs, release source commit/tree, successful source
+CI and evidence attempts, installer selection, and approved Release body digest.
+The adjacent body file is an input to that request; the published GitHub Release
+remains the user-facing release-note authority. The source checkout stays at the
+approved release commit while the controller runs from reviewed `main`.
+
+The controller job alone receives `contents: write` and `actions: write` through
+the repository's `GITHUB_TOKEN`. Its preflight explicitly verifies an Actions
+installation identity and the API-reported workflow run, rather than treating an
+installation token as a human login or weakening the existing operator's
+`GET /user` check. There is no npm publication path. Readiness and candidate
+build workflows retain their existing read-only permissions, exact-source gates,
+native signing requirements, and same-run bundle contract.
+
+Each remote effect has a prepared intent uploaded as an Actions artifact before
+it is attempted. The controller reuses the existing readiness/build request
+schemas, correlation, collection, draft verification, and public-byte verifier.
+It creates an annotated immutable tag only after dispatched readiness succeeds,
+uploads only the exact verified public asset set, and publishes only after all
+draft sizes and digests match. It never deletes or replaces a tag, release, or
+asset. A retry of the same controller run restores its newest verified checkpoint
+and reconciles recorded effects; missing evidence or an uncertain absent effect
+stops instead of initiating a second operation. Checkpoints contain bounded JSON
+state, not credentials, signing material, or installer payloads. Retain the run's
+artifacts until publication and all follow-up verification finish.
+
+Because Release events created with `GITHUB_TOKEN` do not automatically start
+other workflows, this controller explicitly dispatches the existing image and
+Intel Desktop workflows from `main`, recording each returned run ID and its
+control commit. Those workflows continue to validate artifacts against the
+immutable release tag. Core public-byte verification and the image workflow's
+anonymous GHCR availability gate remain separate results. For a first GHCR
+package, a required owner visibility change is not implied by a successful image
+upload. See GitHub's [workflow token trigger rules](https://docs.github.com/en/actions/concepts/security/github_token#when-github_token-triggers-workflow-runs)
+and [workflow dispatch API](https://docs.github.com/en/rest/actions/workflows#create-a-workflow-dispatch-event).
+
 After GitHub publication, use `verify_public_release.py <VERSION> --repo
 <OWNER/REPO> --github-only --require-unified-installers` for the selected bundle.
 No upstream npm publication is implied. Formal build workflows embed the
