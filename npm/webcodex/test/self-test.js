@@ -209,7 +209,7 @@ async function expectInstallFailure(action, destination, tempRoot, pattern) {
 }
 
 async function main() {
-  assert.strictEqual(packageJson.version, "0.5.2");
+  assert.strictEqual(packageJson.version, "0.5.3");
   assert.deepStrictEqual(packageJson.bin, { webcodex: "bin/webcodex.js" });
   assert.deepStrictEqual(install.RUNTIME_BINARIES, ["webcodex", "webcodex-server", "webcodex-runner"]);
   assert.deepStrictEqual(install.SUPPORTED_PLATFORM_KEYS, ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64"]);
@@ -727,52 +727,59 @@ async function main() {
       // A lazy bootstrap needs npm's protected proxy long enough to download the
       // native binaries, but a non-share native command must not inherit a proxy
       // credential that was absent from the caller's original environment.
-      const scopedLazyRoot = path.join(tmp, "wrapper-lazy-network-scope");
-      fs.mkdirSync(scopedLazyRoot, { recursive: true });
-      const scopedLazyTarget = wrapper.nativePath({ packageRoot: scopedLazyRoot, platform: PLATFORM });
-      const bootstrapEnvMarker = path.join(scopedLazyRoot, "bootstrap-env");
-      const nativeEnvMarker = path.join(scopedLazyRoot, "native-env");
-      const escapedNativeMarker = nativeEnvMarker.replace(/'/g, "'\\''");
-      const scopedTargetScript = [
-        "#!/bin/sh",
-        'if [ -n "${npm_config_https_proxy-}" ]; then',
-        `  printf leaked > '${escapedNativeMarker}'`,
-        "else",
-        `  printf clean > '${escapedNativeMarker}'`,
-        "fi",
-        "exit 23",
-        ""
-      ].join("\n");
-      const scopedTargetBase64 = Buffer.from(scopedTargetScript, "utf8").toString("base64");
-      fs.writeFileSync(
-        path.join(scopedLazyRoot, "install.js"),
-        [
-          'const fs = require("fs");',
-          'const path = require("path");',
-          `const target = ${JSON.stringify(scopedLazyTarget)};`,
-          `fs.writeFileSync(${JSON.stringify(bootstrapEnvMarker)}, process.env.npm_config_https_proxy ? "hydrated" : "missing");`,
-          'fs.mkdirSync(path.dirname(target), { recursive: true });',
-          `fs.writeFileSync(target, Buffer.from(${JSON.stringify(scopedTargetBase64)}, "base64"), { mode: 0o755 });`,
+      // The real caller may already have npm proxy credentials. Isolate each
+      // fixture's caller environment without changing process.env or production
+      // wrapper behavior, then also prove an original caller proxy is preserved.
+      for (const [caseName, callerProxy] of [["bootstrap-only", ""], ["caller-inherited", inheritedProxy]]) {
+        const scopedLazyRoot = path.join(tmp, `wrapper-lazy-network-scope-${caseName}`);
+        fs.mkdirSync(scopedLazyRoot, { recursive: true });
+        const scopedLazyTarget = wrapper.nativePath({ packageRoot: scopedLazyRoot, platform: PLATFORM });
+        const bootstrapEnvMarker = path.join(scopedLazyRoot, "bootstrap-env");
+        const nativeEnvMarker = path.join(scopedLazyRoot, "native-env");
+        const escapedNativeMarker = nativeEnvMarker.replace(/'/g, "'\\''");
+        const scopedTargetScript = [
+          "#!/bin/sh",
+          `if [ "\${npm_config_https_proxy-}" = '${callerProxy.replace(/'/g, "'\\''")}' ]; then`,
+          `  printf expected > '${escapedNativeMarker}'`,
+          "else",
+          `  printf unexpected > '${escapedNativeMarker}'`,
+          "fi",
+          "exit 23",
           ""
-        ].join("\n")
-      );
-      const priorExitCode = process.exitCode;
-      const scopedChild = wrapper.runNative({
-        packageRoot: scopedLazyRoot,
-        platform: PLATFORM,
-        argv: ["status"],
-        npmProgram: fakeNpm,
-        networkHelper
-      });
-      assert.ok(scopedChild, "lazy scoped native child was not started");
-      const scopedExitCode = await new Promise((resolve, reject) => {
-        scopedChild.once("error", reject);
-        scopedChild.once("exit", (code, signal) => signal ? reject(new Error(`scoped lazy child exited by ${signal}`)) : resolve(code));
-      });
-      process.exitCode = priorExitCode;
-      assert.strictEqual(scopedExitCode, 23);
-      assert.strictEqual(fs.readFileSync(bootstrapEnvMarker, "utf8"), "hydrated");
-      assert.strictEqual(fs.readFileSync(nativeEnvMarker, "utf8"), "clean");
+        ].join("\n");
+        const scopedTargetBase64 = Buffer.from(scopedTargetScript, "utf8").toString("base64");
+        fs.writeFileSync(
+          path.join(scopedLazyRoot, "install.js"),
+          [
+            'const fs = require("fs");',
+            'const path = require("path");',
+            `const target = ${JSON.stringify(scopedLazyTarget)};`,
+            `fs.writeFileSync(${JSON.stringify(bootstrapEnvMarker)}, process.env.npm_config_https_proxy === ${JSON.stringify(callerProxy || protectedProxy)} ? "expected" : "unexpected");`,
+            'fs.mkdirSync(path.dirname(target), { recursive: true });',
+            `fs.writeFileSync(target, Buffer.from(${JSON.stringify(scopedTargetBase64)}, "base64"), { mode: 0o755 });`,
+            ""
+          ].join("\n")
+        );
+        const scopedOptions = {
+          packageRoot: scopedLazyRoot,
+          platform: PLATFORM,
+          argv: ["status"],
+          npmProgram: fakeNpm,
+          networkHelper
+        };
+        const scopedRun = childProcess.spawnSync(process.execPath, [
+          "-e",
+          `require(${JSON.stringify(path.join(__dirname, "..", "bin", "wrapper"))}).runNative(${JSON.stringify(scopedOptions)});`
+        ], {
+          env: { PATH: process.env.PATH || "", ...(callerProxy ? { npm_config_https_proxy: callerProxy } : {}) },
+          encoding: "utf8",
+          timeout: 10000,
+          shell: false
+        });
+        assert.strictEqual(scopedRun.status, 23, `${caseName}: lazy scoped native child failed`);
+        assert.strictEqual(fs.readFileSync(bootstrapEnvMarker, "utf8"), "expected", `${caseName}: bootstrap proxy changed`);
+        assert.strictEqual(fs.readFileSync(nativeEnvMarker, "utf8"), "expected", `${caseName}: caller proxy environment changed`);
+      }
     }
 
     if (PLATFORM !== "win32") {

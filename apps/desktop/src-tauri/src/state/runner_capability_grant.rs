@@ -8,7 +8,7 @@ impl AppState {
         &self,
         request: crate::runner_capability_grant::GrantRequest,
     ) -> DesktopResult<crate::runner_capability_grant::AuthorizationSnapshot> {
-        if !request.confirmed {
+        if !request.confirmed || request.permission_approval && request.detached_execution {
             return Err(crate::runner_capability_grant::unavailable());
         }
         let (operation, cancellation, core, baseline) = self
@@ -43,9 +43,13 @@ impl AppState {
             .await
             .map_err(|_| crate::runner_capability_grant::unavailable())??;
             self.ssh_resources.lock().await.invalidate();
-            let granted =
-                crate::runner_capability_grant::grant(runtime, token, request.permission_approval)
-                    .await;
+            let granted = crate::runner_capability_grant::grant(
+                runtime,
+                token,
+                request.permission_approval,
+                request.detached_execution,
+            )
+            .await;
             let observed = crate::runner_capability_grant::observe(runtime).await;
             granted?;
             observed

@@ -24,6 +24,28 @@ function ui(detail: WindowDetail, api: RuntimeV2Client, selectedSessionId = "") 
 }
 afterEach(cleanup);
 
+it("explains failure categories without fetching privileged trace payloads or relabeling closeout as deployment", () => {
+  const activity: WindowActivity[] = [
+    { ...row(0), tool_name: "finish_coding_task", status: "failed", failure: { outcome: "rejected", reason: "session_mismatch", error_kind: "session_project_mismatch", execution_state: "not_started" } },
+    { ...row(1), status: "failed", failure: { outcome: "execution_failed", reason: "execution_error", failure_kind: "command_exit_nonzero", execution_state: "completed" } },
+    { ...row(2), status: "failed", failure: { outcome: "outcome_unknown", reason: "result_unconfirmed", execution_state: "outcome_unknown" } },
+    { ...row(3), status: "failed" },
+  ];
+  const api = client();
+  render(ui(windowDetail({ activity }), api));
+  expect(screen.getByText("Request rejected")).toBeTruthy();
+  expect(screen.getByText("Execution failed")).toBeTruthy();
+  expect(screen.getByText("Result not confirmed")).toBeTruthy();
+  expect(screen.getByText("Call failed")).toBeTruthy();
+  for (const summary of screen.getAllByText("Why this call failed", { selector: "summary" })) fireEvent.click(summary);
+  expect(screen.getByText("The task session belongs to a different project.")).toBeTruthy();
+  expect(screen.getByText(/does not establish that a deployment or background process failed/)).toBeTruthy();
+  expect(screen.getByText(/The operation may already have taken effect/)).toBeTruthy();
+  expect(screen.getByText(/does not contain a specific, safely displayable failure reason/)).toBeTruthy();
+  expect(api.post).not.toHaveBeenCalled();
+  expect(screen.queryByRole("button", { name: /retry/i })).toBeNull();
+});
+
 it("bounds initial DOM while filtering the complete loaded history and exposing failures beyond the first slice", () => {
   const activity = Array.from({ length: 2_000 }, (_, index) => row(index));
   activity[1_999] = { ...activity[1_999], tool_name: "rare-old-failure", status: "failed" };
@@ -97,11 +119,11 @@ it("renders changed status, duration, Project and Session facts for the same exa
   const detail = windowDetail({ activity: [original], activity_returned: 1 });
   const api = client();
   const view = render(ui(detail, api));
-  expect(screen.getByText("Succeeded")).toBeTruthy();
+  expect(screen.getByText("Call succeeded")).toBeTruthy();
   const changed = { ...original, status: "failed", duration_ms: 987,
     workflow_sessions: [{ workflow_session_id: "session-new", project: projects[0].id, relation: "recorder" }] };
   view.rerender(ui({ ...detail, activity: [changed] }, api));
-  expect(screen.getByText("Failed")).toBeTruthy();
+  expect(screen.getByText("Call failed")).toBeTruthy();
   expect(screen.getByText("987ms")).toBeTruthy();
   expect(screen.getByTestId("window-session-tag").getAttribute("title")).toBe("session-new");
 });

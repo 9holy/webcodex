@@ -38,7 +38,7 @@ WebCodex 可以在已注册的项目范围内读取和修改文件、执行命�
 交给 AI 使用的目录，留意工具调用，并且不要把 API key、token 或其他密钥放进
 提示词、截图、Git、Issue 或共享日志。
 
-1. **安装并打开 WebCodex Desktop。**从 [GitHub Releases](https://github.com/yyjeqhc/webcodex/releases)
+1. **安装并打开 WebCodex Desktop。**从[本分支的 GitHub Releases](https://github.com/9holy/webcodex/releases)
    下载与当前机器架构匹配的 Windows installer 或 DMG。当前 macOS 构建
    未经过 notarization；如果被拦截，进入**系统设置 → 隐私与安全 → 仍要打开**，
    不要全局关闭 Gatekeeper。
@@ -85,10 +85,28 @@ WebCodex 可以在已注册的项目范围内读取和修改文件、执行命�
 
 ## 1. 安装 WebCodex Desktop
 
-从 [GitHub Releases](https://github.com/yyjeqhc/webcodex/releases) 下载对应安装包：
+从[本分支的 GitHub Releases](https://github.com/9holy/webcodex/releases)下载对应安装包：
 
 - **Windows：**按主机架构选择 x64 或 ARM64 installer；Windows ARM64 Desktop 从 v0.4.2+ release build path 开始提供。
 - **macOS：**按 Mac 架构选择 Intel 或 Apple Silicon DMG。
+
+**Windows 安装和升级。**首次安装可以选择目标目录。完整安装包
+**webcodex-unified-…-win32-….exe** 包含 Desktop、CLI、Server 和 Runner，
+能够协调已有后台运行环境的升级。Server 或 Runner 已安装为服务时，推荐使用完整
+安装包。**webcodex-desktop-…-setup.exe** 是标准 Desktop 安装包，沿用受支持的
+上游版本的产品身份和用户数据位置。
+
+升级会检测并复用原安装目录，包括在上游安装时选择的自定义目录。请保留该目录，
+让运行环境中记录的 Runtime 路径继续有效。完整安装包会显示检测到的目录，并拒绝
+不同的目录选择或冲突的 **/D=** 参数，不会忽略选择后装到另一处。移动已有运行环境
+需要单独处理。正常升级会保留设置、项目、凭据和历史，不需要先卸载上游版本或删除配置。
+使用标准安装包时，请在维护页面选择保留已有安装的选项；选择卸载会运行旧版本的卸载
+程序，属于单独的卸载操作。完整安装包会直接使用原目录升级路径。
+
+文件被占用时，请从对应安装实例的托盘菜单选择**退出 WebCodex**，再点击**重试**；
+关闭窗口只会隐藏应用。持久后台服务可能在 Desktop 退出后继续运行：请用完整安装包
+协调升级，或先通过原有运行环境控制停止相应服务，再运行标准安装包。完整安装包及
+标准安装包的升级路径只检查选定的文件，不会按进程名停止其他安装实例。
 
 macOS 签名明确分为三种模式：`self-signed` 是当前 public release 和长期 dogfood 的持久 fallback；Apple 凭据可用时可显式选择 `developer-id`，使用 Developer ID Application 并完成 notarization/stapling；`adhoc` 仅用于一次性 CI/本地验证，不承诺 TCC 升级连续性。必须跨 build/upgrade 长期保留**同一张 self-signed certificate 及其 private key**；同名重建证书也会改变身份。Desktop（`dev.webcodex.desktop`）和 bundled Runner（`dev.webcodex.runner`）都使用不含 binary cdhash 的证书锚定 designated requirement，并在 Tauri nested signing 后验证最终 app/DMG。历史 ad-hoc 授权不会因此自动迁移，首次改用持久身份时可能需要重新授权。Self-signed 不等同于 Apple notarization；如 Gatekeeper 要求，请使用**系统设置 → 隐私与安全 → 仍要打开**，不要全局关闭 Gatekeeper。
 

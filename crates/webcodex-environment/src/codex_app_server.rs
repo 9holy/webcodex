@@ -127,6 +127,9 @@ pub struct PrepareCodexOptions {
     pub codex_bin: Option<PathBuf>,
     pub codex_args: Vec<String>,
     pub expected_version: Option<String>,
+    /// Explicit operator consent for this provider's native sandbox network.
+    /// The generated disabled profile retains workspace-write and on-request.
+    pub allow_network: bool,
 }
 
 /// Exact adapter-produced profile, ready for a native configuration owner to
@@ -221,15 +224,19 @@ fn validate_prepared(
     python: &Path,
     adapter: &Path,
     receipt: &Path,
+    allow_network: bool,
 ) -> SetupResultValue<()> {
     let profile = &prepared.profile;
-    let expected_args = vec![
+    let mut expected_args = vec![
         adapter.to_string_lossy().into_owned(),
         "serve".into(),
         "--experimental".into(),
         "--receipt".into(),
         receipt.to_string_lossy().into_owned(),
     ];
+    if allow_network {
+        expected_args.push("--network".into());
+    }
     const ENV_NAMES: &[&str] = &[
         "PATH",
         "HOME",
@@ -404,6 +411,9 @@ pub fn prepare_codex(options: &PrepareCodexOptions) -> SetupResultValue<Prepared
     if let Some(version) = &options.expected_version {
         command.arg("--expected-version").arg(version);
     }
+    if options.allow_network {
+        command.arg("--network");
+    }
     let result = (|| {
         let output = command
             .output_with_limits(Duration::from_secs(55), 128 * 1024)
@@ -428,7 +438,13 @@ pub fn prepare_codex(options: &PrepareCodexOptions) -> SetupResultValue<Prepared
         }
         let prepared: PreparedCodex = serde_json::from_slice(&output.stdout)
             .map_err(|_| preparation_error("invalid_profile"))?;
-        validate_prepared(&prepared, &python, &adapter, &receipt.path)?;
+        validate_prepared(
+            &prepared,
+            &python,
+            &adapter,
+            &receipt.path,
+            options.allow_network,
+        )?;
         receipt.finish()?;
         Ok(prepared)
     })();

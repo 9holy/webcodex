@@ -9,6 +9,14 @@
 .window-call-card.running .window-project-tag { background: var(--surface); }
 .window-call-card header { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
 .window-call-card header strong { font-size: 14px; overflow-wrap: anywhere; }
+.call-failure-details > summary, .call-technical-details > summary { cursor: pointer; font-size: 13px; }
+.call-failure-notice { margin-block: 12px; padding: 12px 14px; border-inline-start: 3px solid var(--warn); border-radius: 4px; background: var(--surface-soft); overflow-wrap: anywhere; }
+.call-failure-notice p { margin: 0 0 10px; font-size: 13px; line-height: 1.55; }
+.call-failure-notice p:last-child { margin-bottom: 0; }
+.call-failure-context, .call-technical-details { color: var(--quiet); }
+.call-failure-diagnostics { display: grid; gap: 8px; margin-block: 12px; font-size: 12px; }
+.call-failure-diagnostics > div { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr); gap: 12px; }
+.call-failure-diagnostics dd { margin: 0; overflow-wrap: anywhere; }
 .window-call-context, .window-call-timing, .session-work-context { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 16px; }
 .window-call-context .window-project-tag { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
 .window-call-timing { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }

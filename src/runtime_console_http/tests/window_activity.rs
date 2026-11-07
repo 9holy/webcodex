@@ -1,5 +1,70 @@
 use super::*;
 
+#[tokio::test]
+async fn window_failure_details_project_recorded_codes_without_private_error_payloads() {
+    let (_tmp, db, runtime) = test_runtime_with_window_db();
+    let auth = test_bootstrap_auth();
+    let client_window = crate::client_window::ClientWindow::for_test("failure-details");
+    record_window_event_with_activity(
+        &db,
+        &auth,
+        client_window.key(),
+        None,
+        None,
+        1000,
+        "finish_coding_task",
+        true,
+    );
+    let summary = json!({"model_ergonomics": {"error_kind":"session_project_mismatch", "execution_state":"not_started", "recovery_kind":"fix_input"},
+        "output":{"stderr":"PRIVATE_STDERR", "password":"PRIVATE_PASSWORD"}}).to_string();
+    db.conn_for_tests().execute(
+        "UPDATE action_events SET status='failed', duration_ms=0, http_status=200, error_summary='PRIVATE_EXCEPTION', summary_json=?1 WHERE server_trace_id='trace-1000'",
+        [&summary],
+    ).unwrap();
+    let input = || WindowInput {
+        client_window_key: client_window.key().to_string(),
+        activity_limit: None,
+        session_limit: None,
+        detail_level: WindowDetailLevel::Full,
+    };
+    let detail = window_for_auth(&runtime, &auth, input()).await.unwrap();
+    let value = serde_json::to_value(&detail.activity[0]).unwrap();
+    assert_eq!(value["failure"]["outcome"], "rejected");
+    assert_eq!(value["failure"]["reason"], "session_mismatch");
+    assert_eq!(value["failure"]["error_kind"], "session_project_mismatch");
+    assert!(!value.to_string().contains("PRIVATE"));
+    assert!(value.get("error_summary").is_none());
+    // The model-facing current-Window tool reuses this same sanitized DTO.
+    let schema =
+        crate::tool_runtime::registry::output_schema_for_tool("read_current_window_activity");
+    let item_schema = &schema["properties"]["output"]["properties"]["events"]["items"];
+    crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&value, item_schema)
+        .unwrap();
+    let mut unsafe_value = value.clone();
+    unsafe_value["failure"]["message"] = json!("PRIVATE_EXCEPTION");
+    assert!(
+        crate::tool_runtime::startup_brief::validate_schema_instance_for_test(
+            &unsafe_value,
+            item_schema
+        )
+        .is_err()
+    );
+
+    // A zero-millisecond HTTP response does not establish whether the action ran.
+    db.conn_for_tests()
+        .execute(
+            "UPDATE action_events SET summary_json='{}' WHERE server_trace_id='trace-1000'",
+            [],
+        )
+        .unwrap();
+    let legacy = window_for_auth(&runtime, &auth, input()).await.unwrap();
+    let legacy = serde_json::to_value(&legacy.activity[0]).unwrap();
+    assert_eq!(
+        legacy["failure"],
+        json!({"outcome":"call_failed", "reason":"details_unavailable"})
+    );
+}
+
 #[cfg(feature = "experimental-code-mode")]
 #[tokio::test]
 async fn code_mode_composition_projects_on_one_outer_window_activity() {

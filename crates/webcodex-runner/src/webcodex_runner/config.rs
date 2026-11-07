@@ -499,9 +499,9 @@ impl Default for ShellConfig {
 
 /// Runner-local named SSH resources (`[ssh.resources.<name>]`).
 ///
-/// Only a Host/Host-alias and an optional default remote cwd are retained
-/// here. Authentication material is intentionally not modeled or serialized
-/// through the WebCodex protocol.
+/// Static Host aliases retain the Runner account's normal OpenSSH behavior.
+/// Managed structured connections carry only private credential references;
+/// plaintext credentials never appear in this configuration snapshot.
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]
 pub(crate) struct SshConfig {
     #[serde(default)]
@@ -515,6 +515,10 @@ pub(crate) struct SshResourceConfig {
     pub(crate) host: String,
     #[serde(default)]
     pub(crate) default_cwd: Option<String>,
+    /// This field can only be materialized from the private managed registry;
+    /// runner.toml cannot inject a credential reference or bypass host trust.
+    #[serde(skip)]
+    pub(crate) connection: Option<super::ssh_credentials::ManagedSshConnection>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default, PartialEq, Eq)]

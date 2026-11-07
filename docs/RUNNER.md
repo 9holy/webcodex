@@ -678,6 +678,22 @@ and registration timeouts/backoff also contribute to recovery latency, so 30
 seconds is a retry interval, not an end-to-end recovery deadline. Explicit
 `polling` remains polling, and explicit `websocket` keeps retrying WebSocket.
 
+A half-open WebSocket or QUIC stream cannot wait indefinitely for an operating-system
+TCP/UDP failure. If the registered Runner receives no decoded application envelope
+for 90 seconds (three 30-second Ping periods), it discards the connection and
+reconnects with the same Runner instance and retained Job inventory. A healthy
+Pong or another valid inbound envelope renews this deadline; a successful local
+Ping send does not. Each registered frame write is limited to 30 seconds.
+Registration writes and acknowledgement reads each have a separate 10-second
+limit. These bounds trigger recovery; reconnect backoff and network/authentication
+still determine when a new connection becomes available.
+
+This reconnect does not restart Jobs, change scopes or policy, or replay commands.
+A cancelled write may already have reached the peer, so an ordinary request whose
+result was lost remains uncertain. Existing Job inventory/update-sequence
+reconciliation is the only Job recovery path. Connection-bound persistent shells
+close under their existing disconnect rules and are never silently recreated.
+
 Runner admission and Server inventory validation share the same semantic shell
 identities, including `python` (not concrete executables such as `python3`).
 Ordinary Job start/end timestamps are clamped to their causal predecessors:
@@ -748,7 +764,47 @@ an interrupted graceful-shutdown path. If neither is present, investigate an
 external/native process termination or supervisor action before adding broader
 Runner telemetry.
 
-## SSH session resources (advanced)
+## SSH session resources
+
+### Configure a connection in Desktop
+
+Open **Extensions → SSH resources → Add SSH resource**. Enter a logical name,
+host/IP, port (normally 22), and username. Choose password authentication, an
+identity file on the Runner's machine (with an optional passphrase), or that
+Runner account's existing keys/SSH agent. An optional working directory is a
+path on the remote host. The SSH connection originates from the selected
+**Runner**, not from the browser or the computer showing the panel.
+
+Inspect the host key and compare its SHA-256 fingerprint with a trusted value
+from the server administrator. Confirm that exact fingerprint, test the login,
+and save. Saving also verifies authentication against the confirmed host key.
+Incorrect credentials, a changed host key, an expired inspection, and an
+unreachable host fail explicitly. The application does not automatically trust
+an unknown key or accept a changed one.
+
+Passwords and key passphrases are write-only. They travel through a dedicated
+operator configuration endpoint and are retained in private owner-checked files
+on the Runner, separate from the resource registry. They are not included in
+Chat tool calls, Session history, inventory, or diagnostic tool traces. This is
+private file storage, not an encrypted operating-system credential vault.
+Never paste a password or private key into Chat. A key path refers to a file
+already on the Runner; selecting another Runner does not transfer that file.
+
+Direct connections use an isolated OpenSSH configuration with the explicitly
+selected account, port, and pinned host key. For an existing OpenSSH alias,
+ProxyJump, or other operator-maintained SSH configuration, select the advanced
+OpenSSH-target mode instead. Password authentication supports a normal SSH
+password, not an interactive multi-factor challenge or password-change dialog.
+
+After saving, use **Restart Runner** when the panel says application is pending,
+then refresh. **Loaded** only means the configuration is in the running Runner;
+a login test is a separate observation. Chat can discover the active logical
+resource and select it for a Session without knowing the credentials. Setup
+requires a current Desktop/Server/Runner with `ssh_connection_setup`; access
+still requires the separate `ssh:local` permission. Authorizing a WebCodex
+capability does not create an SSH account or grant permissions on the remote host.
+
+### Existing OpenSSH configuration and execution scope
 
 A Runner with an available local OpenSSH client advertises the `ssh_shell`
 capability. A Workflow Session may select a named SSH resource so `run_shell`

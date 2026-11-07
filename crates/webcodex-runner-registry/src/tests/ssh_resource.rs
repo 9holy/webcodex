@@ -138,3 +138,68 @@ async fn managed_ssh_dequeue_never_retargets_replacement_runner() {
         .get("ssh-resource-runner")
         .is_none_or(|queue| queue.is_empty()));
 }
+
+#[tokio::test]
+async fn ssh_connection_setup_requires_explicit_capability_at_enqueue_and_dequeue() {
+    let registry = RunnerRegistry::default();
+    let legacy = registration("instance-a", true);
+    registry.register(legacy.clone()).await.unwrap();
+    let request = SshResourceRequest::Inspect {
+        expected_revision: 0,
+        endpoint: webcodex_core::ssh_resource::SshEndpoint {
+            host: "192.0.2.1".into(),
+            port: 22,
+            user: "operator".into(),
+        },
+    };
+    let error = registry
+        .enqueue_ssh_resource(
+            "ssh-resource-runner",
+            "instance-a",
+            request.clone(),
+            Some(&alice()),
+            "test".into(),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.starts_with("ssh_connection_setup_unsupported"));
+    assert!(registry.inner.lock().await.pending_by_id.is_empty());
+
+    let mut current = legacy.clone();
+    current.capabilities.ssh_connection_setup = true;
+    registry.register(current).await.unwrap();
+    let (_, receiver) = registry
+        .enqueue_ssh_resource(
+            "ssh-resource-runner",
+            "instance-a",
+            request,
+            Some(&alice()),
+            "test".into(),
+        )
+        .await
+        .unwrap();
+    // Preserve the queued request while removing capability to prove the
+    // independent dequeue fence never sends a new enum to an older receiver.
+    registry
+        .inner
+        .lock()
+        .await
+        .runners
+        .get_mut("ssh-resource-runner")
+        .unwrap()
+        .runner_features = RunnerFeatureSet::try_from_registration(&legacy.capabilities).unwrap();
+    assert!(registry
+        .poll(RunnerPollRequest {
+            client_id: "ssh-resource-runner".into(),
+            runner_instance_id: "instance-a".into()
+        })
+        .await
+        .unwrap()
+        .is_none());
+    let result = receiver.await.unwrap();
+    assert_eq!(result.request_dispatched, Some(false));
+    assert!(result
+        .error
+        .as_deref()
+        .is_some_and(|error| error.starts_with("ssh_connection_setup_unsupported")));
+}

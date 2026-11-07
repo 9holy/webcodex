@@ -40,6 +40,29 @@ pub(crate) fn request(id: &str, revision: u64) -> CodingAgentUpdate {
 }
 
 #[test]
+fn codex_preparation_network_defaults_off_and_requires_a_boolean() {
+    let mut body = serde_json::json!({
+        "target": request("codex", 0).target,
+        "expected_revision": 0,
+    });
+    let legacy: CodexPrepareRequest = serde_json::from_value(body.clone()).unwrap();
+    assert!(!legacy.allow_network);
+    for allowed in [false, true] {
+        body["allow_network"] = serde_json::json!(allowed);
+        let parsed: CodexPrepareRequest = serde_json::from_value(body.clone()).unwrap();
+        assert_eq!(parsed.allow_network, allowed);
+    }
+    for invalid in [
+        serde_json::json!("true"),
+        serde_json::json!(1),
+        serde_json::Value::Null,
+    ] {
+        body["allow_network"] = invalid;
+        assert!(serde_json::from_value::<CodexPrepareRequest>(body.clone()).is_err());
+    }
+}
+
+#[test]
 fn coding_agents_add_edit_remove_and_restart_keep_desired_state_and_tombstones() {
     let dir = Scratch::new();
     let mut store = CodingAgentStore::load(&dir.0);

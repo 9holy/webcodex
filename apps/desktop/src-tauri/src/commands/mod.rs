@@ -80,6 +80,22 @@ pub async fn ssh_resource_list(
 }
 
 #[tauri::command]
+pub async fn ssh_connection_inspect(
+    state: State<'_, AppState>,
+    request: crate::ssh_resources::SshInspectRequest,
+) -> DesktopResult<crate::ssh_resources::SshInspectionResult> {
+    state.ssh_connection_inspect(request).await
+}
+
+#[tauri::command]
+pub async fn ssh_connection_probe(
+    state: State<'_, AppState>,
+    request: crate::ssh_resources::SshProbeRequest,
+) -> DesktopResult<crate::ssh_resources::SshProbeResult> {
+    state.ssh_connection_probe(request).await
+}
+
+#[tauri::command]
 pub async fn ssh_resource_register(
     state: State<'_, AppState>,
     request: crate::ssh_resources::SshRegisterRequest,

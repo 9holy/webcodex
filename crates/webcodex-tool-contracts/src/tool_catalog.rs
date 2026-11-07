@@ -122,9 +122,9 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
     },
     ToolRecommendedFlow {
         name: "persistent_shell",
-        summary: "Persistent shell: primarily reuse one shell and keep remote shell state on an active named SSH resource. New target: manage_ssh_resource list/register -> restart -> list -> bind -> open/reuse. Local shell is only for same-process state; one-shot SSH uses run_process.",
+        summary: "Persistent shell: primarily reuse one shell and keep remote shell state on an active named SSH resource. New target: manage_ssh_resource list/register -> restart -> list -> bind -> open/reuse. Local shell is only for same-process state; named-resource one-shot uses run_shell.",
         manifest_purpose:
-            "Persistent shell is SSH-resource-primary: use manage_ssh_resource list to discover safe logical names. If a new SSH target should persist, manage_ssh_resource register it and stop for Runner restart; after restart list again, update_session_context binds the active Runner-local named SSH resource, open_session_shell once, and execute_session_shell repeatedly preserves remote cwd/env/exports/functions/umask. A managed resource is not an arbitrary host; the SSH target does not run WebCodex Runner. Local persistent shell remains supported only when same local-process state is required; several ordinary local commands are not enough. Use get_session_shell_status only when needed, close_session_shell for cleanup, and run_process for explicit one-shot/no-persistence SSH.",
+            "Persistent shell is SSH-resource-primary: use manage_ssh_resource list to discover safe logical names configured by Desktop or an operator. Passwords, key passphrases, and first-use host-key confirmation belong in Desktop SSH resources, never Chat/tool arguments. For an already usable OpenSSH destination, manage_ssh_resource register stages it for Runner restart; after restart list again, update_session_context binds the active Runner-local named SSH resource. Use run_shell/run_job for commands on that resource. When remote shell state must persist, open_session_shell once, and execute_session_shell repeatedly preserves remote cwd/env/exports/functions/umask. A managed resource is not an arbitrary host; the SSH target does not run WebCodex Runner. Local persistent shell remains supported only when same local-process state is required; several ordinary local commands are not enough. Use get_session_shell_status only when needed and close_session_shell for cleanup. run_process supports explicit one-shot/no-persistence SSH destinations maintained outside managed resources; it cannot read their saved credentials.",
         tools: &[
             "manage_ssh_resource",
             "update_session_context",
@@ -132,6 +132,8 @@ pub const TOOL_RECOMMENDED_FLOWS: &[ToolRecommendedFlow] = &[
             "execute_session_shell",
             "get_session_shell_status",
             "close_session_shell",
+            "run_shell",
+            "run_job",
             "run_process",
         ],
     },

@@ -100,7 +100,7 @@ You do not need to stop the runtime or OpenAI Secure Tunnel when ChatGPT moves b
 
 Projects lists working folders before **Devices**. Runner reads files and runs commands on each device; **Connected to Server** describes its service connection. An unavailable desktop session concerns screenshots, windows, mouse and keyboard actions. File and command tools do not depend on that session. Missing or stale observations remain unconfirmed, and a connected desktop session does not establish system permissions. The local permission shortcut opens Settings without starting services or requesting permissions.
 
-Activity separates **Tool calls**, **Workflow Sessions**, and **Service events**. Call sources show their latest call and open the full history. **Call completed** describes execution, not ChatGPT receipt. Sessions show progress, running jobs, and outstanding items; **Open** does not imply running. Check results use readable states, without duplicate job counts or empty attention items. HTTP delivery evidence and internal identifiers remain in details.
+Activity separates **Tool calls**, **Workflow Sessions**, and **Service events**. Call sources show their latest call and open the retained history; incomplete history is labeled. A successful call does not confirm ChatGPT receipt. Sessions show progress, running jobs, and outstanding items; **Open** does not imply running. Check results use readable states, without duplicate job counts or empty attention items. HTTP delivery evidence and internal identifiers remain in details.
 
 Home and the sidebar show the **Local Runner** status and count locally ready Tunnels without claiming current ChatGPT presence. Project session counts describe open sessions. On platforms without native permission probing, desktop access settings explain the missing probe and point to desktop sign-in and the Projects session status; missing permission evidence does not imply unavailable desktop tools.
 
@@ -135,9 +135,19 @@ Paths appear as individual rows. Pick a file or folder, or enter its full path. 
 
 Saving paths or registering a Plugin does not start it or silently restart the Runner. **Restart Desktop-owned Runner** explicitly applies saved configuration, interrupts its current work, and keeps Server and regular Tunnel processes. An independently managed Runner must be restarted by its actual owner.
 
+## Add an SSH server
+
+In **Extensions → SSH resources**, enter the host or IP, port (normally 22), and username. Choose a password, a private-key file on the Runner machine, or existing system authentication; encrypted keys also accept a passphrase. The connection name is suggested from the address and remains yours to edit. **Advanced settings** contains the optional remote working directory and the existing OpenSSH alias mode; closing the section keeps its draft values.
+
+Inspect the server's host-key fingerprint and confirm it against your server information, then choose **Test connection**. Save a successfully tested connection and apply the requested Runner restart. Changing the endpoint, authentication or host key invalidates the previous verification. A loaded resource means the configuration is available; the connection test establishes whether login works. Upgrade Desktop, Server and Runner together for this setup flow.
+
+Chat uses the saved resource name for remote shell commands, Jobs and persistent Shells. The password or passphrase stays in protected storage on the Runner machine and is not returned to Chat. Selecting an SSH resource does not move local Project files or change the target of file/Git/LSP tools; use the selected remote Shell for remote operations. See [Runner SSH resources](RUNNER.md) for the execution boundary.
+
 ## Configure Codex and review coding approvals
 
 In **Extensions → Coding agents**, choose **Configure Codex (experimental)**, then **Check and prepare**. Desktop finds the installed Python and Codex executables automatically. Python 3.10+ and an existing Codex login or API configuration are required. If detection fails, **Advanced** lets you select the executables; normal setup does not require editing TOML or entering launcher arguments.
+
+Select **Allow network access** during preparation when future Codex tasks need to download dependencies or contact a deployment service. The option is off by default and takes effect after saving, enabling the profile and restarting Runner. Project write roots and operation approvals remain separate; external services still use the credentials configured for the running account.
 
 After the compatibility check succeeds, choose **Save and enable Codex**. Desktop saves the checked configuration through the same ownership and revision checks as other coding agents. Then use **Restart Runner** in the apply bar. Preparation itself creates a disabled draft and never grants permissions, starts a Run, or restarts a service. Saving a replacement for an existing Desktop-managed Codex profile is explicit. Exact version, launcher and environment-variable names are available under **Details**. An incompatible Codex upgrade requires preparation again; see the [adapter guide](../integrations/codex_app_server/README.md).
 
@@ -146,6 +156,8 @@ Choose **Review approvals** in the same Coding agents page, or **Runtime → App
 Delegating work and deciding approval requests are separate permissions. The existing **Authorize Runner capabilities** action grants coding delegation and SSH resource access. **Authorize coding approvals** is a separate local operator action with an unchecked consent box; it grants only approval access, and existing delegation and Project write access are still required. This enables an approval capability for the trusted client, not proof of a human identity. Every client given the same credential shares its approval capability. Existing OAuth client grants are not widened automatically. A remote connection needs authorization from its Server operator.
 
 New installations wait up to five minutes for a permission response, subject to the Run's remaining deadline. An existing shorter saved timeout remains in force. You can change the timeout under a coding agent's **Advanced → Global settings**; supported values are 1–600 seconds.
+
+For deployments that need a process to continue after its launching call ends, use **Settings → Files & permissions → Long-running background processes**. This grants the separate `job:detach` capability to the displayed local connection. Chat using another OAuth client or token needs that connection's own grant. The OAuth configuration can explicitly include background processes, SSH and coding agents; replacing an existing client's credentials requires reconnecting with the new client information and authorizing it again. Merely reconnecting an unchanged client does not expand its scopes.
 
 ## macOS permission guidance
 
@@ -159,7 +171,13 @@ If the local Server exits during startup, expand the error's **Details**. Deskto
 
 **Activity** shows newest entries first. Search content or sources, or select **Warnings and errors only**. Filtering never deletes records.
 
+Open a failed tool call to see its available reason and next step. **Request rejected** requires recorded evidence that execution did not start; **Execution failed** requires an observed unsuccessful command result. **Call failed** and **Result not confirmed** preserve uncertainty. Older records without a usable reason say so. A failed `finish_coding_task` is a task-closeout error and does not by itself establish that deployment failed. Refresh the original Job or Session to inspect its result before repeating work whose outcome is unknown.
+
+**Time since response** is the age of the response, shown in seconds, minutes, or hours. It is separate from **Server processing time**, HTTP handoff evidence, and bounded diagnostic codes under **Technical details**. These summaries do not expose command output, passwords, private keys, or raw captured payloads.
+
 **Settings** groups controls into General, Files & permissions, Network, Runtime, Troubleshooting, and About & updates. Selecting a category shows its configuration directly. Switching categories preserves network and tracing drafts without saving or restarting services. General contains language, appearance, and launch at login; Files & permissions contains allowed Runner folders and macOS Computer Use permissions. You can also switch language at the bottom of the sidebar. Supported languages are 简体中文, 繁體中文, English, 日本語, 한국어, Deutsch, and Français. The selection is remembered across restarts, and activity times follow the selected locale. System tray menus follow the selected language, including background startup. Raw backend diagnostics remain in English; the operating system controls native file-picker language.
+
+**About & updates** shows the build's release source. This fork defaults to **9holy/webcodex** for updates, releases, release notes, documentation, and issues. **Upstream project** separately acknowledges **yyjeqhc/webcodex**. A custom build uses its explicitly selected publisher; opening the attribution link does not change the update source.
 
 Closing the window hides Desktop in the menu bar or system tray. Persistent Server, Runner, and Tunnel services continue independently of that window, including when Desktop quits. **Quit WebCodex** ends Desktop and processes it directly owns, such as a temporary Quick Share and legacy Desktop-owned runtime or regular Tunnel. Use the explicit Diagnostics controls for Core-managed local services; they appear only for components this computer owns. A viewer has no local Runner control, and a Server-only computer has no Runner control. A custom legacy service can be observed through its Server connection without Desktop taking over its lifecycle. The legacy Desktop-managed runtime stop in Settings → Runtime also updates its saved startup preference; it does not stop an independent service.
 

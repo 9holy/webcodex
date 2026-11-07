@@ -25,6 +25,7 @@ export function CodexSetupDialog({ target, revision, globals, previousId, disabl
   const p = useProduct(); const c = useConnectionsTools(); const r = useRunnerCapabilitiesText();
   const [python, setPython] = useState(""); const [codex, setCodex] = useState("");
   const [args, setArgs] = useState("[]"); const [version, setVersion] = useState("");
+  const [allowNetwork, setAllowNetwork] = useState(false);
   const [prepared, setPrepared] = useState<PreparedCodexAgent | null>(null);
   const [busy, setBusy] = useState(false); const [saveUncertain, setSaveUncertain] = useState(false);
   const [error, setError] = useState<RunnerCapabilitiesKey | "invalidFields" | null>(null);
@@ -44,13 +45,13 @@ export function CodexSetupDialog({ target, revision, globals, previousId, disabl
       const argumentsValue: unknown = JSON.parse(args);
       if (!Array.isArray(argumentsValue) || argumentsValue.length > 8 || argumentsValue.some(value => typeof value !== "string" || value.length > 4096 || value.includes("\0")) || argumentsValue.reduce((size, value) => size + value.length + 1, 0) > 16384) throw new Error("invalid");
       if (version.trim() && !/^[A-Za-z0-9.+-]{1,96}$/.test(version.trim())) throw new Error("invalid");
-      request = { target, expected_revision: revision, codex_args: argumentsValue, ...(python.trim() ? { python_bin: python.trim() } : {}), ...(codex.trim() ? { codex_bin: codex.trim() } : {}), ...(version.trim() ? { expected_version: version.trim() } : {}) };
+      request = { target, expected_revision: revision, codex_args: argumentsValue, allow_network: allowNetwork, ...(python.trim() ? { python_bin: python.trim() } : {}), ...(codex.trim() ? { codex_bin: codex.trim() } : {}), ...(version.trim() ? { expected_version: version.trim() } : {}) };
     } catch { setError("invalidFields"); return; }
     inFlight.current = true; setBusy(true); setError(null);
     try {
       const value = await desktopApi.prepareCodexCodingAgent(request);
       if (!mounted.current) return;
-      if (value.target.client_id !== target.client_id || value.target.config_path !== target.config_path || value.target.server_url !== target.server_url || value.expected_revision !== revision || value.profile.enabled !== false) { setError("codexSetupChanged"); return; }
+      if (value.target.client_id !== target.client_id || value.target.config_path !== target.config_path || value.target.server_url !== target.server_url || value.expected_revision !== revision || value.profile.enabled !== false || value.profile.args.includes("--network") !== request.allow_network) { setError("codexSetupChanged"); return; }
       setPrepared(value);
     } catch (failure) { if (mounted.current) setError(setupError(failure)); }
     finally { inFlight.current = false; if (mounted.current) setBusy(false); }
@@ -70,12 +71,15 @@ export function CodexSetupDialog({ target, revision, globals, previousId, disabl
   return <WorkspaceDialog title={r("configureCodex")} onClose={onClose} busy={busy}>
     {prepared ? <div className="profile-editor" aria-busy={busy}>
       <p className="workspace-notice" role="status">{r("codexPrepared")}</p>
+      <p>{r(prepared.profile.args.includes("--network") ? "codexNetworkEnabled" : "codexNetworkDisabled")}</p>
       {previousId && <p>{r("codexReplaceSaved")}</p>}
       <details><summary>{p("details")}</summary><p>{r("codexVerifiedVersion")}: <strong>{prepared.codex_version}</strong></p><pre className="codex-prepared-details">{JSON.stringify({ executable: prepared.profile.executable, args: prepared.profile.args, env_from_env: prepared.profile.env_from_env }, null, 2)}</pre></details>
       {error && <p role="alert" className="workspace-notice">{error === "invalidFields" ? c("invalidFields") : r(error)}</p>}
       <div className="connection-actions">{saveUncertain ? <button type="button" className="primary-button" onClick={() => { onClose(); onRefresh(); }}>{p("refresh")}</button> : <button type="button" className="primary-button" aria-label="Save and Enable Codex" disabled={busy || disabled} onClick={() => void save()}>{r("saveEnableCodex")}</button>}<button type="button" className="secondary-button" disabled={busy} onClick={onClose}>{p("cancel")}</button></div>
     </div> : <form className="profile-editor" onSubmit={event => void prepare(event)} aria-busy={busy}>
       <p>{r("codexSetupHelp")}</p><p className="workspace-notice">{r("codexSetupReview")}</p>
+      <label className="profile-checkbox"><input type="checkbox" aria-label="Allow Codex Network Access" aria-describedby="codex-network-help" checked={allowNetwork} onChange={event => setAllowNetwork(event.target.checked)} disabled={busy || disabled} />{r("codexAllowNetwork")}</label>
+      <p id="codex-network-help" className="field-help">{r("codexNetworkHelp")}</p>
       <details><summary>{p("advanced")}</summary>
         <div className="field-group"><label htmlFor="codex-setup-python">{r("pythonExecutable")}</label><input id="codex-setup-python" aria-label="Python Executable" value={python} onChange={event => setPython(event.target.value)} placeholder={r("automaticDetection")} maxLength={1024} disabled={busy || disabled} spellCheck={false} /><button type="button" className="text-button" aria-label="Choose Python Executable" disabled={busy || disabled} onClick={() => void choose("python")}>{p("browse")}</button></div>
         <div className="field-group"><label htmlFor="codex-setup-binary">{r("codexExecutable")}</label><input id="codex-setup-binary" aria-label="Codex Executable" value={codex} onChange={event => setCodex(event.target.value)} placeholder={r("automaticDetection")} maxLength={1024} disabled={busy || disabled} spellCheck={false} /><button type="button" className="text-button" aria-label="Choose Codex Executable" disabled={busy || disabled} onClick={() => void choose("codex")}>{p("browse")}</button></div>

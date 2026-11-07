@@ -14,6 +14,23 @@ fn codex_preparation_requires_explicit_experimental_opt_in() {
     assert!(parsed.codex_bin.is_none());
     assert!(parsed.python_bin.is_none());
     assert!(parsed.config_dir.is_none());
+    assert!(!parsed.allow_network);
+}
+
+#[test]
+fn codex_preparation_network_is_an_independent_explicit_opt_in() {
+    assert!(parse(&args(&["prepare-codex", "--network"])).is_err());
+    let parsed = parse(&args(&["prepare-codex", "--experimental", "--network"])).unwrap();
+    assert!(parsed.allow_network);
+    assert!(parsed.codex_args.is_empty());
+    assert!(usage().contains("--network"));
+    assert!(parse(&args(&[
+        "prepare-codex",
+        "--experimental",
+        "--network",
+        "false"
+    ]))
+    .is_err());
 }
 
 #[test]

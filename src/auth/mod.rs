@@ -41,6 +41,7 @@ use salvo::prelude::*;
 
 mod context;
 mod project_credential;
+mod scope_recovery;
 pub mod scopes;
 
 // `pat` is `pub(crate)` — its functions are internal utilities.
@@ -72,6 +73,7 @@ pub(crate) use project_share::{
     validate_project_share_grant_subject, PROJECT_SHARE_OAUTH_SCOPES,
     PROJECT_SHARE_OAUTH_SUBJECT_KIND, PROJECT_SHARE_OAUTH_TOKEN_KIND,
 };
+pub(crate) use scope_recovery::scope_recovery_hint;
 
 pub use scopes::{
     AGENT_SCOPES, SCOPE_ADMIN, SCOPE_AGENT_JOB_UPDATE, SCOPE_AGENT_POLL, SCOPE_AGENT_REGISTER,

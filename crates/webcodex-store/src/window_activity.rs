@@ -1,6 +1,7 @@
 use crate::models::{
-    WindowActivityEventRecord, WindowActivitySummaryRecord, WindowSessionLinkSummaryRecord,
-    WindowWorkflowAffinityRecord, WindowWorkflowLinkRecord, WindowWorkflowSessionSummaryRecord,
+    WindowActivityEventRecord, WindowActivityFailureMetadata, WindowActivitySummaryRecord,
+    WindowSessionLinkSummaryRecord, WindowWorkflowAffinityRecord, WindowWorkflowLinkRecord,
+    WindowWorkflowSessionSummaryRecord,
 };
 use crate::Database;
 use rusqlite::{params, Connection};
@@ -34,6 +35,26 @@ const WINDOW_EVENT_SELECT: &str = "SELECT e.event_id, e.client_window_key, e.cli
                         WHEN 'expectation_mismatch' THEN 'expectation_mismatch'
                         WHEN 'unexpected_success' THEN 'unexpected_success'
                       END
+                    END,
+                    CASE WHEN json_valid(e.summary_json) THEN
+                      CASE WHEN json_type(e.summary_json, '$.model_ergonomics.error_kind')='text'
+                        AND length(json_extract(e.summary_json, '$.model_ergonomics.error_kind'))<=96
+                        THEN json_extract(e.summary_json, '$.model_ergonomics.error_kind') END
+                    END,
+                    CASE WHEN json_valid(e.summary_json) THEN
+                      CASE WHEN json_type(e.summary_json, '$.model_ergonomics.failure_kind')='text'
+                        AND length(json_extract(e.summary_json, '$.model_ergonomics.failure_kind'))<=96
+                        THEN json_extract(e.summary_json, '$.model_ergonomics.failure_kind') END
+                    END,
+                    CASE WHEN json_valid(e.summary_json) THEN
+                      CASE WHEN json_type(e.summary_json, '$.model_ergonomics.execution_state')='text'
+                        AND length(json_extract(e.summary_json, '$.model_ergonomics.execution_state'))<=32
+                        THEN json_extract(e.summary_json, '$.model_ergonomics.execution_state') END
+                    END,
+                    CASE WHEN json_valid(e.summary_json) THEN
+                      CASE WHEN json_type(e.summary_json, '$.model_ergonomics.recovery_kind')='text'
+                        AND length(json_extract(e.summary_json, '$.model_ergonomics.recovery_kind'))<=32
+                        THEN json_extract(e.summary_json, '$.model_ergonomics.recovery_kind') END
                     END";
 
 const WINDOW_SUMMARY_SELECT: &str = "SELECT e.client_window_key,
@@ -178,7 +199,7 @@ impl Database {
         } else {
             ""
         };
-        let summary_column = include_code_mode_composition.then_some(25);
+        let summary_column = include_code_mode_composition.then_some(29);
         let limit_parameter = if principal.is_some() { 4 } else { 2 };
         let sql = format!(
             "{WINDOW_EVENT_SELECT}{summary_sql}
@@ -600,6 +621,12 @@ fn collect_window_event_rows(
             project: row.get(9)?,
             status: row.get(10)?,
             failure_expectation_result: row.get(24)?,
+            failure_metadata: WindowActivityFailureMetadata {
+                error_kind: row.get(25)?,
+                failure_kind: row.get(26)?,
+                execution_state: row.get(27)?,
+                recovery_kind: row.get(28)?,
+            },
             meaningful: row.get(11)?,
             async_job_id,
             observed_job_ids,

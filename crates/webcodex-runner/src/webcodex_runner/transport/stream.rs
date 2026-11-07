@@ -5,6 +5,33 @@ use super::*;
 pub(super) type RunnerWebSocket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
+/// One absolute wire-write deadline. A false result requires discarding the
+/// stream: cancellation may leave a partial frame, not proof of non-execution.
+pub(super) async fn write_stream_frame<F, E>(
+    transport: StreamTransport,
+    envelope_kind: &'static str,
+    write: F,
+) -> bool
+where
+    F: std::future::Future<Output = Result<(), E>>,
+{
+    let started = Instant::now();
+    let outcome = match tokio::time::timeout(STREAM_WRITE_TIMEOUT, write).await {
+        Ok(Ok(())) => RunnerStreamMetricOutcome::Success,
+        Ok(Err(_)) => RunnerStreamMetricOutcome::TransportError,
+        Err(_) => RunnerStreamMetricOutcome::Timeout,
+    };
+    observe_runner_stream_writer_send(transport, envelope_kind, Some(started.elapsed()), outcome);
+    if outcome == RunnerStreamMetricOutcome::Timeout {
+        tracing::warn!(
+            transport = transport.name(),
+            reason_code = "writer_send_timeout",
+            "webcodex-runner stream write timed out; discarding connection"
+        );
+    }
+    outcome == RunnerStreamMetricOutcome::Success
+}
+
 pub(super) enum StreamRead {
     Envelope(RunnerEnvelope),
     Closed,
@@ -113,6 +140,7 @@ impl RegisteredStream {
                 };
                 if !graceful {
                     writer.abort();
+                    let _ = tokio::time::timeout(STREAM_WRITER_CLOSE_TIMEOUT, &mut writer).await;
                     return;
                 }
                 // Continue polling the read half while the writer flushes
@@ -187,6 +215,8 @@ impl RegisteredStream {
                             tokio::time::timeout(STREAM_WRITER_CLOSE_TIMEOUT, &mut writer).await;
                     } else {
                         writer.abort();
+                        let _ =
+                            tokio::time::timeout(STREAM_WRITER_CLOSE_TIMEOUT, &mut writer).await;
                     }
                 }
             }
@@ -204,6 +234,7 @@ pub(super) async fn finish_quic_writer(
     };
     if !graceful {
         writer.abort();
+        let _ = tokio::time::timeout(STREAM_WRITER_CLOSE_TIMEOUT, &mut writer).await;
         return false;
     }
     match tokio::time::timeout(timeout, &mut writer).await {
@@ -285,6 +316,7 @@ where
     let mut shutdown = Box::pin(shutdown);
     let mut shutdown_requested = false;
     let mut writer_observed = false;
+    let mut peer_deadline = tokio::time::Instant::now() + STREAM_PEER_IDLE_TIMEOUT;
 
     loop {
         if session_error.is_some() {
@@ -367,6 +399,10 @@ where
             read = stream.receive() => {
                 match read {
                     Ok(StreamRead::Envelope(envelope)) => {
+                        // Only a decoded peer envelope proves this return path
+                        // works. Local Ping enqueue/write success and malformed
+                        // WebSocket traffic must not renew this deadline.
+                        peer_deadline = tokio::time::Instant::now() + STREAM_PEER_IDLE_TIMEOUT;
                         if let Some(error) = handle_stream_envelope(
                             transport,
                             envelope,
@@ -386,6 +422,15 @@ where
                         break;
                     }
                 }
+            }
+            _ = tokio::time::sleep_until(peer_deadline) => {
+                tracing::warn!(
+                    transport = transport.name(),
+                    reason_code = "peer_activity_timeout",
+                    timeout_secs = STREAM_PEER_IDLE_TIMEOUT.as_secs(),
+                    "webcodex-runner peer stopped responding; reconnecting the same Runner instance"
+                );
+                break;
             }
             _ = ping_interval.tick() => {
                 tracing::debug!(

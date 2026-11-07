@@ -552,8 +552,35 @@ Session.
 This surface requires the optional `ssh:local` permission. It is not part of the
 ordinary hosted OAuth baseline; opt in explicitly with
 `webcodex connect ... --oauth-local-ssh`. See
-[Runner](RUNNER.md#ssh-session-resources-advanced) for static-vs-managed and
+[Runner](RUNNER.md#ssh-session-resources) for static-vs-managed and
 PersistentShell details.
+
+### Resolving execution and deployment permission failures
+
+The default `trusted_agent` authority mode permits task-authorized shell, Git,
+package installation, service control and release work, subject to the current
+connection's scopes, Project/Runner policy and external account permissions.
+Successful read access does not prove execution access. On a denial, inspect
+`error_kind`, `missing_scope`, `execution_started` and `recovery`; use
+`get_runtime_status` to inspect the **current Chat connection's** credential
+class and granted scopes. Do not substitute another connector's authority.
+
+| Blocking layer | Recovery |
+| --- | --- |
+| WebCodex scope, such as `job:run`, `project:write` or `ssh:local` | Use the scope-specific authorization entry in the returned recovery. Fixed personal tokens require an issuer-approved grant; OAuth requires the client ceiling and authorizing credential to permit the scope, followed by fresh consent. |
+| Long-running background processes (`job:detach`) | Desktop-managed local connections expose an explicit **Settings → Files & permissions → Long-running background processes** authorization. It adds only `job:detach` for native processes on the Runner; ordinary Job/Project access remains independently required. Named SSH sessions do not support detached native argv; manage remote services through SSH and the server's service manager. Existing Chat OAuth grants do not expand automatically. |
+| Codex provider network access | In **Extensions → Coding agents → Configure Codex**, explicitly select **Allow network access**, save/enable the profile and apply it with **Restart Runner**. Workspace-write and provider approval checks remain. |
+| Pending Codex/provider approval | Review the exact request in **Runtime → Approvals** or Desktop **Coding agents → Review approvals** with independent approval authority. Approval of a request is not proof that the deployment succeeded. |
+| SSH login or host trust | Configure and test host/IP, port, user and password/key in Desktop **SSH resources**, then apply the saved connection. Chat selects its logical name; never send credentials in a tool call. |
+| Runner path/shell policy, remote OS rights or hosting-service credentials | Use the specific policy/account named by the failure. A WebCodex scope does not grant remote sudo, change a filesystem ACL, or sign `git`/`gh` into an unrelated GitHub connector account. |
+| Chat Host rejects or hides a tool before dispatch | Restore the Host's connection/approval state. There may be no corresponding WebCodex request to repair; retain the Host error instead of describing it as a Server denial. |
+
+The fixed-token MCP failure remains an error even on clients that hide structured
+error content; its text includes the missing scope, not-started fact and recovery.
+REST and OAuth scope responses carry the same bounded recovery guidance while
+preserving their original status and OAuth challenge behavior. A scope denial
+never starts the command. Timeouts and unknown execution outcomes require
+observation of the existing operation before any retry.
 
 ### OAuth2
 

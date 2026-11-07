@@ -108,6 +108,16 @@ async fn legacy_coding_only_connection_can_observe_confirm_and_grant_without_ssh
             expected: expected.clone(),
             confirmed: false,
             permission_approval: false,
+            detached_execution: false,
+        })
+        .await
+        .is_err());
+    assert!(app
+        .authorize_runner_capabilities(crate::runner_capability_grant::GrantRequest {
+            expected: expected.clone(),
+            confirmed: true,
+            permission_approval: true,
+            detached_execution: true,
         })
         .await
         .is_err());
@@ -117,11 +127,14 @@ async fn legacy_coding_only_connection_can_observe_confirm_and_grant_without_ssh
         .unwrap();
     assert!(before.can_authorize);
     assert!(!before.coding_agents);
+    assert!(!before.detached_execution_granted);
+    assert!(!before.detached_execution_grant_available);
     let after = app
         .authorize_runner_capabilities(crate::runner_capability_grant::GrantRequest {
             expected,
             confirmed: true,
             permission_approval: false,
+            detached_execution: false,
         })
         .await
         .unwrap();

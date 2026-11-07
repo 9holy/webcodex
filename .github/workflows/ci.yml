@@ -258,6 +258,44 @@ jobs:
           cargo test --locked -p webcodex-tool-contracts --no-default-features --features workspace-checkpoints --lib registration_consistency
           cargo test --locked -p webcodex-tool-contracts --no-default-features --features experimental-code-mode --lib registration_consistency
 
+  test-desktop-ui:
+    needs: changes
+    if: needs.changes.outputs.needs_desktop_frontend == 'true' || needs.changes.outputs.needs_frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            apps/desktop/package-lock.json
+            scripts/ui-smoke/package-lock.json
+      - name: Build the production Desktop renderer
+        run: |
+          npm ci --prefix frontend
+          npm ci --prefix apps/desktop
+          npm ci --prefix scripts/ui-smoke
+          npm --prefix apps/desktop run build
+      - name: Install the isolated renderer browser
+        working-directory: scripts/ui-smoke
+        run: npx playwright install --with-deps chromium
+      - name: Check SSH setup, activity failures and publisher navigation
+        # Synthetic loopback fixtures; no credentials, SSH hosts or native effects.
+        run: node scripts/ui-smoke/desktop-fork-workflows.mjs
+      - name: Retain renderer checks and synthetic screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-fork-workflows
+          path: artifacts/desktop-fork-workflows/
+          if-no-files-found: ignore
+          retention-days: 14
+
   mcp-conformance:
     # Dated MCP wire evidence is independent from ordinary unit/integration tests.
     # The script pins the external referee and rejects missing or silently skipped
@@ -426,6 +464,13 @@ jobs:
         run: bash scripts/release_check.sh --static-only
       - name: Check Linux workspace production surfaces without warnings
         run: python3 scripts/check_production_warnings.py
+      - name: Verify SSH password onboarding and remote execution
+        run: |
+          python3 -m venv target/ssh-acceptance-venv
+          target/ssh-acceptance-venv/bin/python -m pip install --disable-pip-version-check paramiko==4.0.0
+          target/ssh-acceptance-venv/bin/python -B -m unittest scripts.tests.test_e2e_ssh_connections -v
+          cargo build --locked --profile dogfood -p webcodex -p webcodex-runner
+          target/ssh-acceptance-venv/bin/python scripts/e2e_ssh_connections.py --bin-dir target/dogfood
       - name: Upload Linux production build evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -582,6 +627,8 @@ jobs:
         run: cargo test --locked -p webcodex-runner -p webcodex-lsp -p webcodex-computer --features runner-real-process-tests
       - name: Test bundled Codex provider preparation on macOS
         run: cargo test --locked -p webcodex-environment codex_app_server
+      - name: Test private SSH credential files and leases on macOS
+        run: cargo test --locked -p webcodex-environment private_files
       - name: Test Codex app-server protocol and package on macOS
         run: |
           python3 -m unittest discover -s integrations/codex_app_server/tests -p 'test_*.py' -v
@@ -813,6 +860,8 @@ jobs:
         run: python -m unittest discover -s integrations/codex -p 'test_*.py' -v
       - name: Test bundled Codex provider preparation on Windows
         run: cargo test --locked -p webcodex-environment codex_app_server
+      - name: Test private SSH credential files and leases on Windows
+        run: cargo test --locked -p webcodex-environment private_files
       - name: Test Codex app-server protocol and package on Windows
         run: |
           python -m unittest discover -s integrations/codex_app_server/tests -p 'test_*.py' -v
@@ -897,10 +946,40 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Test native Windows installer directory and upstream coordinator routing
+        shell: pwsh
+        env:
+          WEBCODEX_REQUIRE_NSIS_TESTS: "1"
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install nsis --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "NSIS compiler installation failed" }
+          python -c "from scripts.tests.test_windows_installer_native import nsis_compiler; assert nsis_compiler() is not None, 'Required NSIS compiler is unavailable'"
+          if ($LASTEXITCODE -ne 0) { throw "Native installer gate cannot skip without NSIS" }
+          python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native -v
+          if ($LASTEXITCODE -ne 0) { throw "Native installer directory/upgrade contracts failed" }
+      - name: Test native SSH acceptance fixture before compiling Desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Keep this Python environment outside the subsequently restored Rust cache.
+          $venv = Join-Path $env:RUNNER_TEMP "webcodex-ssh-acceptance-venv"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance virtual environment creation failed" }
+          $python = Join-Path $venv "Scripts\python.exe"
+          & $python -m pip install --disable-pip-version-check paramiko==4.0.0
+          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance dependencies failed" }
+          & $python -B -m unittest scripts.tests.test_e2e_ssh_connections -v
+          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance fixture regressions failed" }
+          "WEBCODEX_SSH_ACCEPTANCE_PYTHON=$python" >> $env:GITHUB_ENV
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: windows-desktop-ci
+          cache-on-failure: true
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -966,6 +1045,15 @@ jobs:
             -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") `
             -OutputDir $stage
           "config=$(Join-Path $stage 'tauri.bundle.conf.json')" >> $env:GITHUB_OUTPUT
+      - name: Verify native Windows OpenSSH password onboarding and remote execution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Run against the exact staged runtime before the slower NSIS build.
+          # The script pins System32 OpenSSH and refuses Git's SSH client.
+          # Git Bash is only the Paramiko server's disposable remote shell.
+          & $env:WEBCODEX_SSH_ACCEPTANCE_PYTHON scripts/e2e_ssh_connections.py --bin-dir target/dogfood
+          if ($LASTEXITCODE -ne 0) { throw "Native Windows SSH authentication/remote execution failed" }
       - name: Build unsigned NSIS installer
         working-directory: apps/desktop
         shell: pwsh
@@ -1000,7 +1088,23 @@ jobs:
             -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") `
             -Platform win32-x64 `
             -InstallDir $customInstallDir
-
+      - name: Upgrade the pinned upstream Desktop installation without changing its folder or data
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $previous = Join-Path $env:RUNNER_TEMP "webcodex-desktop-upstream-v0.5.0-x64-setup.exe"
+          Invoke-WebRequest `
+            -Uri "https://github.com/yyjeqhc/webcodex/releases/download/v0.5.0/webcodex-desktop-v0.5.0-win32-x64-setup.exe" `
+            -OutFile $previous
+          & .\scripts\desktop_install_windows_smoke.ps1 `
+            -Installer $env:DESKTOP_CI_INSTALLER `
+            -Version "${{ steps.runtime.outputs.version }}" `
+            -SourceSha "${{ steps.runtime.outputs.source }}" `
+            -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") `
+            -Platform win32-x64 `
+            -InstallDir (Join-Path $env:RUNNER_TEMP "WebCodex Upstream Upgrade") `
+            -PreviousInstaller $previous `
+            -PreviousInstallerSha256 "dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6"
   test-windows:
     needs: [contract, changes, test-windows-core, test-windows-runner, test-windows-package, test-windows-desktop]
     # Preserve the stable Windows aggregate while allowing each heavy lane to be
@@ -1047,7 +1151,7 @@ jobs:
           require_lane desktop "$NEEDS_DESKTOP" "$DESKTOP_RESULT"
 
   test-native:
-    needs: [contract, changes, mcp-conformance, test-docker-server, test-macos, test-windows]
+    needs: [contract, changes, mcp-conformance, test-docker-server, test-desktop-ui, test-macos, test-windows]
     # Stable branch-protection context: daily native aggregates and the path-aware
     # Server image smoke must resolve according to classifier policy.
     # Workflow cancellation is distinct from needs.<lane>.result. Superseded
@@ -1061,8 +1165,10 @@ jobs:
           CONTRACT_RESULT: ${{ needs.contract.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           NEEDS_DOCKER: ${{ needs.changes.outputs.needs_docker }}
+          NEEDS_DESKTOP_UI: ${{ needs.changes.outputs.needs_desktop_frontend == 'true' || needs.changes.outputs.needs_frontend == 'true' }}
           MCP_CONFORMANCE_RESULT: ${{ needs.mcp-conformance.result }}
           DOCKER_RESULT: ${{ needs.test-docker-server.result }}
+          DESKTOP_UI_RESULT: ${{ needs.test-desktop-ui.result }}
           MACOS_RESULT: ${{ needs.test-macos.result }}
           WINDOWS_RESULT: ${{ needs.test-windows.result }}
         run: |
@@ -1080,5 +1186,11 @@ jobs:
           if [ "$NEEDS_DOCKER" = true ]; then expected_docker=success; fi
           if [ "$DOCKER_RESULT" != "$expected_docker" ]; then
             echo "Server image lane expected $expected_docker, got $DOCKER_RESULT" >&2
+            exit 1
+          fi
+          expected_desktop_ui=skipped
+          if [ "$NEEDS_DESKTOP_UI" = true ]; then expected_desktop_ui=success; fi
+          if [ "$DESKTOP_UI_RESULT" != "$expected_desktop_ui" ]; then
+            echo "Desktop renderer lane expected $expected_desktop_ui, got $DESKTOP_UI_RESULT" >&2
             exit 1
           fi

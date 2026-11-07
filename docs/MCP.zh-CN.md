@@ -458,7 +458,30 @@ replacement Runner，也不会在 uncertain outcome 后自动 replay。Raw SSH t
 
 该 surface 需要可选 `ssh:local` permission，不属于普通 hosted OAuth baseline；通过
 `webcodex connect ... --oauth-local-ssh` 显式 opt in。Static/managed 语义与 PersistentShell
-边界见 [Runner](RUNNER.zh-CN.md#ssh-会话资源高级)。
+边界见 [Runner](RUNNER.zh-CN.md#ssh-会话资源)。
+
+### 处理执行与部署权限不足
+
+默认 `trusted_agent` 模式支持用户任务已授权的 Shell、Git、安装依赖、服务管理和发布，
+实际执行仍取决于当前连接的 scope、Project/Runner 策略及外部账户权限。能读取文件不代表
+已具备执行权限。拒绝时读取 `error_kind`、`missing_scope`、`execution_started` 与
+`recovery`；通过 `get_runtime_status` 检查**当前 Chat 连接**的凭据类型和 scope，
+不能用另一个连接器的授权代替。
+
+| 拦截位置 | 处理入口 |
+| --- | --- |
+| WebCodex scope，例如 `job:run`、`project:write`、`ssh:local` | 按返回的 recovery 进入对应授权入口。个人固定 token 需要签发者确认授权；OAuth 需要 client 允许列表与授权凭据均允许该 scope，再重新同意授权。 |
+| 长期后台进程（`job:detach`） | Desktop 管理的本机连接可在**设置 → 文件访问与权限 → 长期后台部署进程**显式授权。只为 Runner 本机原生进程增加 `job:detach`，普通 Job/Project 权限仍单独检查。命名 SSH 会话不支持 detached native argv；远程长期服务应通过 SSH 与服务器现有服务管理器操作。Chat 已有 OAuth grant 不会自动扩权。 |
+| Codex provider 网络访问 | 在**扩展 → 编码代理 → 配置 Codex**勾选**允许网络访问**，保存并启用后**重启 Runner**应用。仍保留工作区写入范围与 provider 审批。 |
+| 等待 Codex/provider 审批 | 具有独立审批权限的用户在 Web **Runtime → Approvals** 或 Desktop **编码代理 → 查看审批**处理精确请求。审批成功不等于部署完成。 |
+| SSH 登录或主机指纹 | 在 Desktop **SSH 资源**填写并测试主机/IP、端口、用户和密码/密钥，然后应用保存的连接。Chat 只选择资源逻辑名称，不接收登录凭据。 |
+| Runner 目录/Shell 策略、远程系统权限或托管服务凭据 | 根据错误定位到具体策略或账户。WebCodex scope 不会授予远程 sudo、更改文件系统 ACL，也不会把独立 GitHub 连接器的登录态自动提供给 `git`/`gh`。 |
+| Chat Host 在派发前拒绝或隐藏工具 | 恢复 Host 的连接或审批状态。这种情况可能完全没有请求抵达 WebCodex，应保留 Host 的原始错误，不能笼统判定为 Server 拒绝。 |
+
+固定 token 的 MCP scope 失败始终保留错误状态；即使客户端隐藏结构化错误，文本中仍包含
+缺少的 scope、尚未启动执行的事实和恢复方法。REST/OAuth scope 响应提供同一套有界恢复
+提示，并保留原 HTTP 状态与 OAuth challenge。scope 拒绝不会启动命令；超时或执行结果
+未知时，应先观察原操作结果，再判断是否可以重试。
 
 ### OAuth2
 

@@ -135,6 +135,7 @@ mod validation_events;
 pub(crate) mod validation_profile;
 mod validation_source;
 pub(crate) mod window_activity;
+mod window_activity_failure;
 pub(crate) mod window_activity_projection;
 pub(crate) use webcodex_core::{
     project_instructions, project_listing as file_listing, validation_evidence as validation_parser,

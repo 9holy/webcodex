@@ -1,9 +1,10 @@
 # Desktop Runner capabilities: ACP discovery and managed SSH
 
-This increment addresses #616 and #603. It adds product surfaces to existing
-Runner capabilities; it does not introduce another ACP runtime, an SSH registry,
-provider auto-download, ACP hot reload, SSH configuration import, or credential
-management.
+The original increment addressed #616 and #603 by exposing existing Runner
+capabilities. SSH connection setup now also supports an explicit host, port,
+account, authentication method, and host-key confirmation. Both setup paths use
+the Runner's one canonical managed SSH registry. There is no second ACP runtime,
+provider auto-download, ACP hot reload, or automatic SSH configuration import.
 
 ## User workflow
 
@@ -43,15 +44,42 @@ The inventory always comes from the exact Desktop Runner's canonical
 `manage_ssh_resource` gateway. It shows only name, Managed/Static source, active state,
 and pending-restart state. Static resources have no Remove action.
 
-**Add SSH resource** accepts a name, a target, and optional default working
-directory. A target can be `user@host`, a hostname, or an existing OpenSSH alias
-such as `special`. OpenSSH resolves aliases. Desktop does not parse or import
-`~/.ssh/config`, identity files, jump hosts, passwords, or keys.
+**Add SSH resource** defaults to a direct connection: resource name, host/IP,
+port (22 by default), username, authentication method, and optional remote
+working directory. Password authentication accepts a write-only password;
+identity-file authentication refers to a key on the **Runner's machine**, with
+an optional write-only passphrase. Existing-environment authentication uses that
+Runner account's default keys or agent. Direct connections have an isolated
+OpenSSH configuration and do not inherit aliases, jump hosts, or proxy commands.
 
-After submission, target/cwd are discarded from the transient form. They are not
-returned in the inventory and there is no local history or parallel SSH database.
-To change a target, remove the managed resource and add it again. Removing a
-resource removes the managed reference, not files on the remote machine.
+The operator first inspects the host key, compares the displayed SHA-256
+fingerprint with the server administrator's trusted fingerprint, and explicitly
+confirms it. Inspection alone never establishes trust. A bounded challenge binds
+the selected key to the exact endpoint, Runner process, and registry revision.
+Connection tests and saving authenticate against that exact key. A changed key,
+expired challenge, incorrect password, or unavailable SSH client produces a
+specific closed error; none silently disables host-key verification or retries
+with weaker authentication.
+
+The advanced OpenSSH-target mode still accepts `user@host`, a hostname, an
+`ssh://user@host:port` destination, or an existing alias such as `special`.
+It retains the Runner's existing OpenSSH configuration. Desktop does not import
+`~/.ssh/config` or copy a local key to a different Runner.
+
+After submission, connection fields and secrets are cleared from the transient
+form. Inventory still returns logical names and lifecycle state only. Credentials
+are stored in private, owner-checked files on the Runner, separately from the
+managed registry; they are not an operating-system encrypted password vault.
+They do not enter model tool arguments, Workflow Session history, or full tool
+traces. There is no Desktop connection-history database. To change a saved
+connection, remove its managed resource and add it again. Removing the reference
+does not remove files on the remote machine.
+
+**Loaded** means the running Runner loaded that configuration; it is not a live
+connection or a successful login assertion. A successful connection test is
+evidence about that form's endpoint, key, and credentials at that moment. Saving
+still stages desired state and explicitly restarting the Runner applies it.
+Chat can then select the active logical resource without receiving its password.
 
 Every mutation consumes a fresh observation and immediately re-lists. An uncertain
 result remains explicitly uncertain even when the subsequent list succeeds.
@@ -121,17 +149,26 @@ domain; there is no hot replacement or fabricated Active result.
 
 ## Closed SSH native boundary
 
-The WebView has dedicated `ssh_resource_list`, `ssh_resource_register`, and
-`ssh_resource_remove` commands. It cannot choose an arbitrary runtime tool,
-endpoint, Runner, header, or credential. Native code sends the fixed canonical
-`manage_ssh_resource` request through `/api/tools/call`, using the current connection's
-private user token. The Server's normal tool kernel and SSH gateway retain final
-scope, ownership, exact-instance, and revision authorization.
+The WebView has closed native commands for listing, inspecting, probing,
+registering, and removing SSH resources. It cannot choose an arbitrary runtime
+tool, endpoint, Runner, header, or WebCodex credential. Native code calls only
+the fixed `/api/runtime-console/ssh-resources/` operator endpoints with the current
+connection's private user token. These endpoints require first-party operator
+credentials with `ssh:local`; OAuth/model, Agent, Shared Key, and Project
+credentials cannot use them. Runner visibility, ownership, exact-instance,
+revision, and binding checks remain in the canonical SSH gateway.
 
-Only an opaque, single-use Desktop observation ID is projected to the WebView.
+The model-facing `manage_ssh_resource` schema remains list/register/remove for
+existing OpenSSH destinations. It never admits passwords, passphrases, host-key
+trust, or arbitrary operator actions. Structured setup requires the Runner's
+explicit `ssh_connection_setup` capability, so older Runner processes are never
+sent an operation they cannot decode.
+
+Only an opaque Desktop observation ID is projected to the WebView.
 The canonical Server binding stays native. Its native observation is tied to the
 Server/Runner/configuration/credential-file identity. A local single-flight gate
-serializes mutations; the Server independently enforces its binding/revision.
+serializes operations; inspection and probing preserve the observation, while a
+mutation consumes it once. The Server independently enforces binding/revision.
 The Desktop state lock is not held across network I/O. Late reads are discarded
 when the connection changes or shutdown begins.
 
@@ -199,11 +236,42 @@ identity. Every program given the same approval-capable credential has the same
 authority. Keep it separate from clients that should only start/observe Runs;
 existing OAuth clients and grants are not silently widened.
 
+Detached process authority is another independent opt-in. **Settings → Files & permissions →
+Long-running background processes** uses the same canonical status/grant flow
+with `detached_execution: true`. It adds only
+`job:detach` to the exact eligible user key, never SSH, Coding Agent, ordinary
+Job/Project or administrator authority. The selector is mutually exclusive with
+the approval selector. An absent status field on an older Server means support
+is unknown, not authorized. This scope permits an explicitly requested native
+process on the Runner to outlive Runner restart/replacement. Named SSH sessions
+do not support detached native argv; remote services use their server's service
+manager through the SSH account. This scope does not establish reboot persistence
+or grant a remote OS account service-management rights. Existing Chat credentials
+must be re-observed and OAuth reauthorized separately when necessary.
+
+Status remains a POST with an empty JSON object. New native clients explicitly
+negotiate the additive field using
+`x-webcodex-runner-capability-status: detached-execution-v1`; only this exact
+value enables the `detached_execution` projection. Missing or unknown values
+retain the published three-field response for older Desktop parsers. An older
+Server ignores the header and the newer client reports this opt-in unavailable,
+without retrying or inferring authority.
+
 ## Codex configuration and approval UI contracts
 
 Desktop exposes **Configure Codex (experimental)** on the existing Coding agents page. The native `prepare_codex_coding_agent` request carries the captured `SettingsTarget` and desired-state revision. It rejects a replacement connection or stale manifest before installing resources or running a probe. It calls the shared `webcodex_environment::codex_app_server::prepare_codex` helper on a bounded worker: bundled source resources, Python/Codex discovery, exact version/schema checks, a unique private receipt, and a disabled typed profile. It does not save desired state, authorize scopes or restart processes.
 
 The successful dialog presents **Save and enable Codex**. That explicit action uses the existing `save_coding_agent` revision/ownership transaction, with `enabled: true`; a replacement names the existing Desktop-owned provider. Uncertain saves require observation before another attempt. The normal apply bar exposes **Restart Runner**. Executable paths, up to eight fixed launcher arguments and the optional exact version are advanced inputs; no TOML-edit instruction is part of the normal product flow.
+
+The dialog also exposes an unchecked **Allow network access** option. The
+explicit `allow_network` input is passed through the shared preparation helper
+and must exactly match the resulting provider's `serve --network` arguments.
+The existing profile arguments remain the single authority for this setting;
+the compatibility receipt does not become a second permission store. Applying
+the setting keeps `workspace-write`, the exact Project writable root and
+`on-request` provider approval. It does not expand inherited credentials or
+enable unrestricted filesystem access. CLI preparation uses the corresponding
+explicit `prepare-codex --network` option.
 
 The Web **Runtime → Approvals** tab and Desktop **Coding agents → Review approvals** share the same bounded request/receipt UI. It renders complete provider `details` as escaped plain text, offers only actual one-time provider options plus explicit cancellation, fences component state by connection identity, disables expired requests and synchronously locks double submissions. Polling never interrupts a slower in-flight read. The UI rejects an HTTP-success response unless the canonical tool also returns `success: true` and `output.response_accepted: true`; stable `output.error_kind` values carry permission/stale failures without exposing arbitrary diagnostic text.
 

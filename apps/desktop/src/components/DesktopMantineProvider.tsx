@@ -1,4 +1,4 @@
-import { Alert, Button, Modal, PasswordInput, Select, TextInput, Textarea, MantineProvider, colorsTuple, createTheme } from "@mantine/core";
+import { Alert, Button, Modal, PasswordInput, Select, TextInput, Textarea, MantineProvider, colorsTuple, createTheme, type MantineProviderProps } from "@mantine/core";
 import { useMediaQuery } from "@mantine/hooks";
 import { MotionConfig } from "motion/react";
 import type { ReactNode } from "react";
@@ -6,7 +6,7 @@ import { accentTokens } from "../../../../frontend/src/ui/accent";
 import { accentVariantResolver } from "../../../../frontend/src/ui/mantineAccentTheme";
 import { useAppearance } from "../hooks/useAppearance";
 
-export function DesktopMantineProvider({ children }: { children: ReactNode }) {
+export function DesktopMantineProvider({ children, env }: { children: ReactNode; env?: MantineProviderProps["env"] }) {
   const { accent, appearance } = useAppearance();
   const prefersDark = useMediaQuery("(prefers-color-scheme: dark)", false);
   const colorScheme = appearance === "system"
@@ -35,6 +35,7 @@ export function DesktopMantineProvider({ children }: { children: ReactNode }) {
   });
   return (
     <MantineProvider
+      env={env}
       forceColorScheme={colorScheme}
       theme={theme}
     >

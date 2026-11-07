@@ -30,26 +30,53 @@ fn preparation_rejects_enabled_retargeted_or_credential_bearing_profiles() {
     let adapter = root.join("adapter.py");
     let receipt = root.join("receipt.json");
     let original = fixture_profile(&python, &adapter, &receipt);
-    validate_prepared(&original, &python, &adapter, &receipt).unwrap();
+    validate_prepared(&original, &python, &adapter, &receipt, false).unwrap();
     let mut enabled = original.clone();
     enabled.profile.enabled = true;
-    assert!(validate_prepared(&enabled, &python, &adapter, &receipt).is_err());
+    assert!(validate_prepared(&enabled, &python, &adapter, &receipt, false).is_err());
     let mut retargeted = original.clone();
     retargeted.profile.args[0] = root.join("other.py").to_string_lossy().into_owned();
-    assert!(validate_prepared(&retargeted, &python, &adapter, &receipt).is_err());
+    assert!(validate_prepared(&retargeted, &python, &adapter, &receipt, false).is_err());
     let mut secret = original.clone();
     secret
         .profile
         .env_from_env
         .insert("OPENAI_API_KEY".into(), "private-test-token".into());
-    let error = validate_prepared(&secret, &python, &adapter, &receipt).unwrap_err();
+    let error = validate_prepared(&secret, &python, &adapter, &receipt, false).unwrap_err();
     assert!(!error.to_string().contains("private-test-token"));
     let mut widened = original;
     widened
         .profile
         .allowed_config_options
         .push("sandbox".into());
-    assert!(validate_prepared(&widened, &python, &adapter, &receipt).is_err());
+    assert!(validate_prepared(&widened, &python, &adapter, &receipt, false).is_err());
+}
+
+#[test]
+fn preparation_network_access_requires_the_exact_operator_choice() {
+    let root = std::env::temp_dir();
+    let python = root.join("python");
+    let adapter = root.join("adapter.py");
+    let receipt = root.join("receipt.json");
+    let offline = fixture_profile(&python, &adapter, &receipt);
+    assert!(!PrepareCodexOptions::default().allow_network);
+    assert!(validate_prepared(&offline, &python, &adapter, &receipt, true).is_err());
+    let mut online = offline;
+    online.profile.args.push("--network".into());
+    assert!(validate_prepared(&online, &python, &adapter, &receipt, false).is_err());
+    validate_prepared(&online, &python, &adapter, &receipt, true).unwrap();
+    let mut wider_sandbox = online.clone();
+    wider_sandbox
+        .profile
+        .args
+        .extend(["--sandbox".into(), "danger-full-access".into()]);
+    assert!(validate_prepared(&wider_sandbox, &python, &adapter, &receipt, true).is_err());
+    let mut extra_credentials = online;
+    extra_credentials
+        .profile
+        .env_from_env
+        .insert("GH_TOKEN".into(), "GH_TOKEN".into());
+    assert!(validate_prepared(&extra_credentials, &python, &adapter, &receipt, true).is_err());
 }
 
 #[test]
@@ -69,15 +96,26 @@ fn preparation_uses_bundled_resources_and_unique_receipts_without_enabling() {
         codex_bin: Some(python),
         codex_args: vec!["-u".into(), fixture.to_string_lossy().into_owned()],
         expected_version: Some("0.167.0-fixture.1".into()),
+        allow_network: false,
     };
     let first = prepare_codex(&options).unwrap();
     let original = std::fs::read(&first.receipt).unwrap();
-    let second = prepare_codex(&options).unwrap();
+    let second = prepare_codex(&PrepareCodexOptions {
+        allow_network: true,
+        ..options.clone()
+    })
+    .unwrap();
     assert_ne!(first.receipt, second.receipt);
     assert_eq!(std::fs::read(&first.receipt).unwrap(), original);
     assert_eq!(first.profile.args[0], second.profile.args[0]);
     assert!(Path::new(&first.profile.args[0]).is_absolute());
+    assert!(!first.profile.args.iter().any(|arg| arg == "--network"));
+    assert_eq!(
+        second.profile.args.last().map(String::as_str),
+        Some("--network")
+    );
     assert!(!first.profile.enabled);
+    assert!(!second.profile.enabled);
     assert!(!options.config_dir.join("runner.toml").exists());
     assert!(!options.config_dir.join("coding-agents.json").exists());
     let failure = prepare_codex(&PrepareCodexOptions {

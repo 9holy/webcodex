@@ -152,7 +152,7 @@ def _mark_platform_context_bounded(risk: Risk) -> None:
 
 
 def _is_docs_or_text(path: str) -> bool:
-    return path.startswith("docs/") or path in {"README.md", "CHANGELOG.md", "LICENSE"}
+    return path.startswith("docs/") or path in {"README.md", "CHANGELOG.md", "LICENSE", "scripts/ui-smoke/README.md"}
 
 
 def _is_main_frontend(path: str) -> bool:
@@ -219,6 +219,29 @@ def _classify_path(risk: Risk, path: str) -> None:
     name = PurePosixPath(lower).name
     tokens = {token for token in re.split(r"[/_.-]+", lower) if token}
 
+    # The Desktop lane already builds exact native Server/Runner binaries and
+    # runs the complete Windows OpenSSH onboarding/remote-execution acceptance.
+    # Keep that gate reachable for changes to its real transport/secret owners,
+    # not just for PRs that happen to also edit the Desktop package.
+    ssh_acceptance_scripts = {
+        "scripts/e2e_ssh_connections.py",
+        "scripts/e2e_session_continuity_ws.py",
+        "scripts/tests/test_e2e_ssh_connections.py",
+    }
+    if path in ssh_acceptance_scripts or path in {
+        "crates/webcodex-environment/src/private_files.rs",
+        "crates/webcodex-runner/src/webcodex_runner/ssh.rs",
+        "crates/webcodex-runner/src/webcodex_runner/ssh_credentials.rs",
+        "crates/webcodex-runner/src/webcodex_runner/managed_ssh.rs",
+        "crates/webcodex-runner/src/webcodex_runner/job_manager/ssh.rs",
+    } or path.startswith((
+        "crates/webcodex-runner/src/webcodex_runner/ssh_credentials/",
+        "crates/webcodex-runner/src/webcodex_runner/managed_ssh/",
+    )):
+        _mark_windows_desktop(risk, "ssh-native-acceptance")
+        if path in ssh_acceptance_scripts:
+            return
+
     if (
         path.startswith("npm/plugin-sdk/")
         or path.startswith("plugins/safe-delete/")
@@ -268,6 +291,12 @@ def _classify_path(risk: Risk, path: str) -> None:
         return
     if _is_docs_or_text(path):
         risk.categories.add("docs")
+        return
+    if path.startswith("scripts/ui-smoke/"):
+        # Fixture and browser dependency changes must exercise the renderer
+        # harness, even when no product TS/CSS changed in the same commit.
+        risk.needs_desktop_frontend = True
+        risk.categories.add("desktop-ui-smoke")
         return
     if _is_main_frontend(path):
         risk.needs_frontend = True
@@ -324,6 +353,7 @@ def _classify_path(risk: Risk, path: str) -> None:
     if path in {
         "scripts/prepare_desktop_bundle.ps1",
         "scripts/desktop_install_windows_smoke.ps1",
+        "scripts/build_windows_unified_bootstrap.py",
     }:
         _mark_windows_desktop(risk, "windows-desktop-package")
         if path == "scripts/desktop_install_windows_smoke.ps1":

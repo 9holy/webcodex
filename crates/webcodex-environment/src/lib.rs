@@ -32,6 +32,7 @@ mod layout;
 mod local_status;
 mod migration;
 mod native;
+pub mod private_files;
 mod privilege;
 mod process;
 mod runner_preflight;

@@ -1184,6 +1184,13 @@ runner_capabilities! {
         #[serde(default, skip_serializing_if = "is_false")]
         pub managed_ssh_resources: bool = false;
     }
+    /// Operator-only structured SSH setup, pinned host-key inspection and
+    /// authentication probes. Never inferred from legacy resource management.
+    SshConnectionSetup => RUNNER_CAPABILITY_SSH_CONNECTION_SETUP("ssh_connection_setup"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub ssh_connection_setup: bool = false;
+    }
     /// First-class read/check and fenced activation of the exact Runner process's
     /// startup-bound configuration path. Missing on older Runners is false; Servers
     /// must never fall back to PID/signal emulation for this operation.
@@ -2339,7 +2346,7 @@ pub struct RunnerPollPayload {
     pub project_inventory_page: Option<ShellProjectInventoryPage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RunnerRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub computer_control_epoch: Option<String>,
@@ -2424,6 +2431,22 @@ pub struct RunnerRequest {
     /// to the Runner and is never accepted through this transport.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub coding_agent: Option<crate::coding_agent::CodingAgentRequest>,
+}
+
+impl std::fmt::Debug for RunnerRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Wire payloads may carry operator credentials. Keep every enclosing
+        // Debug projection safe, including queue/envelope error diagnostics.
+        formatter
+            .debug_struct("RunnerRequest")
+            .field("request_id", &self.request_id)
+            .field("client_id", &self.client_id)
+            .field("kind", &self.kind)
+            .field("job_id", &self.job_id)
+            .field("timeout_secs", &self.timeout_secs)
+            .field("created_at", &self.created_at)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -3050,6 +3073,7 @@ mod envelope_tests {
                 native_tool_plugins: false,
                 mcp_gateway_resource_links: false,
                 managed_ssh_resources: false,
+                ssh_connection_setup: false,
                 runner_config_control: false,
                 instruction_runtime: false,
             },

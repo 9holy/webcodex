@@ -8,7 +8,9 @@ param(
     [Parameter(Mandatory = $true)][Int64]$BuiltAt,
     [Parameter(Mandatory = $true)][ValidateSet("win32-x64", "win32-arm64")][string]$Platform,
     [bool]$GitDirty = $false,
-    [string]$InstallDir
+    [string]$InstallDir,
+    [string]$PreviousInstaller,
+    [string]$PreviousInstallerSha256
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,6 +33,22 @@ if ($InstallDir) {
     $requestedInstallDir = (Resolve-InputPath $InstallDir).TrimEnd('\')
     if (Test-Path -LiteralPath $requestedInstallDir) {
         throw "refusing custom-directory smoke because the requested install directory already exists: $requestedInstallDir"
+    }
+}
+if ([bool]$PreviousInstaller -ne [bool]$PreviousInstallerSha256) {
+    throw "PreviousInstaller and its pinned SHA-256 must be supplied together"
+}
+if ($PreviousInstaller) {
+    if (-not $requestedInstallDir) {
+        throw "upstream upgrade smoke requires a new, explicit isolated InstallDir"
+    }
+    $PreviousInstaller = Resolve-InputPath $PreviousInstaller
+    if (-not (Test-Path -LiteralPath $PreviousInstaller -PathType Leaf) -or
+        $PreviousInstallerSha256 -notmatch '^[0-9a-fA-F]{64}$') {
+        throw "upstream installer or its pinned SHA-256 is invalid"
+    }
+    if ((Get-FileHash -LiteralPath $PreviousInstaller -Algorithm SHA256).Hash -ne $PreviousInstallerSha256) {
+        throw "upstream installer differs from the pinned published bytes"
     }
 }
 
@@ -162,12 +180,60 @@ if (Get-WebCodexUninstallEntry) {
 $installedDir = $null
 $uninstaller = $null
 $installed = $false
+$dataSentinel = $null
+$sentinelContents = $null
+$createdDataDir = $false
+$unrelatedProcess = $null
+$unrelatedDir = $null
+$dataDir = Join-Path ([Environment]::GetFolderPath("LocalApplicationData")) "dev.webcodex.desktop"
 try {
+    if ($PreviousInstaller) {
+        $previous = Start-Process -FilePath $PreviousInstaller -ArgumentList "/S /D=$requestedInstallDir" -Wait -PassThru
+        if ($previous.ExitCode -ne 0) {
+            throw "pinned upstream Desktop installer failed with exit code $($previous.ExitCode)"
+        }
+        Wait-Until { $null -ne (Get-WebCodexUninstallEntry) } 30 "upstream Desktop did not register an uninstall entry"
+        $installed = $true
+        $entry = Get-WebCodexUninstallEntry
+        $installedDir = Resolve-RegistryPath ([string]$entry.InstallLocation) "InstallLocation"
+        $uninstaller = Resolve-UninstallExecutable ([string]$entry.UninstallString)
+        if (-not [string]::Equals($installedDir.TrimEnd('\'), $requestedInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw "upstream Desktop did not honor the isolated custom installation directory"
+        }
+        # Create one uniquely named, non-secret data fixture. Never overwrite
+        # an existing user's configuration or delete their application data.
+        $createdDataDir = -not (Test-Path -LiteralPath $dataDir)
+        New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+        $dataSentinel = Join-Path $dataDir ("installer-upgrade-fixture-{0}.json" -f [Guid]::NewGuid().ToString("N"))
+        $sentinelContents = '{"fixture":"preserve-existing-desktop-data"}'
+        [IO.File]::WriteAllText($dataSentinel, $sentinelContents, [Text.Encoding]::UTF8)
+        # An unrelated, owned fixture has the same executable name. Neither
+        # upgrade nor an indirect old-uninstaller handoff may terminate it.
+        $unrelatedDir = Join-Path ([IO.Path]::GetTempPath()) ("webcodex-unrelated-installer-fixture-" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $unrelatedDir | Out-Null
+        $unrelatedExe = Join-Path $unrelatedDir "WebCodex.exe"
+        Copy-Item -LiteralPath (Join-Path $env:SystemRoot "System32\cmd.exe") -Destination $unrelatedExe
+        $start = [Diagnostics.ProcessStartInfo]::new()
+        $start.FileName = $unrelatedExe
+        $start.Arguments = "/D /C set /p fixture="
+        $start.UseShellExecute = $false
+        $start.CreateNoWindow = $true
+        $start.RedirectStandardInput = $true
+        $start.RedirectStandardOutput = $true
+        $start.RedirectStandardError = $true
+        $unrelatedProcess = [Diagnostics.Process]::new()
+        $unrelatedProcess.StartInfo = $start
+        if (-not $unrelatedProcess.Start()) { throw "could not start the unrelated same-name process fixture" }
+    }
     # NSIS requires /D= to be the final argument. Its value intentionally consumes
     # the remainder of the command line, so a path containing spaces is passed
     # literally without shell-style quoting or escaping.
     $installArguments = @("/S")
-    if ($requestedInstallDir) {
+    if ($PreviousInstaller) {
+        # Exercise the normal same-product update location discovery, without
+        # /D= masking a failure to recognize the published upstream installation.
+        $installArguments += "/UPDATE"
+    } elseif ($requestedInstallDir) {
         $installArguments += "/D=$requestedInstallDir"
     }
     $installProcess = Start-Process -FilePath $Installer -ArgumentList $installArguments -Wait -PassThru
@@ -192,6 +258,12 @@ try {
         if (-not [string]::Equals($actualInstallDir, $requestedInstallDir, [System.StringComparison]::OrdinalIgnoreCase)) {
             throw "custom Desktop InstallLocation mismatch: expected '$requestedInstallDir', got '$installedDir'"
         }
+    }
+    if ($dataSentinel -and [IO.File]::ReadAllText($dataSentinel) -cne $sentinelContents) {
+        throw "upstream-to-candidate upgrade changed the existing Desktop data fixture"
+    }
+    if ($unrelatedProcess -and $unrelatedProcess.HasExited) {
+        throw "upstream-to-candidate upgrade terminated an unrelated same-name process"
     }
 
     $desktopExe = Join-Path $installedDir "WebCodex.exe"
@@ -222,9 +294,30 @@ try {
         }
     }
 
+    if ($PreviousInstaller) {
+        Write-Output "Pinned upstream-to-candidate upgrade passed: original folder, Desktop data and unrelated process preserved"
+    }
     Write-Output "Desktop install smoke passed: $installedDir"
     Write-Output "Bundled runtime: $runtimeDir"
 } finally {
+    if ($unrelatedProcess) {
+        try {
+            if (-not $unrelatedProcess.HasExited) {
+                $unrelatedProcess.StandardInput.WriteLine()
+                $unrelatedProcess.StandardInput.Close()
+                if (-not $unrelatedProcess.WaitForExit(10000)) {
+                    # Only the fixture process created above; never a name lookup.
+                    $unrelatedProcess.Kill()
+                    $unrelatedProcess.WaitForExit()
+                }
+            }
+        } finally {
+            $unrelatedProcess.Dispose()
+        }
+    }
+    if ($unrelatedDir -and (Test-Path -LiteralPath $unrelatedDir -PathType Container)) {
+        Remove-Item -LiteralPath $unrelatedDir -Recurse -Force
+    }
     if ($installed) {
         if (-not $uninstaller) {
             $entry = Get-WebCodexUninstallEntry
@@ -269,6 +362,13 @@ try {
                 throw "Desktop install directory remained after deterministic uninstall cleanup: $installedDir"
             }
         }
+    }
+    if ($dataSentinel -and (Test-Path -LiteralPath $dataSentinel -PathType Leaf)) {
+        Remove-Item -LiteralPath $dataSentinel -Force
+    }
+    if ($createdDataDir -and (Test-Path -LiteralPath $dataDir -PathType Container) -and
+        @(Get-ChildItem -LiteralPath $dataDir -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $dataDir
     }
 }
 

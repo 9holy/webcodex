@@ -27,6 +27,7 @@ mod project_inventory_benchmark;
 mod projects;
 mod session_collaboration;
 mod sessions;
+mod ssh_resources;
 mod window_activity;
 mod window_collaboration;
 mod window_history_benchmark;

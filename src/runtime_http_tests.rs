@@ -1046,6 +1046,41 @@ fn plugin_tool_api_trace_projection_hides_binding_and_raw_arguments() {
 }
 
 #[test]
+fn ssh_resource_api_trace_projection_never_retains_target_or_secret_input() {
+    let arguments = json!({
+        "action":"register", "name":"production", "binding":"wc_sbind_private-sentinel",
+        "target":"private-user@private-host-sentinel", "default_cwd":"/private-cwd-sentinel",
+        "password":"private-password-sentinel",
+        "connection":{"authentication":{"type":"password","password":"private-password-sentinel"}}
+    });
+    let mut flattened = arguments.clone();
+    flattened["tool"] = json!("manage_ssh_resource");
+    for body in [
+        json!({"tool":"manage_ssh_resource","params":arguments}),
+        flattened,
+        json!({"tool":"manage_ssh_resource","params":false,"password":"private-password-sentinel"}),
+    ] {
+        let raw = tool_call_trace_raw_body(&body);
+        let encoded = raw.to_string();
+        assert_eq!(raw["tool"], "manage_ssh_resource");
+        for sentinel in [
+            "private-sentinel",
+            "private-host-sentinel",
+            "private-cwd-sentinel",
+            "private-password-sentinel",
+        ] {
+            assert!(!encoded.contains(sentinel));
+        }
+    }
+    let effective = tool_call_trace_effective_arguments("manage_ssh_resource", &arguments);
+    assert_eq!(effective["target_present"], true);
+    assert_eq!(effective["default_cwd_present"], true);
+    assert_eq!(effective["resource_name"], "production");
+    assert!(!effective.to_string().contains("private-"));
+    assert!(ToolCall::from_tool_name("manage_ssh_resource", arguments).is_err());
+}
+
+#[test]
 fn extract_tool_call_rejects_retired_arguments_envelope() {
     for arguments in [json!(null), json!({"project": "right"})] {
         let error = extract_tool_call(&json!({

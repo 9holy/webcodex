@@ -50,6 +50,17 @@ visible instruction/Skill paths, and long-folder containment at 1440, 1280, 1024
 768, and 390 pixels in both themes, including Chinese and English. Fixture
 screenshots and `report.json` go to `artifacts/desktop-workflow/`.
 
+For the fork's SSH setup, activity failures and About/update navigation, run
+`node scripts/ui-smoke/desktop-fork-workflows.mjs`. It checks address-based name
+suggestions, preserved manual names and advanced drafts, explicit verification
+before saving, the displayed publisher, release links and upstream acknowledgement.
+It also checks a synthetic failed task-closeout call: execution remains unconfirmed,
+elapsed time is readable and diagnostic codes stay in expandable details.
+English and Chinese cover 1440/780/390-pixel light/dark layouts. Reports and
+synthetic screenshots go to `artifacts/desktop-fork-workflows/`; the strict fixture
+does not save connections, grant permissions, contact SSH servers or install updates.
+The `test-desktop-ui` CI job runs this renderer check and retains its report and screenshots.
+
 For focused Runtime workflow layout checks after building `frontend`, run
 `node scripts/ui-smoke/runtime-workflow.mjs`. This checks visible running calls,
 Project attribution, expanded Session activity, and horizontal overflow at 1440,

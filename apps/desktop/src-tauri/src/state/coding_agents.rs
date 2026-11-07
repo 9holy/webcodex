@@ -83,6 +83,7 @@ impl AppState {
                 codex_bin: request.codex_bin,
                 codex_args: request.codex_args,
                 expected_version: request.expected_version,
+                allow_network: request.allow_network,
             };
             let prepared = tokio::task::spawn_blocking(move || {
                 webcodex_environment::codex_app_server::prepare_codex(&options)
@@ -151,6 +152,7 @@ mod preparation_tests {
             codex_bin: None,
             codex_args: Vec::new(),
             expected_version: None,
+            allow_network: false,
         };
         let error = app.prepare_codex_coding_agent(request).await.err().unwrap();
         assert_eq!(error.code, "coding_agent_state_changed");

@@ -12,6 +12,7 @@ pub(crate) struct Options {
     pub(crate) codex_bin: Option<PathBuf>,
     pub(crate) codex_args: Vec<String>,
     pub(crate) expected_version: Option<String>,
+    pub(crate) allow_network: bool,
     pub(crate) json: bool,
 }
 
@@ -25,6 +26,7 @@ Options:\n\
   --codex-arg VALUE           Fixed launcher argument, repeatable (advanced)\n\
   --python-bin PATH           Python executable (default: discover Python 3.10+)\n\
   --expected-version VERSION Require this exact installed Codex version\n\
+  --network                  Explicitly allow this provider's sandbox network (default: off)\n\
   --config-dir PATH           Absolute private configuration directory\n\
   --json                     Print the prepared profile or a safe structured error\n\
   -h, --help                 Show this help\n\n\
@@ -44,6 +46,7 @@ pub(crate) fn parse(args: &[String]) -> Result<Options, String> {
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--experimental" => experimental = true,
+            "--network" => options.allow_network = true,
             "--json" => options.json = true,
             "--config-dir" | "--python-bin" | "--codex-bin" | "--expected-version"
             | "--codex-arg" => {
@@ -101,6 +104,7 @@ pub(crate) fn run(options: Options) -> SetupResultValue<String> {
         codex_bin: options.codex_bin,
         codex_args: options.codex_args,
         expected_version: options.expected_version,
+        allow_network: options.allow_network,
     })?;
     if options.json {
         serde_json::to_string(&prepared).map_err(|_| {

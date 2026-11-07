@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { DesktopState } from "../../models/topology";
-import type { MachineBuildInfo, RuntimeSettings } from "../../models/runtime-shell";
+import type { DiagnosticResource, MachineBuildInfo, RuntimeSettings } from "../../models/runtime-shell";
 import type { RuntimeUpdates } from "../../hooks/useRuntimeUpdates";
 import { useProduct } from "../../i18n/product";
 import { useShellText } from "../../i18n/runtime-shell";
@@ -68,9 +68,10 @@ function AboutPanelContent({ state, updates }: AboutPanelProps) {
   const runtimeVersions = selected?.binaries.map(binary => `${binary.name} ${binary.metadata?.version ?? p(binary.error_code ? "runtimeVersionUnavailable" : "runtimeStartupNotChecked")}`).join(" · ");
   const compatibility = selected?.compatibility === "incompatible" ? p("runtimeIncompatible") : runtimeUnconfirmed ? p("runtimeVersionUnavailable") : selected?.compatibility === "compatible" ? p("runtimeCompatible") : p("runtimeStartupNotChecked");
   const updateMessage = updates?.checking ? u("Checking for updates…") : updates?.manualError ? u("Update check unavailable; Runtime is unaffected.") : updates?.status?.update_available ? u("A new stable WebCodex release is available.") : updates?.status?.state === "up_to_date" ? p("noNewerStableRelease") : u("Update status unknown");
-  const link = (kind: "documentation" | "github" | "report_issue" | "contributing" | "desktop_development") => { const signal = observation.current?.signal; setLinkError(false); void desktopApi.openDiagnosticResource(kind).catch(() => { if (signal && !signal.aborted) setLinkError(true); }); };
+  const link = (kind: DiagnosticResource) => { const signal = observation.current?.signal; setLinkError(false); void desktopApi.openDiagnosticResource(kind).catch(() => { if (signal && !signal.aborted) setLinkError(true); }); };
   return <section className="settings-section" aria-labelledby="about-webcodex-title"><h2 id="about-webcodex-title">{s("About WebCodex")}</h2>
     <dl className="runtime-facts"><div><dt>{p("desktopBuildVersion")}</dt><dd>{desktop?.version ?? (desktopUnavailable ? p("runtimeVersionUnavailable") : s("Unknown"))}</dd></div><div><dt>{p("desktopBuildRevision")}</dt><dd><code>{desktop?.git_commit ?? (desktopUnavailable ? p("runtimeVersionUnavailable") : s("Unknown"))}</code>{desktop?.git_dirty ? ` · ${s("Dirty build")}` : ""}</dd></div>
+      <div><dt>{s("Release source")}</dt><dd>{updates?.status?.release_repository ?? s("Unknown")}</dd></div>
       <div><dt>{p(updates?.manualError || updates?.status?.cached ? "latestKnownStableRelease" : "latestStableRelease")}</dt><dd>{updates?.status?.latest?.version ?? p(updates?.manualError ? "runtimeVersionUnavailable" : "runtimeStartupNotChecked")}</dd></div>
       <div><dt>{p("localRuntimeVersions")}</dt><dd>{runtimeVersions || p(runtimeUnconfirmed ? "runtimeVersionUnavailable" : "runtimeStartupNotChecked")}</dd></div>
       <div><dt>{p("localRuntimeCompatibility")}</dt><dd>{compatibility}</dd></div></dl>
@@ -85,7 +86,9 @@ function AboutPanelContent({ state, updates }: AboutPanelProps) {
       <label className="update-preference"><input type="checkbox" checked={updates.status?.automatic_download ?? true} disabled={!updates.status || updates.actionBusy} onChange={event => void updates.setAutomaticDownload(event.currentTarget.checked)} />{u("Automatically download stable updates")}</label>
       {updates.actionError && !showWorkflow && <p role="status">{u("The update action could not be completed. Review the update status.")}</p>}
       {showWorkflow && <UpdateWorkflow updates={updates} />}</>}
-    <div className="shell-actions"><button type="button" className="text-button" onClick={() => link("documentation")}>{s("Documentation")}</button><button type="button" className="text-button" onClick={() => link("report_issue")}>{s("Report issue")}</button><button type="button" className="text-button" onClick={() => link("desktop_development")}>{s("Build from source")}</button><button type="button" className="text-button" onClick={() => link("contributing")}>{s("Contribute")}</button><button type="button" className="text-button" onClick={() => link("github")}>{s("GitHub")}</button></div>
+    <div className="shell-actions"><button type="button" className="text-button" onClick={() => link("documentation")}>{s("Documentation")}</button><button type="button" className="text-button" onClick={() => link("report_issue")}>{s("Report issue")}</button><button type="button" className="text-button" onClick={() => link("desktop_development")}>{s("Build from source")}</button><button type="button" className="text-button" onClick={() => link("contributing")}>{s("Contribute")}</button><button type="button" className="text-button" onClick={() => link("github")}>{s("GitHub")}</button><button type="button" className="text-button" onClick={() => link("release_notes")}>{s("Release notes")}</button><button type="button" className="text-button" onClick={() => link("releases")}>{s("Releases")}</button></div>
+    <p className="field-help">{s("Based on yyjeqhc/webcodex. Thanks to the upstream author and contributors.")}</p>
+    <button type="button" className="text-button" onClick={() => link("upstream_project")}>{s("Upstream project")}</button>
     {linkError && <p role="status">{s("Unable to open this location.")}</p>}
   </section>;
 }

@@ -20,11 +20,20 @@ Codex 登录。自定义 CODEX_HOME 必须指向该账号可访问的已有目�
 自动发现不足时指定已有可执行文件，检查生成的配置，再通过正常配置流程保存、启用，
 按界面提示应用 Runner 配置。预检返回的配置默认禁用，不会悄悄替换已有提供方。
 
+网络访问默认关闭。需要下载依赖、推送提交或连接部署服务时，可在准备 Codex 时显式
+勾选“允许网络访问”。保存并应用配置后，后续 Run 使用该设置，同时保留 workspace-write
+和 on-request 审批。服务凭据仍需单独配置；此选项不会增加 GitHub token、SSH agent
+凭据或 Project 之外的写入权限。
+
 无界面环境可以生成同样可审核的配置：
 
 ```sh
 webcodex coding-agent prepare-codex --experimental --json
 ```
+
+CLI 添加 `--network` 可显式选择同一网络权限。该设置保存在生成的提供方参数中，
+不新增独立权限注册表，也不写入安装兼容性凭据。修改时重新准备并保存提供方，
+再按 Desktop 提示应用配置。
 
 指定安装位置及精确版本：
 
@@ -62,8 +71,8 @@ Windows 的 .cmd/.bat/PowerShell 启动器不会被交给 shell 执行。请选�
 workspace-write，网络关闭，排除隐式临时目录写入根。发出 prompt 前会核对实际
 thread 策略；cwd、沙箱模式、reviewer、扩大后的网络权限或额外写入目录不符合预期即失败。
 初始网络策略更严格时可以继续，turn 会携带 operator 明确配置的网络设置。没有
-danger-full-access 或沙箱外 shell 兜底。operator 可在提供方参数中显式选择 read-only
-或开启网络；调用方不能通过 prompt 或 ACP 配置选项改变这些策略。
+danger-full-access 或沙箱外 shell 兜底。operator 可在准备时显式开启网络，或在提供方
+参数中选择 read-only；调用方不能通过 prompt 或 ACP 配置选项改变这些策略。
 
 命令/文件审批转换为 ACP session/request_permission，携带完整且有界的命令、cwd、
 文件 diff 或请求权限。用户通过 WebCodex 审批流程选择已展示选项，适配器不会代选。

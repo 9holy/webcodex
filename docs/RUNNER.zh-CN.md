@@ -546,6 +546,18 @@ Server 会把稳定的 Runner `client_id` 与当前 live process lease 分开。
 
 重连以短延迟自动进行。`auto` 降级到 polling 后不会永久停留：30 秒后，在没有未完成 HTTP dispatch 的安全边界重试首选流式传输（已配置的 QUIC，然后 WebSocket）。HTTP dispatch 忙时继续 polling，避免阻断存活检测和控制请求；正在运行的 Job 不等待结束、不重启。流式连接失败则继续 polling。网络超时、注册超时和退避也计入恢复耗时，因此 30 秒不是端到端恢复时限。显式 `polling` 仍保持 polling，显式 `websocket` 则持续重试 WebSocket。
 
+WebSocket 或 QUIC 流即使表面保持连接，也不能无限等待操作系统报告网络故障。
+已注册的 Runner 如果连续 90 秒（三个 30 秒 Ping 周期）未收到有效的应用层消息，
+会丢弃该连接，并保留同一 Runner 实例和 Job inventory 自动重连。正常 Pong 或
+其他合法入站消息会续期；本地成功发出 Ping 不算对端仍在响应。已注册连接的
+单帧发送上限为 30 秒；注册消息发送与等待注册确认分别限时 10 秒。这些期限
+只决定何时开始恢复，重新可用还取决于重连退避、网络和认证结果。
+
+重连不会重启 Job、更改 scope 或 policy，也不会重放命令。被取消的发送可能
+已经到达对端，因此普通请求如果丢失结果，仍保留不确定状态。Job 仅通过既有的
+inventory 与 update-sequence 机制协调恢复；绑定连接的 persistent shell 仍按
+原断连规则关闭，不会被悄悄重新创建。
+
 Runner 准入和 Server inventory 校验共用语义 shell 合同，包含 `python`，不接受 `python3` 等具体解释器名称作为语义身份。普通 Job 的开始、结束时间保证不早于因果上的前一个时间戳，覆盖启动、终态以及准入阶段直接拒绝；执行耗时仍独立测量，避免跨主机时钟偏差把正常执行后的 inventory 判为无效。
 
 注册明确返回 `job inventory shell is invalid` 或 `job inventory timestamps are inconsistent` 时，保留同一 Runner 实例和完整 Job inventory，以有界退避重试，不通过清空 active inventory 换取注册成功。持续拒绝仍需调查或更新有缺陷的组件；重试本身不代表已恢复。认证、身份/归属、协议及其他致命错误仍严格停止 Runner。操作系统 supervisor 应保持启用，但它重启进程不能代替同进程的 Job 恢复。
@@ -570,7 +582,38 @@ user 或 system 服务，并把令牌放进服务环境。
 `webcodex runner start --profile <profile>` 来恢复。hosted profile 暂不支持开机自动
 启动。
 
-## SSH 会话资源（高级）
+## SSH 会话资源
+
+### 在 Desktop 配置连接
+
+打开 **扩展 → SSH 资源 → 添加 SSH 资源**，填写逻辑名称、主机/IP、端口（通常为
+22）和用户名。认证方式可以选择密码、Runner 机器上的私钥文件（可选私钥口令），
+或该 Runner 账户已有的密钥/SSH Agent。可选工作目录是远程主机上的路径。
+真正发起 SSH 连接的是所选的 **Runner**，不是浏览器或显示面板的电脑。
+
+先检查主机密钥，将显示的 SHA-256 指纹与服务器管理员提供的可信指纹进行比较，
+明确确认该指纹，再测试登录并保存。保存也会使用已确认的主机密钥验证认证。
+密码错误、主机密钥改变、检查结果过期和主机无法访问都会明确失败；程序不会
+自动信任未知密钥，也不会悄悄接受改变的密钥。
+
+密码和私钥口令只写不回显，通过专用的操作员配置接口传输，并保存在 Runner 上
+检查所有权和访问权限的私有文件中，与资源登记信息分开。它们不进入 Chat 工具
+调用、Session 历史、资源列表或工具诊断跟踪。这是私有文件存储，不是操作系统
+加密密码保险库。**不要把密码或私钥粘贴到 Chat。** 私钥路径指向 Runner 上
+已经存在的文件；切换 Runner 不会自动传输该文件。
+
+普通连接使用独立的 OpenSSH 配置，明确指定账户、端口和已确认的主机密钥。
+如果需要已有 SSH 别名、ProxyJump 或其他人工维护的 OpenSSH 配置，请选择高级
+OpenSSH 目标方式。密码认证支持普通 SSH 密码，不支持交互式多因素验证或修改
+密码对话框。
+
+保存后，如果面板提示待应用，点击 **重启 Runner** 并刷新。**已加载** 仅说明
+运行中的 Runner 读取了配置，登录测试是另一项独立结果。Chat 可以发现并选择
+已激活的逻辑资源，无需知道密码。配置功能需要支持 `ssh_connection_setup` 的
+新版 Desktop、Server 和 Runner，同时仍需独立的 `ssh:local` 权限。授权
+WebCodex 能力不会创建 SSH 账户，也不会授予远程主机上的操作权限。
+
+### 已有 OpenSSH 配置及执行范围
 
 本地 OpenSSH 客户端可用时，Runner 会声明 `ssh_shell` capability。Workflow
 Session 可以选择命名的 SSH 资源，使 `run_shell` 与 `run_job` 在 Unix 和 Windows

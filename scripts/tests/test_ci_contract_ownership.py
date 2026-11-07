@@ -15,6 +15,27 @@ def job(text: str, name: str) -> str:
 
 
 class ContractOwnershipTests(unittest.TestCase):
+    def test_native_ssh_runs_before_packaging_without_losing_installer_gates(self) -> None:
+        lane = job((ROOT / ".github/workflows/ci.yml").read_text(), "test-windows-desktop")
+        names = re.findall(r"(?m)^      - name: (.+)$", lane)
+        ordered = [
+            "Build exact local WebCodex runtime",
+            "Stage exact runtime for Desktop bundle",
+            "Verify native Windows OpenSSH password onboarding and remote execution",
+            "Build unsigned NSIS installer",
+            "Smoke newly-built Desktop installer",
+            "Upgrade the pinned upstream Desktop installation without changing its folder or data",
+        ]
+        for name in ordered:
+            self.assertEqual(names.count(name), 1, f"required gate {name} must run once")
+        self.assertEqual([names.index(name) for name in ordered],
+                         sorted(names.index(name) for name in ordered))
+        ssh = re.search(r"(?ms)^      - name: " + re.escape(ordered[2]) + r"\n.*?(?=^      - |\Z)", lane).group()
+        self.assertIn("scripts/e2e_ssh_connections.py --bin-dir target/dogfood", ssh)
+        self.assertIn('if ($LASTEXITCODE -ne 0) { throw ', ssh)
+        self.assertNotIn("continue-on-error", ssh)
+        self.assertNotRegex(ssh, r"(?m)^\s+if:")
+
     def test_root_integration_remains_mandatory_without_duplicate_contract_build(self) -> None:
         ci = (ROOT / ".github/workflows/ci.yml").read_text()
         contract = job(ci, "contract")

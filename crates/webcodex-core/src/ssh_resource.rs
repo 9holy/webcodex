@@ -6,12 +6,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+mod connection;
+pub use connection::*;
+
 pub const SSH_RESOURCE_NAME_MAX_BYTES: usize = 80;
 pub const SSH_RESOURCE_TARGET_MAX_BYTES: usize = 512;
 pub const SSH_RESOURCE_DEFAULT_CWD_MAX_BYTES: usize = 4_096;
 pub const MANAGED_SSH_RESOURCE_MAX_COUNT: usize = 64;
 pub const MANAGED_SSH_REGISTRY_MAX_BYTES: usize = 64 * 1024;
-pub const SSH_RESOURCE_REQUEST_MAX_BYTES: usize = 8 * 1024;
+pub const SSH_RESOURCE_REQUEST_MAX_BYTES: usize = 32 * 1024;
 pub const SSH_RESOURCE_RESPONSE_MAX_BYTES: usize = 64 * 1024;
 const SSH_RESOURCE_ERROR_MESSAGE_MAX_BYTES: usize = 512;
 
@@ -77,10 +80,29 @@ pub struct SshResourceInventoryEntry {
     pub pending_restart: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SshResourceRequest {
     List,
+    Inspect {
+        expected_revision: u64,
+        endpoint: SshEndpoint,
+    },
+    Probe {
+        expected_revision: u64,
+        endpoint: SshEndpoint,
+        authentication: SshAuthentication,
+        host_key: SshHostKeyTrust,
+    },
+    RegisterConnection {
+        expected_revision: u64,
+        name: String,
+        endpoint: SshEndpoint,
+        authentication: SshAuthentication,
+        host_key: SshHostKeyTrust,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_cwd: Option<String>,
+    },
     Register {
         expected_revision: u64,
         name: String,
@@ -94,10 +116,54 @@ pub enum SshResourceRequest {
     },
 }
 
+impl std::fmt::Debug for SshResourceRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (action, name) = match self {
+            Self::List => ("list", None),
+            Self::Inspect { .. } => ("inspect", None),
+            Self::Probe { .. } => ("probe", None),
+            Self::RegisterConnection { name, .. } => ("register_connection", Some(name)),
+            Self::Register { name, .. } => ("register", Some(name)),
+            Self::Remove { name, .. } => ("remove", Some(name)),
+        };
+        formatter
+            .debug_struct("SshResourceRequest")
+            .field("action", &action)
+            .field("resource_name", &name)
+            .finish_non_exhaustive()
+    }
+}
+
 impl SshResourceRequest {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
             Self::List => Ok(()),
+            Self::Inspect { endpoint, .. } => endpoint.validate(),
+            Self::Probe {
+                endpoint,
+                authentication,
+                host_key,
+                ..
+            } => {
+                endpoint.validate()?;
+                authentication.validate()?;
+                host_key.validate()
+            }
+            Self::RegisterConnection {
+                name,
+                endpoint,
+                authentication,
+                host_key,
+                default_cwd,
+                ..
+            } => {
+                validate_ssh_resource_name(name)?;
+                endpoint.validate()?;
+                authentication.validate()?;
+                host_key.validate()?;
+                normalize_ssh_resource_default_cwd(default_cwd.as_deref())?;
+                Ok(())
+            }
             Self::Register {
                 name,
                 target,
@@ -112,11 +178,28 @@ impl SshResourceRequest {
             Self::Remove { name, .. } => validate_ssh_resource_name(name),
         }
     }
+
+    pub fn requires_connection_setup(&self) -> bool {
+        matches!(
+            self,
+            Self::Inspect { .. } | Self::Probe { .. } | Self::RegisterConnection { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SshResourceResponse {
+    Inspect {
+        revision: u64,
+        challenge_id: String,
+        expires_at: i64,
+        host_keys: Vec<SshHostKeyCandidate>,
+    },
+    Probe {
+        revision: u64,
+        host_key_fingerprint: String,
+    },
     List {
         revision: u64,
         resources: Vec<SshResourceInventoryEntry>,
@@ -173,6 +256,18 @@ pub fn validate_response_for_request(
                 | "ssh_resource_registry_unavailable"
                 | "ssh_resource_outcome_unknown"
                 | "ssh_resource_invalid"
+                | "ssh_connection_setup_unsupported"
+                | "ssh_host_key_unavailable"
+                | "ssh_host_key_stale"
+                | "ssh_host_key_changed"
+                | "ssh_authentication_failed"
+                | "ssh_connection_failed"
+                | "ssh_connection_timeout"
+                | "ssh_program_unavailable"
+                | "ssh_identity_file_invalid"
+                | "ssh_credentials_unavailable"
+                | "ssh_client_permission_denied"
+                | "ssh_connection_cancelled"
         ) || message.is_empty()
             || message.len() > SSH_RESOURCE_ERROR_MESSAGE_MAX_BYTES
             || message.chars().any(char::is_control)
@@ -183,11 +278,61 @@ pub fn validate_response_for_request(
     }
 
     match (request, response) {
+        (
+            SshResourceRequest::Inspect {
+                expected_revision, ..
+            },
+            SshResourceResponse::Inspect {
+                revision,
+                challenge_id,
+                expires_at,
+                host_keys,
+            },
+        ) => {
+            if revision != expected_revision
+                || *expires_at <= 0
+                || host_keys.is_empty()
+                || host_keys.len() > SSH_HOST_KEY_MAX_COUNT
+            {
+                return Err("ssh_resource_invalid");
+            }
+            let mut fingerprints = HashSet::new();
+            for key in host_keys {
+                key.validate()?;
+                SshHostKeyTrust {
+                    challenge_id: challenge_id.clone(),
+                    fingerprint: key.fingerprint.clone(),
+                }
+                .validate()?;
+                if !fingerprints.insert(&key.fingerprint) {
+                    return Err("ssh_resource_invalid");
+                }
+            }
+            Ok(())
+        }
+        (
+            SshResourceRequest::Probe {
+                expected_revision,
+                host_key,
+                ..
+            },
+            SshResourceResponse::Probe {
+                revision,
+                host_key_fingerprint,
+            },
+        ) if revision == expected_revision && host_key_fingerprint == &host_key.fingerprint => {
+            validate_fingerprint(host_key_fingerprint)
+        }
         (SshResourceRequest::List, SshResourceResponse::List { resources, .. }) => {
             validate_inventory(resources)
         }
         (
             SshResourceRequest::Register {
+                expected_revision,
+                name,
+                ..
+            }
+            | SshResourceRequest::RegisterConnection {
                 expected_revision,
                 name,
                 ..

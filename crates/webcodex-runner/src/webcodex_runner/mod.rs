@@ -43,6 +43,7 @@ pub(crate) mod shell;
 pub(crate) mod shutdown;
 pub(crate) mod skill_store;
 pub(crate) mod ssh;
+pub(crate) mod ssh_credentials;
 mod string_match;
 pub(crate) mod transport;
 pub(crate) mod util {

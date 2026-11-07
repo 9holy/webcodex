@@ -950,7 +950,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("webcodex-server-local", source)
         self.assertIn("pull_policy: build", source)
         self.assertIn("build:\n", source)
-        self.assertIn("WEBCODEX_RELEASE_REPOSITORY: ${WEBCODEX_RELEASE_REPOSITORY:-yyjeqhc/webcodex}", source)
+        self.assertIn("WEBCODEX_RELEASE_REPOSITORY: ${WEBCODEX_RELEASE_REPOSITORY:-9holy/webcodex}", source)
         self.assertIn("--build-from-source", bootstrap)
         self.assertIn("COMPOSE_FILE=${COMPOSE_FILE:-compose.yaml}", bootstrap)
         self.assertIn("compose_base config --images", bootstrap)

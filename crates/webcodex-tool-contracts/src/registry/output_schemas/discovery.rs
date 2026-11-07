@@ -17,6 +17,26 @@ fn mcp_workflow_tools_schema() -> Value {
     })
 }
 
+fn window_call_failure_schema() -> Value {
+    json!({
+        "type":"object", "additionalProperties":false,
+        "description":"Content-free recorded failure classifications. A call_failed outcome does not establish whether execution started; HTTP return and elapsed time are not execution evidence. Never an automatic retry permit.",
+        "properties":{
+            "outcome":{"type":"string", "enum":["rejected","execution_failed","outcome_unknown","call_failed"]},
+            "reason":{"type":"string", "enum":["missing_scope","access_denied","host_review_required",
+                "session_read_only","session_closed","session_missing","session_expired","session_mismatch",
+                "session_unavailable","project_unavailable","invalid_input","runner_unavailable","approval_changed",
+                "ssh_authentication","ssh_host_key","ssh_unavailable","provider_unavailable","execution_error",
+                "timeout","result_unconfirmed","stale_state","details_unavailable"]},
+            "error_kind":{"type":"string", "minLength":1,"maxLength":96,"pattern":"^[a-z0-9_]+$"},
+            "failure_kind":{"type":"string", "minLength":1,"maxLength":96,"pattern":"^[a-z0-9_]+$"},
+            "execution_state":{"type":"string", "enum":["not_started","pending","queued","running","started","outcome_unknown","completed","cancelled","timed_out"]},
+            "recovery_kind":{"type":"string", "enum":["fix_input","retry_same","reobserve","reconcile","wait","user_action","none"]}
+        },
+        "required":["outcome","reason"]
+    })
+}
+
 pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
     match name {
         "read_current_window_activity" => Some(wrapped_output_schema(vec![
@@ -31,6 +51,7 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 "cycle_ms":{"type":"integer"},"window_transition_kind":{"type":"string"},"response_streaming":{"type":"boolean"},
                 "method":{"type":"string"},"tool_name":{"type":"string"},"activity_presentation":{"type":"string"},"activity_kind":{"type":"string"},
                 "project":{"type":"string"},"status":{"type":"string"},"http_status":{"type":"integer"},"meaningful":{"type":"boolean"},
+                "failure":window_call_failure_schema(),
                 "server_trace_id":{"type":"string"},"workflow_sessions":{"type":"array","items":{"type":"object","additionalProperties":false,"properties":{"workflow_session_id":{"type":"string"},"project":{"type":"string"},"relation":{"type":"string"}},"required":["workflow_session_id","relation"]}},
                 "code_mode_composition":open_object_schema("Validated bounded nested WebCodex Code Mode composition when available.")
             },"required":["started_at_ms","ended_at_ms","duration_ms","method","status","meaningful","workflow_sessions"]}})),

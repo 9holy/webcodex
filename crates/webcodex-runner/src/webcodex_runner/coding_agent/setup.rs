@@ -72,6 +72,18 @@ fn config_params(session_id: &str, key: &str, value: &CodingAgentConfigValue) ->
     }
 }
 impl CodingAgentManager {
+    /// Test only: inject an already-expired deadline after the exact stage's
+    /// request frame has been written. Unrelated provider startup/scheduling
+    /// must not decide which stage the deadline diagnostic test exercises.
+    #[cfg(test)]
+    fn setup_test_deadline(&self, run_deadline: Instant, stage: &'static str) -> Instant {
+        if *self.setup_expire_test_stage.lock().unwrap() == Some(stage) {
+            Instant::now()
+        } else {
+            run_deadline
+        }
+    }
+
     pub(super) fn setup_transport_failure(
         &self,
         run_id: &str,
@@ -282,6 +294,8 @@ impl CodingAgentManager {
         ) {
             return false;
         }
+        #[cfg(test)]
+        let run_deadline = self.setup_test_deadline(run_deadline, "session/set_config_option");
         let Some(config_wait) = bounded_setup_wait(run_deadline) else {
             self.setup_timeout(run_id, entry, "session/set_config_option");
             self.terminate_run_io(child, outbound);
@@ -398,6 +412,8 @@ impl CodingAgentManager {
         ) {
             return None;
         }
+        #[cfg(test)]
+        let run_deadline = self.setup_test_deadline(run_deadline, "initialize");
         let Some(initialize_wait) = bounded_setup_wait(run_deadline) else {
             self.setup_timeout(&request.run_id, entry, "initialize");
             self.terminate_run_io(child, outbound);
@@ -466,6 +482,8 @@ impl CodingAgentManager {
         ) {
             return None;
         }
+        #[cfg(test)]
+        let run_deadline = self.setup_test_deadline(run_deadline, "session/new");
         let Some(session_new_wait) = bounded_setup_wait(run_deadline) else {
             self.setup_timeout(&request.run_id, entry, "session/new");
             self.terminate_run_io(child, outbound);

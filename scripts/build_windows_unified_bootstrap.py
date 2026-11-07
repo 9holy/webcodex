@@ -12,6 +12,8 @@ from pathlib import Path
 
 import prepare_windows_unified_installer as candidate
 
+INSTALLER_HOOKS = Path(__file__).resolve().parents[1] / "apps/desktop/src-tauri/windows/installer-hooks.nsh"
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -29,18 +31,20 @@ def nsis_quote(path: Path) -> str:
 
 
 def candidate_hash_command(expected_sha256: str) -> str:
-    # Keep the candidate path out of PowerShell source. Use .NET file/crypto APIs
-    # directly instead of PowerShell provider cmdlets so exact-path hashing does
-    # not depend on provider parsing or hosted-runner cmdlet behavior.
+    # NSIS expands ExecWait into a 1024-character buffer. Keep the one-shot
+    # helper small enough for the real installer, not only direct PowerShell
+    # tests. Base64 represents the same 32 SHA-256 bytes and MUST compare with
+    # -cne (case sensitive). This process owns its stream/crypto handles until
+    # exit; ExecWait observes exit before any candidate executable is launched.
+    expected_bytes = bytes.fromhex(expected_sha256)
+    if len(expected_bytes) != 32:
+        raise ValueError("candidate SHA-256 must contain 32 bytes")
+    expected = base64.b64encode(expected_bytes).decode("ascii")
+    # Paths remain outside the source, in a child-local environment variable.
     script = (
-        "$ErrorActionPreference='Stop'; try { "
-        "$s=[System.IO.File]::OpenRead($env:WEBCODEX_INSTALLER_CANDIDATE_CLI); try { "
-        "$sha=[System.Security.Cryptography.SHA256]::Create(); try { "
-        "$h=([System.BitConverter]::ToString($sha.ComputeHash($s))).Replace('-','').ToLowerInvariant() "
-        "} finally { $sha.Dispose() } "
-        "} finally { $s.Dispose() }; "
-        f"if($h -ne '{expected_sha256}') {{ exit 1 }}; exit 0 "
-        "} catch { exit 1 }"
+        "try { $s=[IO.File]::OpenRead($env:WEBCODEX_INSTALLER_CANDIDATE_CLI); "
+        "$h=[Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash($s)); "
+        f"exit ([int]($h -cne '{expected}')) }} catch {{ exit 1 }}"
     )
     return base64.b64encode(script.encode("utf-16le")).decode("ascii")
 
@@ -51,9 +55,12 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
     inner = inner_installer.resolve(strict=True)
     if inner.read_bytes()[:2] != b"MZ":
         raise ValueError("inner Tauri installer is not a Windows executable")
+    hash_arguments = " -NoProfile -NonInteractive -EncodedCommand " + candidate_hash_command(manifest["artifacts"]["webcodex"]["sha256"])
+    hash_fixed_length = len(r"\System32\WindowsPowerShell\v1.0\powershell.exe") + len(hash_arguments) + 2
     target = "x86_64" if platform == "win32-x64" else "aarch64"
     lines = [
         'Unicode true',
+        '!include "MUI2.nsh"',
         '!include "LogicLib.nsh"',
         '!include "FileFunc.nsh"',
         '!include "WinMessages.nsh"',
@@ -62,8 +69,13 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         'Name "WebCodex Unified Installer"',
         f'OutFile {nsis_quote(output)}',
         'RequestExecutionLevel user',
-        'InstallDir "$LOCALAPPDATA\\WebCodex Desktop"',
+        # As in Tauri, a placeholder distinguishes a real /D= argument from the
+        # default. $INSTDIR remains the one selected destination through the UI.
+        '!define WEBCODEX_DEFAULT_DIR "placeholder\\WebCodex Desktop"',
+        'InstallDir "${WEBCODEX_DEFAULT_DIR}"',
         'Var WebCodexInstallDir',
+        'Var WebCodexRegisteredDir',
+        'Var WebCodexDirectoryText',
         'Var WebCodexEnvironmentDir',
         'Var WebCodexExisting',
         'Var WebCodexCandidate',
@@ -74,6 +86,30 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         'Var WebCodexUpgradePrepared',
         'Var WebCodexUpgradeTargetFile',
         'Var WebCodexBoundOperation',
+        '',
+        f'!include {nsis_quote(INSTALLER_HOOKS)}',
+        '!define MUI_ABORTWARNING',
+        '!define MUI_CUSTOMFUNCTION_ABORT WebCodexUserAbort',
+        '!define MUI_WELCOMEPAGE_TEXT "$(WebCodexWelcome)"',
+        '!insertmacro MUI_PAGE_WELCOME',
+        '!define MUI_DIRECTORYPAGE_TEXT_TOP "$WebCodexDirectoryText"',
+        '!define MUI_PAGE_CUSTOMFUNCTION_LEAVE WebCodexValidateInstallDir',
+        '!insertmacro MUI_PAGE_DIRECTORY',
+        '!insertmacro MUI_PAGE_INSTFILES',
+        '!define MUI_FINISHPAGE_NOAUTOCLOSE',
+        '!insertmacro MUI_PAGE_FINISH',
+        '!insertmacro MUI_LANGUAGE "English"',
+        '!insertmacro MUI_LANGUAGE "SimpChinese"',
+        'LangString WebCodexWelcome 1033 "Install WebCodex Desktop and its CLI, Server and Runner.$\\r$\\n$\\r$\\nFor an existing installation, setup upgrades the same folder and preserves your settings, projects and credentials. Services are coordinated through their existing Environment owner."',
+        'LangString WebCodexWelcome 2052 "安装 WebCodex Desktop 及其 CLI、Server 和 Runner。$\\r$\\n$\\r$\\n已有安装将在原目录升级，保留设置、项目和凭据。服务继续由原有运行环境管理。"',
+        'LangString WebCodexChooseDirectory 1033 "Choose where to install WebCodex Desktop and its bundled Runtime."',
+        'LangString WebCodexChooseDirectory 2052 "请选择 WebCodex Desktop 及其自带 Runtime 的安装目录。"',
+        'LangString WebCodexKeepDirectory 1033 "An existing WebCodex installation was found in the folder below. Upgrade keeps this folder, settings and data. Moving an existing Environment is a separate operation; keep the detected directory to continue."',
+        'LangString WebCodexKeepDirectory 2052 "已在下方目录找到 WebCodex。升级会保留此目录、设置和数据。移动已有运行环境需要单独处理，请保留检测到的目录继续升级。"',
+        'LangString WebCodexDirectoryMismatch 1033 "This upgrade must use the existing installation folder:$\\r$\\n$WebCodexRegisteredDir$\\r$\\n$\\r$\\nThe selected directory differs. No installation files were replaced. Keep the existing folder; setup cannot move an existing Environment."',
+        'LangString WebCodexDirectoryMismatch 2052 "本次升级必须使用已有安装目录：$\\r$\\n$WebCodexRegisteredDir$\\r$\\n$\\r$\\n所选目录不同，安装文件尚未替换。请保留已有目录；安装程序不会移动已有运行环境。"',
+        'LangString WebCodexDirectoryInvalid 1033 "Choose one absolute installation folder. The existing installation location must be a valid Windows path."',
+        'LangString WebCodexDirectoryInvalid 2052 "请选择一个完整的安装目录。已有安装位置必须是有效的 Windows 路径。"',
         '',
         'Function .onInit',
         '  StrCpy $WebCodexUpgradeTargetFile ""',
@@ -99,18 +135,88 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
-        '  ReadRegStr $WebCodexInstallDir HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WebCodex Desktop" "InstallLocation"',
-        '  ${If} $WebCodexInstallDir == ""',
-        '    StrCpy $WebCodexInstallDir "$LOCALAPPDATA\\WebCodex Desktop"',
-        '  ${Else}',
-        '    StrCpy $0 $WebCodexInstallDir 1',
+        '  ReadRegStr $WebCodexRegisteredDir HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\WebCodex Desktop" "InstallLocation"',
+        '  ${If} $WebCodexRegisteredDir != ""',
+        '    StrCpy $0 $WebCodexRegisteredDir 1',
         '    ${If} $0 == \'"\'',
-        '      StrCpy $WebCodexInstallDir $WebCodexInstallDir -1 1',
+        '      StrCpy $0 $WebCodexRegisteredDir 1 -1',
+        '      ${If} $0 != \'"\'',
+        '        Goto webcodex_directory_invalid',
+        '      ${EndIf}',
+        '      StrCpy $WebCodexRegisteredDir $WebCodexRegisteredDir -1 1',
+        '    ${EndIf}',
+        '    ${StrStr} $R0 "$WebCodexRegisteredDir" \'"\'',
+        '    ${If} $R0 != ""',
+        '      Goto webcodex_directory_invalid',
+        '    ${EndIf}',
+        '    System::Call \'shlwapi::PathIsRelativeW(w "$WebCodexRegisteredDir") i .r0\'',
+        '    ${If} $0 != 0',
+        '      Goto webcodex_directory_invalid',
+        '    ${EndIf}',
+        # NSIS GetFullPathName also probes filesystem existence. An installer
+        # must accept a new destination; the bounded Windows API only
+        # normalizes the path. Native lifecycle admission still checks owners,
+        # reparse points and the exact existing Environment target.
+        '    System::Call \'kernel32::GetFullPathNameW(w "$WebCodexRegisteredDir", i ${NSIS_MAX_STRLEN}, w .r1, p 0) i .r0\'',
+        '    ${If} $0 == 0',
+        '    ${OrIf} $0 >= ${NSIS_MAX_STRLEN}',
+        '      Goto webcodex_directory_invalid',
+        '    ${EndIf}',
+        '    StrCpy $WebCodexRegisteredDir $1',
+        '    StrCpy $WebCodexDirectoryText "$(WebCodexKeepDirectory)"',
+        '  ${Else}',
+        '    StrCpy $WebCodexDirectoryText "$(WebCodexChooseDirectory)"',
+        '  ${EndIf}',
+        '  ${If} $INSTDIR == "${WEBCODEX_DEFAULT_DIR}"',
+        '    ${If} $WebCodexRegisteredDir != ""',
+        '      StrCpy $INSTDIR $WebCodexRegisteredDir',
+        '    ${Else}',
+        '      StrCpy $INSTDIR "$LOCALAPPDATA\\WebCodex Desktop"',
         '    ${EndIf}',
         '  ${EndIf}',
+        # Never silently disregard /D= when an existing Environment pins its
+        # runtime paths. Interactive selection has the same check on page leave.
+        '  Call WebCodexValidateInstallDir',
+        '  Return',
+        'webcodex_directory_invalid:',
+        '  MessageBox MB_ICONSTOP "$(WebCodexDirectoryInvalid)" /SD IDOK',
+        '  SetErrorLevel 1',
+        '  Abort',
+        'FunctionEnd',
+        '',
+        'Function WebCodexValidateInstallDir',
+        '  ${StrStr} $R0 "$INSTDIR" \'"\'',
+        '  ${If} $R0 != ""',
+        '    MessageBox MB_ICONSTOP "$(WebCodexDirectoryInvalid)" /SD IDOK',
+        '    SetErrorLevel 1',
+        '    Abort',
+        '  ${EndIf}',
+        '  System::Call \'shlwapi::PathIsRelativeW(w "$INSTDIR") i .r0\'',
+        '  ${If} $0 != 0',
+        '    MessageBox MB_ICONSTOP "$(WebCodexDirectoryInvalid)" /SD IDOK',
+        '    SetErrorLevel 1',
+        '    Abort',
+        '  ${EndIf}',
+        '  System::Call \'kernel32::GetFullPathNameW(w "$INSTDIR", i ${NSIS_MAX_STRLEN}, w .r1, p 0) i .r0\'',
+        '  ${If} $0 == 0',
+        '  ${OrIf} $0 >= ${NSIS_MAX_STRLEN}',
+        '    MessageBox MB_ICONSTOP "$(WebCodexDirectoryInvalid)" /SD IDOK',
+        '    SetErrorLevel 1',
+        '    Abort',
+        '  ${EndIf}',
+        '  StrCpy $INSTDIR $1',
+        '  ${If} $WebCodexRegisteredDir != ""',
+        '  ${AndIf} $INSTDIR != $WebCodexRegisteredDir',
+        '    MessageBox MB_ICONSTOP "$(WebCodexDirectoryMismatch)" /SD IDOK',
+        '    SetErrorLevel 1',
+        '    Abort',
+        '  ${EndIf}',
+        '  StrCpy $WebCodexInstallDir $INSTDIR',
+        '  SetErrorLevel 0',
         'FunctionEnd',
         '',
         'Section "-WebCodexUnifiedBootstrap"',
+        '  Call WebCodexValidateInstallDir',
         '  StrCpy $WebCodexExisting 0',
         '  StrCpy $WebCodexPackageUpgrade 0',
         '  StrCpy $WebCodexForeignServices 0',
@@ -151,9 +257,16 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
-        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -EncodedCommand {candidate_hash_command(manifest["artifacts"]["webcodex"]["sha256"])}\' $0',
+        '  StrLen $0 "$WINDIR"',
+        f'  IntOp $0 $0 + {hash_fixed_length}',
+        '  ${If} $0 >= ${NSIS_MAX_STRLEN}',
+        '    MessageBox MB_ICONSTOP "The Windows system path exceeds this installer command bound." /SD IDOK',
+        '    SetErrorLevel 1',
+        '    Abort',
+        '  ${EndIf}',
+        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"{hash_arguments}\' $0',
         '  ${If} $0 != 0',
-        '    MessageBox MB_ICONSTOP "WebCodex candidate CLI failed its manifest-bound SHA-256 check."',
+        '    MessageBox MB_ICONSTOP "WebCodex candidate CLI failed its manifest-bound SHA-256 check." /SD IDOK',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
@@ -177,31 +290,31 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '    Goto webcodex_classification_trim',
         '  ${EndIf}',
         '  ${If} $0 != 0',
-        '    MessageBox MB_ICONSTOP "The installed package identity or Environment ownership could not be verified. Quit the old Desktop and stop its Runtime before retrying."',
+        '    MessageBox MB_ICONSTOP "The installed package identity or Environment ownership could not be verified. Quit the old Desktop and stop its Runtime before retrying." /SD IDOK',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
         '  ${If} $WebCodexUpgradeTargetFile != ""',
         '  ${AndIf} $1 != \'{"kind":"environment"}\'',
-        '    MessageBox MB_ICONSTOP "The selected Environment is no longer available. Guarded installation cannot fall back to another installation mode."',
+        '    MessageBox MB_ICONSTOP "The selected Environment is no longer available. Guarded installation cannot fall back to another installation mode." /SD IDOK',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
-        '  ${If} $1 == \'{"kind":"environment"}\'',
-        '    ${If} $WebCodexUpgradeTargetFile == ""',
-        '    StrCpy $WebCodexTrustedCLI "$WebCodexInstallDir\\webcodex-runtime\\webcodex.exe"',
-        '    ${EndIf}',
-        '  ${ElseIf} $1 == \'{"kind":"legacy"}\'',
+        # The user selected this publisher's installer. Its verified same-source
+        # CLI owns every lifecycle command; an older publisher's installed CLI
+        # cannot validate this publisher's candidate. Environment owner/path and
+        # receipt checks still apply in the candidate CLI.
+        '  ${If} $1 == \'{"kind":"unconfigured"}\'',
         '    StrCpy $WebCodexPackageUpgrade 1',
-        '  ${ElseIf} $1 == \'{"kind":"unconfigured"}\'',
-        '    StrCpy $WebCodexPackageUpgrade 1',
+        '  ${ElseIf} $1 == \'{"kind":"environment"}\'',
+        '    StrCpy $WebCodexPackageUpgrade 0',
         '  ${ElseIf} $1 != \'{"kind":"fresh"}\'',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
         '  ${If} $WebCodexForeignServices == 1',
         '  ${AndIf} $1 != \'{"kind":"environment"}\'',
-        '    MessageBox MB_ICONSTOP "Windows contains WebCodex services without a matching Environment owner. Recover their original ownership before upgrading."',
+        '    MessageBox MB_ICONSTOP "Windows contains WebCodex services without a matching Environment owner. Recover their original ownership before upgrading." /SD IDOK',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
@@ -212,6 +325,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '      Goto webcodex_bootstrap_done',
         '    ${EndIf}',
         '  ${EndIf}',
+        '  !insertmacro WebCodexRequireStopped "$WebCodexInstallDir\\WebCodex.exe"',
         '  ${If} $WebCodexPackageUpgrade == 1',
         '    Call WebCodexPackagePreflight',
         '  ${Else}',
@@ -222,7 +336,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '  ${EndIf}',
         '  ${EndIf}',
         '  ${If} $0 != 0',
-        '    MessageBox MB_ICONSTOP "WebCodex upgrade preflight rejected this installer."',
+        '    MessageBox MB_ICONSTOP "WebCodex upgrade preflight rejected this installer." /SD IDOK',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
@@ -259,7 +373,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '  ${EndIf}',
         '  ${If} $0 != 0',
         '    Call WebCodexRollback',
-        '    MessageBox MB_ICONSTOP "WebCodex could not prepare the upgrade; installation was stopped."',
+        '    MessageBox MB_ICONSTOP "WebCodex could not prepare the upgrade; installation was stopped." /SD IDOK',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
@@ -279,7 +393,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '    ${EndIf}',
         '    ${If} $0 != 0',
         '      Call WebCodexRollback',
-        '      MessageBox MB_ICONSTOP "Prepared owner receipt or runtime target does not match this installation. No files were replaced."',
+        '      MessageBox MB_ICONSTOP "Prepared owner receipt or runtime target does not match this installation. No files were replaced." /SD IDOK',
         '      SetErrorLevel 1',
         '      Abort',
         '    ${EndIf}',
@@ -293,7 +407,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '  ExecWait \'"$PLUGINSDIR\\WebCodexTauriPayload.exe" /S /UPDATE /D=$WebCodexInstallDir\' $0',
         '  ${If} $0 != 0',
         '    Call WebCodexRollback',
-        '    MessageBox MB_ICONSTOP "WebCodex installation failed; restoration of the selected operation was requested. Verify its recovery status before retrying."',
+        '    MessageBox MB_ICONSTOP "WebCodex installation failed; restoration of the selected operation was requested. Verify its recovery status before retrying." /SD IDOK',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
@@ -301,18 +415,18 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '    Call WebCodexPackageFinish',
         '  ${Else}',
         '  ${If} $WebCodexEnvironmentDir == ""',
-        '    ExecWait \'"$WebCodexInstallDir\\webcodex-runtime\\webcodex.exe" environment upgrade-finish --json\' $0',
+        '    ExecWait \'"$WebCodexTrustedCLI" environment upgrade-finish --json\' $0',
         '  ${Else}',
         '    ${If} $WebCodexUpgradeTargetFile != ""',
         '      ExecWait \'"$WebCodexTrustedCLI" environment upgrade-finish --environment-dir "$WebCodexEnvironmentDir" --upgrade-target-file "$WebCodexUpgradeTargetFile" --operation-id "$WebCodexBoundOperation" --json\' $0',
         '    ${Else}',
-        '    ExecWait \'"$WebCodexInstallDir\\webcodex-runtime\\webcodex.exe" environment upgrade-finish --environment-dir "$WebCodexEnvironmentDir" --json\' $0',
+        '    ExecWait \'"$WebCodexTrustedCLI" environment upgrade-finish --environment-dir "$WebCodexEnvironmentDir" --json\' $0',
         '    ${EndIf}',
         '  ${EndIf}',
         '  ${EndIf}',
         '  ${If} $0 != 0',
         '    Call WebCodexRollback',
-        '    MessageBox MB_ICONSTOP "WebCodex could not verify the installed upgrade; rollback was requested."',
+        '    MessageBox MB_ICONSTOP "WebCodex could not verify the installed upgrade; rollback was requested." /SD IDOK',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
@@ -352,7 +466,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '      CopyFiles /SILENT "$WebCodexOldDesktop" "$WebCodexInstallDir\\WebCodex.exe"',
         '    ${EndIf}',
         '    ${If} $0 != 0',
-        '      MessageBox MB_ICONSTOP "WebCodex rollback failed; the previous program backup remains available."',
+        '      MessageBox MB_ICONSTOP "WebCodex rollback failed; the previous program backup remains available." /SD IDOK',
         '    ${EndIf}',
         '  ${EndIf}',
         '  StrCpy $WebCodexUpgradePrepared 0',
@@ -361,7 +475,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         'Function .onInstFailed',
         '  Call WebCodexRollback',
         'FunctionEnd',
-        'Function .onUserAbort',
+        'Function WebCodexUserAbort',
         '  Call WebCodexRollback',
         'FunctionEnd',
         '',
@@ -388,7 +502,7 @@ def build(args: argparse.Namespace) -> dict:
     args.output.parent.mkdir(parents=True, exist_ok=True)
     source = render(args.candidate_dir, args.inner_installer, args.output, args.platform)
     script = args.output.with_suffix(".nsi")
-    script.write_text(source, encoding="utf-8", newline="\n")
+    script.write_text(source, encoding="utf-8-sig", newline="\n")
     compiler = args.makensis or shutil.which("makensis")
     if not compiler:
         raise ValueError("makensis is required to build the Windows bootstrap installer")

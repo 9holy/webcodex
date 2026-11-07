@@ -80,6 +80,7 @@ export type WorkspaceRequest =
   | { kind: "plugin_reload"; project: string; plugin: string };
 
 export interface WindowCall {
+  failure?: import("../../../../frontend/src/ui/callFailure").CallFailure;
   server_trace_id?: string;
   tool_name?: string; meaningful?: boolean; status: string; project?: string;
   ended_at_ms?: number; started_at_ms?: number; request_observed_at_ms?: number; response_handed_at_ms?: number;

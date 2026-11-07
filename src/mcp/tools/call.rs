@@ -61,15 +61,7 @@ fn tool_scope_denied(
     if !fixed_credential {
         return scope_forbidden(context.auth, required_scope, description);
     }
-    let recovery = match context.auth.map(|auth| auth.kind) {
-        Some(crate::auth::AuthKind::ApiToken) =>
-            "Use a token issued with the required scope; this fixed token cannot add scopes through OAuth.",
-        Some(crate::auth::AuthKind::SharedKey) =>
-            "Check the shared-key connection identity and its fixed permission profile; use an authorized credential.",
-        Some(crate::auth::AuthKind::ProjectCredential) =>
-            "Check the project credential grant with its issuer; use an authorized credential.",
-        _ => "Check the current connection identity and permissions; use an authorized credential.",
-    };
+    let recovery = crate::auth::scope_recovery_hint(context.auth, required_scope);
     let mut output = json!({
         "error_kind": "insufficient_scope",
         "execution_started": false,
@@ -286,9 +278,27 @@ impl ParsedCall {
         ) {
             Ok(invocation) => invocation,
             Err(message) => {
+                // This prefix is authored by the closed invocation parser, not
+                // a provider exception. Preserve the reason for a pre-dispatch
+                // refusal without recording the sidecar or changing the gate.
+                let kind = if message.starts_with("direct_host_review_required: ") {
+                    "direct_host_review_required"
+                } else {
+                    "invalid_arguments"
+                };
                 if let Some(lc) = lifecycle.as_deref() {
-                    lc.dispatch_failed("invalid_arguments");
-                    lc.dispatch_finished(false, Some(false), "invalid_arguments");
+                    lc.dispatch_failed(kind);
+                    lc.dispatch_finished(false, Some(false), kind);
+                }
+                if let (Some(slot), Some(timer)) = (
+                    diagnostics.model_ergonomics_out.as_deref_mut(),
+                    ModelErgonomicsTimer::start_with_arguments(&params.name, &raw_mcp_arguments),
+                ) {
+                    let mut record = timer.finish().record_for_pre_result_failure(kind);
+                    // This exact parser refusal precedes both sidecar and main
+                    // dispatch. Generic error kinds elsewhere cannot prove it.
+                    record.execution_state = Some("not_started".to_string());
+                    *slot = Some(record);
                 }
                 return Err(McpOutcome::BadRequest(rpc_error(id, -32602, message)));
             }

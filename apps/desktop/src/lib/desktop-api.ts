@@ -15,7 +15,7 @@ import type {
 } from "../models/topology";
 
 import type { CloudflareConnectionRequest, CloudflareConnectionStatus, CloudflareOAuthHandoff, McpProviderRequest, TunnelProfileAction, TunnelProfileRequest } from "../models/connections-tools";
-import type { CodexPrepareRequest, PreparedCodexAgent, CodingAgentRequest, SshRegisterRequest, SshResourcesSnapshot, SshMutationResult, RunnerCapabilityAuthorizationSnapshot } from "../models/runner-capabilities";
+import type { CodexPrepareRequest, PreparedCodexAgent, CodingAgentRequest, SshRegisterRequest, SshResourcesSnapshot, SshMutationResult, SshInspectRequest, SshInspectionResult, SshProbeRequest, SshProbeResult, RunnerCapabilityAuthorizationSnapshot } from "../models/runner-capabilities";
 
 export const desktopApi = {
   shellRestoreOnly: () => invoke<boolean>("desktop_shell_restore_only"),
@@ -61,9 +61,11 @@ export const desktopApi = {
   sshResources: () => invoke<SshResourcesSnapshot>("ssh_resource_list"),
   runnerCapabilityAuthorization: (expected: SettingsTarget) =>
     invoke<RunnerCapabilityAuthorizationSnapshot>("runner_capability_authorization", { expected }),
-  authorizeRunnerCapabilities: (expected: SettingsTarget, permissionApproval = false) =>
-    invoke<RunnerCapabilityAuthorizationSnapshot>("authorize_runner_capabilities", { request: { expected, confirmed: true, ...(permissionApproval ? { permission_approval: true } : {}) } }),
+  authorizeRunnerCapabilities: (expected: SettingsTarget, capability: "runner_capabilities" | "coding_approval" | "detached_execution" = "runner_capabilities") =>
+    invoke<RunnerCapabilityAuthorizationSnapshot>("authorize_runner_capabilities", { request: { expected, confirmed: true, ...(capability === "coding_approval" ? { permission_approval: true } : {}), ...(capability === "detached_execution" ? { detached_execution: true } : {}) } }),
   registerSshResource: (request: SshRegisterRequest) => invoke<SshMutationResult>("ssh_resource_register", { request }),
+  inspectSshConnection: (request: SshInspectRequest) => invoke<SshInspectionResult>("ssh_connection_inspect", { request }),
+  probeSshConnection: (request: SshProbeRequest) => invoke<SshProbeResult>("ssh_connection_probe", { request }),
   removeSshResource: (expected: SettingsTarget, observationId: string, name: string) =>
     invoke<SshMutationResult>("ssh_resource_remove", { request: { expected, observation_id: observationId, name } }),
   cloudflareConnection: <T extends CloudflareConnectionStatus | CloudflareOAuthHandoff = CloudflareConnectionStatus>(request: CloudflareConnectionRequest) => invoke<T>("cloudflare_connection", { request }),

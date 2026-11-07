@@ -4,7 +4,7 @@ use super::{
 };
 use webcodex_core::authority::{
     OAuthRouteScopePolicy::*, SCOPE_COMMUNICATION_MANAGE, SCOPE_COMMUNICATION_READ,
-    SCOPE_PROJECT_READ, SCOPE_RUNTIME_READ, SCOPE_SESSION_COLLABORATE,
+    SCOPE_PROJECT_READ, SCOPE_RUNTIME_READ, SCOPE_SESSION_COLLABORATE, SCOPE_SSH_LOCAL,
 };
 
 pub(super) const PUBLIC_WEB_ROUTES: &[RouteSpec] = &[
@@ -64,8 +64,54 @@ pub(super) const PUBLIC_WEB_ROUTES: &[RouteSpec] = &[
     ),
 ];
 
-// Runtime Console routes use ordinary delegated runtime/project/session scopes.
+// Runtime Console inventories use delegated runtime/project/session scopes.
+// Credential-bearing SSH setup is explicitly first-party only.
 pub(super) const ROUTES: &[RouteSpec] = &[
+    route(
+        RuntimeConsoleSshResourcesList,
+        Post,
+        "/api/runtime-console/ssh-resources/list",
+        FirstPartyRequire(SCOPE_SSH_LOCAL),
+        RuntimeConsole,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
+        RuntimeConsoleSshResourcesInspect,
+        Post,
+        "/api/runtime-console/ssh-resources/inspect",
+        FirstPartyRequire(SCOPE_SSH_LOCAL),
+        RuntimeConsole,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
+        RuntimeConsoleSshResourcesProbe,
+        Post,
+        "/api/runtime-console/ssh-resources/probe",
+        FirstPartyRequire(SCOPE_SSH_LOCAL),
+        RuntimeConsole,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
+        RuntimeConsoleSshResourcesRegister,
+        Post,
+        "/api/runtime-console/ssh-resources/register",
+        FirstPartyRequire(SCOPE_SSH_LOCAL),
+        RuntimeConsole,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
+        RuntimeConsoleSshResourcesRemove,
+        Post,
+        "/api/runtime-console/ssh-resources/remove",
+        FirstPartyRequire(SCOPE_SSH_LOCAL),
+        RuntimeConsole,
+        Other,
+        AuthMiddleware,
+    ),
     route(
         RuntimeConsoleCodingAgentRuns,
         Post,

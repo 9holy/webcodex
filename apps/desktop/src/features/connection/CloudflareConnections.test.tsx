@@ -119,11 +119,50 @@ describe("Cloudflare private native controls and OAuth handoff",()=>{
     fireEvent.click(screen.getByRole("button",{name:"Configure OAuth"}));
     expect(screen.queryByDisplayValue("one-time-secret")).toBeNull();
   });
+  it("keeps optional deployment permissions unchecked and merges only the explicit choices",async()=>{
+    api.cloudflareConnection.mockImplementation(async request=>request.action==="configure_oauth"?{client_id:"oauth-client",client_secret:"one-time-secret",already_configured:false}:status);
+    mount(); fireEvent.click(await screen.findByRole("button",{name:"Configure OAuth"}));
+    for (const name of ["Allow OAuth Background Processes","Allow OAuth SSH Resources","Allow OAuth Coding Agents"]) expect(screen.getByRole("checkbox",{name})).not.toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox",{name:"Allow OAuth Background Processes"}));
+    fireEvent.click(screen.getByRole("checkbox",{name:"Allow OAuth SSH Resources"}));
+    fireEvent.click(screen.getByRole("checkbox",{name:"Allow OAuth SSH Resources"}));
+    expect(api.cloudflareConnection.mock.calls.some(([request])=>request.action==="configure_oauth")).toBe(false);
+    fireEvent.change(screen.getByLabelText("OAuth callback URL"),{target:{value:"https://client.example/callback"}});
+    fireEvent.click(screen.getByRole("button",{name:"Create client credentials"}));
+    await screen.findByLabelText("Client secret");
+    expect(api.cloudflareConnection).toHaveBeenCalledWith({action:"configure_oauth",profile_id:"cf",server_instance_id:"server-selected",process_generation:7,redirect_uri:"https://client.example/callback",scopes:["runtime:read","runner:manage","session:collaborate","project:read","project:write","job:run","job:detach"],replace:false});
+    expect(screen.getByRole("checkbox",{name:"Allow OAuth Background Processes"})).toBeChecked();
+    expect(screen.getByRole("checkbox",{name:"Allow OAuth Background Processes"})).toBeDisabled();
+    expect(screen.getByRole("checkbox",{name:"Allow OAuth SSH Resources"})).not.toBeChecked();
+    expect(screen.getByText(/Client credentials were created with the selected permissions/)).toBeInTheDocument();
+  });
+
+  it("updates an existing OAuth connection only through explicit replacement and exposes the Chat reauthorization step",async()=>{
+    api.cloudflareConnection.mockImplementation(async request=>request.action==="configure_oauth"?{client_id:"replacement-client",client_secret:"replacement-secret",already_configured:false}:{...status,oauth_configured:true});
+    mount(); fireEvent.click(await screen.findByRole("button",{name:"Configure OAuth"}));
+    expect(screen.getByText(/Existing credentials will stop working/)).toBeInTheDocument();
+    fireEvent.click(screen.getByText("Advanced"));
+    fireEvent.change(screen.getByLabelText("OAuth scopes"),{target:{value:"runtime:read runner:manage session:collaborate project:read project:write job:run ssh:local coding_agent:run"}});
+    expect(screen.getByRole("checkbox",{name:"Allow OAuth SSH Resources"})).toBeChecked();
+    expect(screen.getByRole("checkbox",{name:"Allow OAuth Coding Agents"})).toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox",{name:"Allow OAuth Background Processes"}));
+    fireEvent.change(screen.getByLabelText("OAuth callback URL"),{target:{value:"https://client.example/callback"}});
+    expect(api.cloudflareConnection.mock.calls.some(([request])=>request.action==="configure_oauth")).toBe(false);
+    expect(screen.queryByRole("button",{name:"Create client credentials"})).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button",{name:"Replace credentials and reauthorize"}));
+    expect(await screen.findByLabelText("Client secret")).toHaveValue("replacement-secret");
+    const writes=api.cloudflareConnection.mock.calls.filter(([request])=>request.action==="configure_oauth");
+    expect(writes).toEqual([[{action:"configure_oauth",profile_id:"cf",server_instance_id:"server-selected",process_generation:7,redirect_uri:"https://client.example/callback",scopes:["runtime:read","runner:manage","session:collaborate","project:read","project:write","job:run","ssh:local","coding_agent:run","job:detach"],replace:true}]]);
+    expect(screen.getByText(/Update your Chat connection with this client ID and secret/)).toBeInTheDocument();
+    for(const name of ["Allow OAuth Background Processes","Allow OAuth SSH Resources","Allow OAuth Coding Agents"]) expect(screen.getByRole("checkbox",{name})).toBeChecked();
+  });
+
   it("reconnects Quick with the observed Server fence and saved revision",async()=>{
     mount();
     fireEvent.click(await screen.findByRole("button",{name:"Reconnect"}));
     await waitFor(()=>expect(api.cloudflareConnection).toHaveBeenCalledWith({action:"start",profile_id:"cf",server_instance_id:"server-selected",expected_revision:4}));
     expect(api.cloudflareConnection).toHaveBeenCalledWith({action:"stop",profile_id:"cf",server_instance_id:"server-selected",process_generation:7});
+    expect(api.cloudflareConnection.mock.calls.some(([request])=>request.action==="configure_oauth")).toBe(false);
   });
   it("clears the old Quick address and authorization observation before reconnect completes",async()=>{
     let completeStop!: (value:CloudflareConnectionStatus)=>void;

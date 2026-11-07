@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncReadExt;
 
+const CAPABILITY_STATUS_HEADER: &str = "x-webcodex-runner-capability-status";
+const CAPABILITY_STATUS_DETACHED: &str = "detached-execution-v1";
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantRequest {
@@ -13,6 +16,8 @@ pub struct GrantRequest {
     pub confirmed: bool,
     #[serde(default)]
     pub permission_approval: bool,
+    #[serde(default)]
+    pub detached_execution: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -23,6 +28,8 @@ pub struct AuthorizationSnapshot {
     pub ssh_resources: bool,
     pub permission_approval_granted: bool,
     pub permission_approval_grant_available: bool,
+    pub detached_execution_granted: bool,
+    pub detached_execution_grant_available: bool,
 }
 
 #[derive(Deserialize)]
@@ -32,6 +39,8 @@ struct ScopeStatus {
     ssh_resources: bool,
     #[serde(default)]
     permission_approval: Option<bool>,
+    #[serde(default)]
+    detached_execution: Option<bool>,
 }
 
 /// Read with the current user token, never operator authority. No Runner, SSH
@@ -64,6 +73,7 @@ pub async fn observe(runtime: &StoredRuntime) -> DesktopResult<AuthorizationSnap
         .map_err(|_| unavailable())?
         .post(url)
         .bearer_auth(token.trim())
+        .header(CAPABILITY_STATUS_HEADER, CAPABILITY_STATUS_DETACHED)
         .json(&serde_json::json!({}))
         .send()
         .await;
@@ -77,6 +87,9 @@ pub async fn observe(runtime: &StoredRuntime) -> DesktopResult<AuthorizationSnap
         permission_approval_granted: status.permission_approval.unwrap_or(false),
         permission_approval_grant_available: can_authorize(runtime)
             && status.permission_approval == Some(false),
+        detached_execution_granted: status.detached_execution.unwrap_or(false),
+        detached_execution_grant_available: can_authorize(runtime)
+            && status.detached_execution == Some(false),
     })
 }
 
@@ -177,6 +190,8 @@ struct NativeGrant<'a> {
     user_token_hash: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     permission_approval: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    detached_execution: Option<bool>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -190,7 +205,11 @@ pub async fn grant(
     runtime: &StoredRuntime,
     operator_token: String,
     permission_approval: bool,
+    detached_execution: bool,
 ) -> DesktopResult<()> {
+    if permission_approval && detached_execution {
+        return Err(unavailable());
+    }
     let mut url = local_url(runtime)?;
     url.set_path("/api/pairing/runner-capabilities");
     let runner = runtime
@@ -214,6 +233,7 @@ pub async fn grant(
             client_id: runner,
             user_token_hash,
             permission_approval: permission_approval.then_some(true),
+            detached_execution: detached_execution.then_some(true),
         })
         .send()
         .await;
@@ -221,6 +241,8 @@ pub async fn grant(
     let response: GrantResponse = bounded_response(result.map_err(|_| unavailable())?).await?;
     let expected_scopes: &[&str] = if permission_approval {
         &["coding_agent:approve"]
+    } else if detached_execution {
+        &["job:detach"]
     } else {
         &["ssh:local", "coding_agent:run"]
     };
@@ -241,7 +263,7 @@ pub async fn grant(
 
 pub fn unavailable() -> DesktopError {
     DesktopError::new("runner_capability_grant_unavailable", "Runner capability authorization was not confirmed",
-        "Use the Desktop-owned local Server with operator authority, then refresh. Remote connections require a Server-operator-approved pairing code.")
+        "Use the Desktop-owned local Server with operator authority, then refresh. For remote connections, ask the Server operator to explicitly grant the required scopes to the authorized credential, then refresh or authorize the OAuth connection again.")
 }
 
 #[cfg(test)]
