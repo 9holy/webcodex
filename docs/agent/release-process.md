@@ -93,7 +93,20 @@ architecture, checksum, or installer/source-manifest checks. Use
 `--require-unified-installers` on collection and verification when shipping the
 complete installer set. The high-level npm publication plan remains unchanged.
 
-For the explicitly authorized `9holy/webcodex` `v0.5.2` distribution,
+For the explicitly authorized `9holy/webcodex` `v0.5.3` distribution,
+[`release-publish-v053.yml`](../../.github/workflows/release-publish-v053.yml)
+uses the normal readiness, tag, formal build, verified upload, publication and
+post-publication stages. Its reviewed
+[`entry point`](../../scripts/release_github_actions_v053.py) supplies an immutable,
+code-owned release specification to the shared controller. The fixed
+[`request`](../../.github/release-requests/v0.5.3.json) must match that specification
+exactly; neither the request JSON nor CLI options can select another repository,
+source, proof run, workflow, installer set or release body. Merging a reviewed
+change to that request on `main` starts the explicitly authorized publication.
+The existing v0.5.2 controller and its recovery inputs remain unchanged.
+
+The v0.5.2 distribution used a separately bounded assembly recovery. For that
+explicitly authorized release,
 [`release-publish.yml`](../../.github/workflows/release-publish.yml) provides a
 repository-owned control host. A reviewed change to the fixed
 [`release request`](../../.github/release-requests/v0.5.2.json) or its

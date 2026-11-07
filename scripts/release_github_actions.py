@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Publish the one reviewed 9holy/webcodex v0.5.2 request from GitHub Actions.
+"""Publish an explicitly reviewed 9holy/webcodex request from GitHub Actions.
 
 The workflow checkpoints each prepare stage before its corresponding effect.
 Only the original controller run can resume its checkpoints. An ambiguous
 effect is observed, never repeated. Candidate source and publication control
 are separate checkouts; existing readiness/build/bundle verification owns the
-candidate contract. This module has no arbitrary command/URL/token inputs.
+candidate contract. A reviewed Python entry point may supply a fixed ReleaseSpec;
+request JSON and CLI arguments cannot select it. The default remains v0.5.2.
+This module has no arbitrary command/URL/token inputs.
 """
 
 from __future__ import annotations
@@ -25,7 +27,9 @@ import urllib.error
 import urllib.parse
 import uuid
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Mapping
 
 if __package__:
@@ -69,9 +73,9 @@ MAX_STATE_BYTES = 256 * 1024
 MAX_CHECKPOINT_BYTES = 2 * 1024 * 1024
 STATE_FILES = frozenset({"journal.json", "readiness.json", "build.json"})
 EFFECT_STATUSES = frozenset({"prepared", "started", "succeeded", "rejected", "unknown"})
-POST_WORKFLOWS = {
-    "image": ("release-image.yml", "Release server image v0.5.2"),
-    "intel": ("release-desktop-darwin-x64.yml", "Release macOS Intel Desktop v0.5.2"),
+_POST_WORKFLOW_DEFINITIONS = {
+    "image": ("release-image.yml", "Release server image"),
+    "intel": ("release-desktop-darwin-x64.yml", "Release macOS Intel Desktop"),
 }
 STAGES = (
     "restore-state", "preflight", "prepare-readiness", "dispatch-readiness", "status-readiness",
@@ -92,6 +96,57 @@ def _require(condition: bool, message: str) -> None:
 
 def _positive_int(value: object) -> bool:
     return type(value) is int and value > 0
+
+
+@dataclass(frozen=True)
+class ReleaseSpec:
+    """Code-owned release authority, never inferred from an input JSON file.
+
+    Take an immutable snapshot so changing the caller's dictionary cannot change
+    a live controller's authority. Only version/source/proof identity and the
+    fixed control workflow vary; the existing GitHub-only delivery scope stays.
+    """
+
+    pinned_request: Mapping[str, object]
+    request_path: str
+    workflow_path: str
+
+    def __post_init__(self) -> None:
+        request = dict(self.pinned_request)
+        _require(set(request) == set(PINNED_REQUEST), "发布规格字段不符合固定合同。")
+        _require(all(type(request[key]) is type(value) for key, value in PINNED_REQUEST.items()),
+                 "发布规格字段类型不符合固定合同。")
+        for key in ("schema_version", "repo", "repo_id", "owner", "owner_id", "github_only",
+                    "include_unified_installers", "include_runtime_installers"):
+            _require(request[key] == PINNED_REQUEST[key], "发布规格不能扩大仓库或交付范围。")
+        tag = request["tag"]
+        _require(collector.VERSION_RE.fullmatch(request["version"]) is not None
+                 and tag == f"v{request['version']}" and request["source_ref"] == f"release/{tag}",
+                 "发布规格的版本、tag 或源码分支不一致。")
+        _require(self.request_path == f".github/release-requests/{tag}.json"
+                 and request["notes_path"] == f".github/release-requests/{tag}-notes.md"
+                 and isinstance(self.workflow_path, str)
+                 and re.fullmatch(r"\.github/workflows/[A-Za-z0-9][A-Za-z0-9._-]*\.yml", self.workflow_path) is not None,
+                 "发布规格必须使用固定仓库内请求、说明及工作流路径。")
+        _require(all(re.fullmatch(r"[0-9a-f]{40}", request[key]) is not None
+                     for key in ("source_sha", "source_tree"))
+                 and re.fullmatch(r"[0-9a-f]{64}", request["notes_sha256"]) is not None
+                 and all(_positive_int(request[key]) for key in
+                         ("ci_run_id", "ci_run_attempt", "evidence_run_id", "evidence_run_attempt")),
+                 "发布规格缺少完整源码、说明或验收运行身份。")
+        object.__setattr__(self, "pinned_request", MappingProxyType(request))
+
+    @property
+    def post_workflows(self) -> Mapping[str, tuple[str, str]]:
+        return MappingProxyType({
+            kind: (workflow, f"{title} {self.pinned_request['tag']}")
+            for kind, (workflow, title) in _POST_WORKFLOW_DEFINITIONS.items()
+        })
+
+
+DEFAULT_RELEASE_SPEC = ReleaseSpec(PINNED_REQUEST, REQUEST_PATH, WORKFLOW_PATH)
+# Preserve the named default consumed by the existing v0.5.2 recovery/tests.
+POST_WORKFLOWS = DEFAULT_RELEASE_SPEC.post_workflows
 
 
 def _unique_object(pairs: list[tuple[str, object]]) -> dict:
@@ -153,16 +208,18 @@ def _atomic_json(path: Path, value: dict) -> None:
             os.unlink(name)
 
 
-def validate_request(value: dict) -> dict:
-    _require(isinstance(value, dict) and set(value) == set(PINNED_REQUEST), "发布请求字段不符合固定合同。")
-    for key, expected in PINNED_REQUEST.items():
+def validate_request(value: dict, *, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC) -> dict:
+    _require(isinstance(value, dict) and set(value) == set(spec.pinned_request), "发布请求字段不符合固定合同。")
+    for key, expected in spec.pinned_request.items():
         _require(type(value[key]) is type(expected) and value[key] == expected,
                  f"发布请求的 {key} 与已审核的固定版本不一致。")
     return dict(value)
 
 
-def validate_context(env: Mapping[str, str], request: dict, run: dict) -> dict:
+def validate_context(env: Mapping[str, str], request: dict, run: dict,
+                     *, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC) -> dict:
     """Validate a machine principal separately from the human authorizing actor."""
+    validate_request(request, spec=spec)
     expected_env = {
         "GITHUB_ACTIONS": "true", "GITHUB_SERVER_URL": "https://github.com",
         "GITHUB_API_URL": "https://api.github.com", "GITHUB_REPOSITORY": request["repo"],
@@ -171,7 +228,7 @@ def validate_context(env: Mapping[str, str], request: dict, run: dict) -> dict:
         "GITHUB_REPOSITORY_OWNER_ID": str(request["owner_id"]),
         "GITHUB_REF": "refs/heads/main", "GITHUB_ACTOR": request["owner"],
         "GITHUB_ACTOR_ID": str(request["owner_id"]), "GITHUB_TRIGGERING_ACTOR": request["owner"],
-        "GITHUB_WORKFLOW_REF": f"{request['repo']}/{WORKFLOW_PATH}@refs/heads/main",
+        "GITHUB_WORKFLOW_REF": f"{request['repo']}/{spec.workflow_path}@refs/heads/main",
     }
     _require(all(env.get(key) == value for key, value in expected_env.items()),
              "发布必须由 9holy 在本仓库已审核的 main 工作流中执行。")
@@ -186,7 +243,7 @@ def validate_context(env: Mapping[str, str], request: dict, run: dict) -> dict:
     except ValueError as exc:
         raise ReleaseControlError("控制工作流运行编号无效。") from exc
     _require(run_id > 0 and attempt > 0, "控制工作流运行编号无效。")
-    expected_run = {"id": run_id, "run_attempt": attempt, "path": WORKFLOW_PATH,
+    expected_run = {"id": run_id, "run_attempt": attempt, "path": spec.workflow_path,
                     "event": event, "head_branch": "main", "head_sha": sha}
     _require(all(type(run.get(key)) is type(value) and run.get(key) == value for key, value in expected_run.items()),
              "GitHub 返回的控制运行与本次执行不一致。")
@@ -199,7 +256,7 @@ def validate_context(env: Mapping[str, str], request: dict, run: dict) -> dict:
         _require(isinstance(actor, dict) and actor.get("id") == request["owner_id"]
                  and actor.get("login") == request["owner"], "控制运行的授权发起人不一致。")
     return {"run_id": run_id, "attempt": attempt, "control_sha": sha,
-            "workflow_path": WORKFLOW_PATH, "actor_id": request["owner_id"]}
+            "workflow_path": spec.workflow_path, "actor_id": request["owner_id"]}
 
 
 def validate_proof_run(run: dict, request: dict, kind: str) -> None:
@@ -229,13 +286,15 @@ def new_journal(request: dict, request_digest: str, context: dict, now: int | No
             "bundle": None, "assets": {}, "post": {}}
 
 
-def validate_journal(value: dict, request: dict, request_digest: str, context: dict) -> dict:
+def validate_journal(value: dict, request: dict, request_digest: str, context: dict,
+                     *, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC) -> dict:
+    validate_request(request, spec=spec)
     prototype = new_journal(request, request_digest, context)
     _require(isinstance(value, dict) and set(value) == set(prototype), "发布记录字段不符合当前版本。")
     for key in ("schema_version", "kind", "request", "request_sha256", "controller", "journal_id"):
         _require(type(value.get(key)) is type(prototype[key]) and value.get(key) == prototype[key],
                  "发布记录不属于当前仓库、源码或原控制运行。")
-    validate_request(value["request"])
+    validate_request(value["request"], spec=spec)
     _require(_positive_int(value.get("created_at")), "发布记录时间无效。")
     for key in ("effects", "checks", "assets", "post"):
         _require(isinstance(value.get(key), dict) and len(value[key]) <= 64, "发布记录子项无效。")
@@ -312,13 +371,14 @@ class Controller:
     def __init__(self, request_path: Path, source_root: Path, state_dir: Path,
                  bundle_dir: Path | None = None, timeout: float = 60,
                  env: Mapping[str, str] | None = None, client: collector.GitHubClient | None = None,
-                 control_root: Path | None = None) -> None:
+                 control_root: Path | None = None, *, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC) -> None:
+        self.spec = spec
         self.control_root = _safe_path(control_root or Path(__file__).resolve().parent.parent)
         self.source_root = _safe_path(source_root)
         self.state_dir = _safe_path(state_dir)
         self.bundle_dir = _safe_path(bundle_dir or state_dir.parent / "webcodex-release-bundle")
         self.request_path = _safe_path(request_path)
-        _require(self.request_path == self.control_root / REQUEST_PATH, "发布请求必须来自已审核控制源码的固定路径。")
+        _require(self.request_path == self.control_root / self.spec.request_path, "发布请求必须来自已审核控制源码的固定路径。")
         _require(self.source_root != self.control_root and not self.source_root.is_relative_to(self.control_root)
                  and not self.control_root.is_relative_to(self.source_root), "候选源码与控制源码必须使用独立目录。")
         for path in (self.state_dir, self.bundle_dir):
@@ -327,7 +387,7 @@ class Controller:
         _require(self.state_dir != self.bundle_dir and not self.state_dir.is_relative_to(self.bundle_dir)
                  and not self.bundle_dir.is_relative_to(self.state_dir), "候选包与 JSON 发布记录必须分开保存。")
         raw = self.request_path.read_bytes()
-        self.request = validate_request(_parse_json(raw))
+        self.request = validate_request(_parse_json(raw), spec=self.spec)
         self.request_digest = hashlib.sha256(raw).hexdigest()
         notes = _safe_path(self.control_root / self.request["notes_path"])
         _require(notes.is_file() and notes.stat().st_size <= MAX_STATE_BYTES, "固定发布说明缺失或过大。")
@@ -357,7 +417,7 @@ class Controller:
         attempt = self.env.get("GITHUB_RUN_ATTEMPT", "")
         _require(run_id.isdigit() and attempt.isdigit(), "控制工作流编号无效。")
         run = self.client.fetch_json(f"/actions/runs/{run_id}/attempts/{attempt}")
-        self.context = validate_context(self.env, self.request, run)
+        self.context = validate_context(self.env, self.request, run, spec=self.spec)
         repo = self.client.fetch_json("")
         _require(repo.get("id") == self.request["repo_id"] and repo.get("full_name") == self.request["repo"]
                  and repo.get("owner", {}).get("id") == self.request["owner_id"]
@@ -388,12 +448,12 @@ class Controller:
             os.close(fd)
 
     def _save(self) -> None:
-        validate_journal(self.state, self.request, self.request_digest, self.context)
+        validate_journal(self.state, self.request, self.request_digest, self.context, spec=self.spec)
         _atomic_json(self.journal_path, self.state)
 
     def _load(self) -> None:
         _require(self.journal_path.is_file(), "缺少本次发布记录，请先恢复原运行的 checkpoint。")
-        self.state = validate_journal(_read_json(self.journal_path), self.request, self.request_digest, self.context)
+        self.state = validate_journal(_read_json(self.journal_path), self.request, self.request_digest, self.context, spec=self.spec)
 
     def _source(self) -> None:
         publication._require_exact_clean_root(self.source_root, self.request["source_sha"])
@@ -545,7 +605,7 @@ class Controller:
         previous_run = self.client.fetch_json(f"/actions/runs/{run_id}/attempts/{latest[0]}")
         previous_env = dict(self.env)
         previous_env["GITHUB_RUN_ATTEMPT"] = str(latest[0])
-        validate_context(previous_env, self.request, previous_run)
+        validate_context(previous_env, self.request, previous_run, spec=self.spec)
         _require(previous_run.get("status") == "completed", "旧控制运行尚未结束，不能同时恢复。")
         digest = collector._artifact_digest(item.get("digest"))
         with tempfile.TemporaryDirectory(prefix="webcodex-checkpoint-", dir=self.state_dir.parent) as tmp:
@@ -563,7 +623,7 @@ class Controller:
                              and 0 < member.file_size <= MAX_STATE_BYTES, "checkpoint 包含不安全或重复成员。")
                     restored[member.filename] = _parse_json(handle.read(member))
             _require("journal.json" in restored, "checkpoint 缺少根发布记录。")
-            self.state = validate_journal(restored["journal.json"], self.request, self.request_digest, self.context)
+            self.state = validate_journal(restored["journal.json"], self.request, self.request_digest, self.context, spec=self.spec)
             # Check the existing helper schemas in a private staging directory
             # before exposing any restored file in the live state directory.
             for name, value in restored.items():
@@ -1120,7 +1180,7 @@ class Controller:
         return 0
 
     def _post_runs(self, kind: str) -> list[dict]:
-        workflow, _title = POST_WORKFLOWS[kind]
+        workflow, _title = self.spec.post_workflows[kind]
         payload = self.client.fetch_json(f"/actions/workflows/{workflow}/runs?event=workflow_dispatch&branch=main&per_page=100")
         runs = payload.get("workflow_runs")
         _require(isinstance(runs, list) and len(runs) <= 100 and all(isinstance(run, dict) for run in runs),
@@ -1131,7 +1191,7 @@ class Controller:
         effect = self.state["effects"].get(f"post:{kind}")
         _require(isinstance(effect, dict), "缺少后续工作流的固定 dispatch 意图。")
         intent = effect["intent"]
-        workflow, title = POST_WORKFLOWS[kind]
+        workflow, title = self.spec.post_workflows[kind]
         expected = {"workflow_file": workflow, "run_name": title, "ref": "main", "tag": self.request["tag"],
                     "source_sha": self.request["source_sha"], "tag_object_sha": self.state["tag_object_sha"],
                     "release_id": self.state["release_id"], "head_sha": self.context["control_sha"]}
@@ -1147,7 +1207,7 @@ class Controller:
         release = self._owned_release()
         _require(release["draft"] is False and self.state["checks"].get("public_bytes") is True,
                  "公开安装包尚未完成字节验收，不能开始后续发布。")
-        for kind, (workflow, title) in POST_WORKFLOWS.items():
+        for kind, (workflow, title) in self.spec.post_workflows.items():
             if f"post:{kind}" in self.state["effects"]:
                 self._post_intent(kind)
                 continue
@@ -1228,7 +1288,7 @@ class Controller:
         release = self._owned_release()
         _require(release["draft"] is False and self.state["checks"].get("public_bytes") is True,
                  "后续任务需要已验收的公开 Release。")
-        for kind in POST_WORKFLOWS:
+        for kind in self.spec.post_workflows:
             intent = self._post_intent(kind)
             if self._post_snapshot(kind) is not None:
                 continue
@@ -1275,7 +1335,7 @@ class Controller:
         deadline = time.monotonic() + wait_secs
         while True:
             observed: dict[str, dict] = {}
-            for kind in POST_WORKFLOWS:
+            for kind in self.spec.post_workflows:
                 run = self._post_snapshot(kind)
                 _require(run is not None, "此前后续 dispatch 尚无法唯一关联；不自动重派。")
                 observed[kind] = run
@@ -1304,8 +1364,8 @@ class Controller:
             time.sleep(min(10, max(0.1, deadline - time.monotonic())))
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="固定 WebCodex v0.5.2 的 GitHub Actions 发布控制器；无参数仅显示计划。")
+def build_parser(*, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=f"固定 WebCodex {spec.pinned_request['tag']} 的 GitHub Actions 发布控制器；无参数仅显示计划。")
     parser.add_argument("stage", nargs="?", choices=STAGES)
     parser.add_argument("--plan", action="store_true", help="只显示固定目标和阶段，不联网或创建状态")
     parser.add_argument("--request", type=Path)
@@ -1317,11 +1377,11 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+def main(argv: list[str] | None = None, *, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC) -> int:
+    parser = build_parser(spec=spec)
     args = parser.parse_args(argv)
     if args.plan or args.stage is None:
-        print("固定发布 9holy/webcodex v0.5.2，源码 2299ffe5bcc0f3965e11b753fabc3fb558769de8。")
+        print(f"固定发布 {spec.pinned_request['repo']} {spec.pinned_request['tag']}，源码 {spec.pinned_request['source_sha']}。")
         print("仅 GitHub、8 个 unified 安装目标；通过仓库官方 Actions installation token 执行。")
         print("prepare 后必须先保存 checkpoint；同一控制 run 可恢复，未知操作不重复提交。")
         print("阶段：" + " → ".join(STAGES))
@@ -1329,7 +1389,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.request is None or args.source_root is None or args.state_dir is None:
         parser.error("执行阶段需要 --request、--source-root 和 --state-dir")
     try:
-        return Controller(args.request, args.source_root, args.state_dir, args.bundle_dir, args.timeout).run(args.stage, args.wait_secs)
+        return Controller(args.request, args.source_root, args.state_dir, args.bundle_dir, args.timeout, spec=spec).run(args.stage, args.wait_secs)
     except ReleaseControlError as exc:
         print(f"[release-control] {exc}", file=sys.stderr)
         return 1

@@ -11,6 +11,7 @@ import stat
 import tempfile
 import unittest
 import urllib.error
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -908,6 +909,247 @@ class ControllerStageTests(unittest.TestCase):
             self.assertEqual(self.controller.status_post(), 0)
         image_check.assert_called_once_with(runs["image"])
         self.assertNotIn("intel_desktop", self.controller.state["checks"])
+
+
+class ReleaseSpecTests(unittest.TestCase):
+    """A synthetic spec lives only in temporary fixtures, never production input."""
+
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve()
+        self.control = self.root / "control"
+        self.control.mkdir()
+        notes = b"Unit-test-only release notes.\n"
+        self.request = _request(
+            version="0.0.0-spec-test", tag="v0.0.0-spec-test", source_ref="release/v0.0.0-spec-test",
+            source_sha="c" * 40, source_tree="d" * 40, ci_run_id=1001, evidence_run_id=1002,
+            notes_path=".github/release-requests/v0.0.0-spec-test-notes.md",
+            notes_sha256=hashlib.sha256(notes).hexdigest(),
+        )
+        self.spec = actions.ReleaseSpec(
+            self.request, ".github/release-requests/v0.0.0-spec-test.json",
+            ".github/workflows/release-publish-spec-test.yml",
+        )
+        path = self.control / self.spec.request_path
+        path.parent.mkdir(parents=True)
+        path.write_bytes(actions._json_bytes(self.request))
+        (self.control / self.request["notes_path"]).write_bytes(notes)
+
+    def _environment(self, attempt: int = 1) -> dict:
+        return _environment(
+            GITHUB_RUN_ATTEMPT=str(attempt),
+            GITHUB_WORKFLOW_REF=f"{REPO}/{self.spec.workflow_path}@refs/heads/main",
+        )
+
+    def _controller(self, attempt: int = 1) -> actions.Controller:
+        controller = actions.Controller(
+            self.control / self.spec.request_path, self.root / "source", self.root / "state",
+            self.root / "bundle", env=self._environment(attempt),
+            client=mock.Mock(spec=actions.collector.GitHubClient), control_root=self.control,
+            spec=self.spec,
+        )
+        controller.context = actions.validate_context(
+            controller.env, controller.request,
+            _controller_run(path=self.spec.workflow_path, run_attempt=attempt), spec=self.spec,
+        )
+        return controller
+
+    def _with_journal(self) -> actions.Controller:
+        controller = self._controller()
+        controller.state = actions.new_journal(
+            controller.request, controller.request_digest, controller.context, now=1700000000,
+        )
+        controller._save()
+        return controller
+
+    def test_default_release_and_recovery_contract_remain_the_original_fixed_request(self) -> None:
+        self.assertEqual(dict(actions.DEFAULT_RELEASE_SPEC.pinned_request), _request())
+        self.assertEqual(actions.DEFAULT_RELEASE_SPEC.request_path, actions.REQUEST_PATH)
+        self.assertEqual(actions.DEFAULT_RELEASE_SPEC.workflow_path, WORKFLOW)
+        self.assertEqual(actions.POST_WORKFLOWS, {
+            "image": ("release-image.yml", "Release server image v0.5.2"),
+            "intel": ("release-desktop-darwin-x64.yml", "Release macOS Intel Desktop v0.5.2"),
+        })
+        with self.assertRaises(actions.ReleaseControlError):
+            actions.validate_request(self.request)
+        self.assertEqual(actions.validate_request(self.request, spec=self.spec), self.request)
+
+    def test_spec_snapshots_authority_and_request_json_cannot_change_it(self) -> None:
+        self.request["source_sha"] = "e" * 40
+        self.assertEqual(self.spec.pinned_request["source_sha"], "c" * 40)
+        with self.assertRaises(TypeError):
+            self.spec.pinned_request["source_sha"] = self.request["source_sha"]
+        with self.assertRaises(AttributeError):
+            self.spec.workflow_path = WORKFLOW
+        for changed in (
+            {"repo": "other/webcodex"}, {"repo_id": REPO_ID + 1}, {"owner": "other"},
+            {"tag": TAG}, {"version": VERSION}, {"source_ref": SOURCE_REF},
+            {"source_sha": SOURCE}, {"source_tree": SOURCE_TREE},
+            {"ci_run_id": CI_RUN}, {"ci_run_attempt": 2}, {"evidence_run_id": EVIDENCE_RUN},
+            {"notes_sha256": "e" * 64}, {"include_runtime_installers": True},
+            {"spec": "choose-another-publication"},
+        ):
+            with self.subTest(changed=changed), self.assertRaises(actions.ReleaseControlError):
+                actions.validate_request(dict(self.spec.pinned_request, **changed), spec=self.spec)
+
+    def test_spec_rejects_scope_expansion_inconsistent_identity_and_unsafe_paths(self) -> None:
+        for changed in (
+            {"repo": "other/webcodex"}, {"github_only": False},
+            {"include_unified_installers": False}, {"include_runtime_installers": True},
+            {"tag": TAG}, {"source_ref": "main"}, {"source_sha": "short"},
+            {"ci_run_id": True}, {"evidence_run_attempt": 0},
+            {"notes_path": "../notes.md"}, {"notes_sha256": "e" * 63},
+        ):
+            with self.subTest(changed=changed), self.assertRaises(actions.ReleaseControlError):
+                actions.ReleaseSpec(dict(self.request, **changed), self.spec.request_path, self.spec.workflow_path)
+        for request_path, workflow_path in (
+            (actions.REQUEST_PATH, self.spec.workflow_path),
+            ("../request.json", self.spec.workflow_path),
+            (self.spec.request_path, ".github/workflows/../release.yml"),
+            (self.spec.request_path, "https://example.invalid/release.yml"),
+        ):
+            with self.subTest(request_path=request_path, workflow_path=workflow_path), self.assertRaises(actions.ReleaseControlError):
+                actions.ReleaseSpec(self.request, request_path, workflow_path)
+
+    def test_controller_requires_code_selected_spec_path_notes_and_verified_workflow(self) -> None:
+        with self.assertRaises(actions.ReleaseControlError):
+            actions.Controller(
+                self.control / self.spec.request_path, self.root / "source", self.root / "state",
+                control_root=self.control,
+            )
+        with self.assertRaises(actions.ReleaseControlError):
+            actions.Controller(
+                self.control / actions.REQUEST_PATH, self.root / "source", self.root / "state",
+                control_root=self.control, spec=self.spec,
+            )
+        controller = self._controller()
+        controller.client.fetch_json.side_effect = [
+            _controller_run(path=self.spec.workflow_path), dict(_repo(), default_branch="main"),
+        ]
+        controller.client._fetch_json_url.return_value = {"total_count": 1, "repositories": [_repo()]}
+        controller._authenticate()
+        self.assertEqual(controller.context["workflow_path"], self.spec.workflow_path)
+        for env, run in (
+            (_environment(), _controller_run(path=self.spec.workflow_path)),
+            (self._environment(), _controller_run()),
+            (self._environment(), _controller_run(path=self.spec.workflow_path, actor={"login": "other", "id": 1})),
+        ):
+            with self.assertRaises(actions.ReleaseControlError):
+                actions.validate_context(env, self.request, run, spec=self.spec)
+        (self.control / self.request["notes_path"]).write_bytes(b"changed notes")
+        with self.assertRaises(actions.ReleaseControlError):
+            self._controller()
+
+    def test_injected_spec_keeps_exact_source_proofs_and_readiness_before_tag(self) -> None:
+        controller = self._with_journal()
+        proofs = {
+            f"/actions/runs/{self.request[f'{kind}_run_id']}/attempts/1": _proof(
+                kind, id=self.request[f"{kind}_run_id"], head_sha=self.request["source_sha"],
+                head_branch=self.request["source_ref"],
+            ) for kind in ("ci", "evidence")
+        }
+        controller.client.fetch_json.side_effect = proofs.__getitem__
+        controller._proofs()
+        for field, value in (("conclusion", "failure"), ("run_attempt", 2), ("head_sha", SOURCE)):
+            changed = proofs[f"/actions/runs/{self.request['evidence_run_id']}/attempts/1"]
+            previous = changed[field]
+            changed[field] = value
+            with self.subTest(field=field), self.assertRaises(actions.ReleaseControlError):
+                controller._proofs()
+            changed[field] = previous
+        with mock.patch.object(actions.publication, "_require_exact_clean_root") as clean, mock.patch.object(
+            actions.publication, "_git", return_value=self.request["source_tree"]
+        ), mock.patch.object(actions.publication, "_require_package_versions") as versions:
+            controller._source()
+        self.assertEqual(clean.call_args_list, [
+            mock.call(controller.source_root, self.request["source_sha"]), mock.call(self.control, CONTROL),
+        ])
+        versions.assert_called_once_with(controller.source_root, self.request["version"], context="GitHub Actions release")
+        with mock.patch.object(controller, "status_readiness", return_value=2), mock.patch.object(
+            controller, "_mutate"
+        ) as mutation, self.assertRaises(actions.ReleaseControlError):
+            controller.prepare_tag()
+        mutation.assert_not_called()
+        self.assertEqual(controller.state["effects"], {})
+
+    def test_injected_spec_restores_only_own_checkpoint_and_preserves_unknown_effects(self) -> None:
+        controller = self._with_journal()
+        controller.state["effects"]["draft"] = _effect({}, status="unknown")
+        controller._save()
+        for other_request, other_context in (
+            (_request(), _context()),
+            (controller.request, dict(controller.context, workflow_path=WORKFLOW)),
+            (controller.request, dict(controller.context, run_id=CONTROL_RUN + 1)),
+        ):
+            with self.assertRaises(actions.ReleaseControlError):
+                actions.validate_journal(controller.state, other_request, controller.request_digest, other_context, spec=self.spec)
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as output:
+            output.writestr("journal.json", controller.journal_path.read_bytes())
+        checkpoint = archive.getvalue()
+        controller.journal_path.unlink()
+        recovered = self._controller(attempt=2)
+        artifact = {
+            "id": 9001, "name": f"release-control-{self.request['tag']}-{CONTROL_RUN}-1-99-final-state",
+            "expired": False, "size_in_bytes": len(checkpoint),
+            "digest": "sha256:" + hashlib.sha256(checkpoint).hexdigest(),
+            "workflow_run": {"id": CONTROL_RUN, "repository_id": REPO_ID,
+                             "head_repository_id": REPO_ID, "head_sha": CONTROL, "head_branch": "main"},
+        }
+        recovered.client.fetch_json.side_effect = [
+            {"total_count": 1, "artifacts": [artifact]},
+            _controller_run(path=self.spec.workflow_path, status="completed"),
+        ]
+        with mock.patch.object(recovered, "_download_checkpoint", side_effect=lambda _item, _digest, path: path.write_bytes(checkpoint)), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(recovered.restore_state(), 0)
+        self.assertEqual(recovered.state["effects"]["draft"]["status"], "unknown")
+        with self.assertRaises(actions.ReleaseControlError):
+            recovered._may_execute("draft")
+        recovered._load()
+        self.assertEqual(recovered.state["request"], self.request)
+
+    def test_post_workflows_bind_selected_tag_and_keep_existing_consumers(self) -> None:
+        controller = self._with_journal()
+        controller.state["checks"]["public_bytes"] = True
+        controller.state["release_id"] = 54321
+        with mock.patch.object(controller, "_owned_release", return_value={"draft": False}), mock.patch.object(
+            controller, "_post_runs", return_value=[]
+        ), mock.patch.object(actions.readiness, "_branch_sha", return_value=CONTROL), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(controller.prepare_post(), 0)
+        for kind, (workflow, title) in self.spec.post_workflows.items():
+            self.assertEqual(workflow, actions.POST_WORKFLOWS[kind][0])
+            self.assertTrue(title.endswith(self.request["tag"]))
+            intent = controller._post_intent(kind)
+            self.assertEqual(intent["tag"], self.request["tag"])
+            self.assertEqual(intent["source_sha"], self.request["source_sha"])
+            run = _controller_run(
+                id=501, path=f".github/workflows/{workflow}", event="workflow_dispatch", display_title=title,
+                actor={"login": actions.BOT_LOGIN, "id": actions.BOT_ID},
+            )
+            controller._validate_post_run(kind, run)
+            run["display_title"] = actions.POST_WORKFLOWS[kind][1]
+            with self.assertRaises(actions.ReleaseControlError):
+                controller._validate_post_run(kind, run)
+
+    def test_thin_entry_point_passes_spec_without_a_json_or_cli_selector(self) -> None:
+        output = io.StringIO()
+        with mock.patch.object(actions, "Controller") as controller, contextlib.redirect_stdout(output):
+            self.assertEqual(actions.main(["--plan"], spec=self.spec), 0)
+            controller.assert_not_called()
+            controller.return_value.run.return_value = 0
+            self.assertEqual(actions.main([
+                "preflight", "--request", str(self.control / self.spec.request_path),
+                "--source-root", str(self.root / "source"), "--state-dir", str(self.root / "state"),
+            ], spec=self.spec), 0)
+            self.assertIs(controller.call_args.kwargs["spec"], self.spec)
+            controller.return_value.run.assert_called_once_with("preflight", 0)
+        self.assertIn(self.request["tag"], output.getvalue())
+        self.assertIn(self.request["source_sha"], output.getvalue())
+        self.assertNotIn(TAG, output.getvalue())
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as rejected:
+            actions.main(["--spec", self.spec.request_path])
+        self.assertEqual(rejected.exception.code, 2)
 
 
 class OfflineEntryPointTests(unittest.TestCase):
