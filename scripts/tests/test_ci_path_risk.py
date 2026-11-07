@@ -85,6 +85,32 @@ class PathRiskFixtureTests(unittest.TestCase):
                 self.assertEqual(result["needs_full_native"], "false")
                 self.assertIn("codex-adapter", result["categories"])
 
+    def test_codex_app_server_surfaces_require_native_core_and_runtime_runner(self) -> None:
+        surfaces = (
+            ("integrations/codex_app_server/adapter.py", True),
+            ("integrations/codex_app_server/compatibility.py", True),
+            ("integrations/codex_app_server/__main__.py", True),
+            ("integrations/codex_app_server/tests/fake_codex.py", True),
+            ("integrations/codex_app_server/tests/schema_fixture.py", True),
+            ("integrations/codex_app_server/tests/test_adapter.py", False),
+            ("integrations/codex_app_server/README.md", False),
+            ("scripts/package_codex_app_server_adapter.py", False),
+            ("scripts/tests/test_codex_app_server_package.py", False),
+        )
+        for path, runner in surfaces:
+            for status in ("A", "M", "D"):
+                with self.subTest(path=path, status=status):
+                    result = classify(path, statuses=(status,))
+                    self.assertEqual(result["needs_windows_core"], "true")
+                    self.assertEqual(result["needs_windows_runner"], str(runner).lower())
+                    self.assertEqual(result["needs_macos"], "true")
+                    self.assertEqual(result["needs_windows_package"], "false")
+                    self.assertEqual(result["needs_windows_desktop"], "false")
+                    self.assertEqual(result["needs_macos_desktop"], "false")
+                    self.assertEqual(result["needs_desktop_package"], "false")
+                    self.assertEqual(result["needs_full_native"], "false")
+                    self.assertEqual(result["categories"], "codex-app-server")
+
     def test_process_requires_windows_core_and_macos_without_desktop_package(self) -> None:
         result = classify("crates/webcodex-process/src/lib.rs")
         self.assertEqual(result["needs_windows_core"], "true")
