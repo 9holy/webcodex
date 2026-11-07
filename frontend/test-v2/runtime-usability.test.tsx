@@ -93,12 +93,12 @@ describe("Runtime usability", () => {
 
 it("keeps execution facts separate from expectation matches", () => {
   const cases = [
-    ["failed", "matched_expected_failure", "Failed · Expected result", "good"],
-    ["failed", "matched_expected_result", "Failed · Expected result", "good"],
-    ["success", "unexpected_success", "Succeeded · Expectation not met", "warn"],
-    ["failed", "expectation_mismatch", "Failed · Expectation not met", "warn"],
-    ["failed", undefined, "Failed", "warn"],
-    ["success", undefined, "Succeeded", "good"],
+    ["failed", "matched_expected_failure", "Call failed · Expected result", "good"],
+    ["failed", "matched_expected_result", "Call failed · Expected result", "good"],
+    ["success", "unexpected_success", "Call succeeded · Expectation not met", "warn"],
+    ["failed", "expectation_mismatch", "Call failed · Expectation not met", "warn"],
+    ["failed", undefined, "Call failed", "warn"],
+    ["success", undefined, "Call succeeded", "good"],
   ];
   const detail = windowDetail({ active_requests: [], activity: cases.map(([status, expectation], index) => ({
     status: status!, failure_expectation_result: expectation, started_at_ms: index + 1,
