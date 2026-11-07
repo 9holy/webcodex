@@ -33,6 +33,16 @@ impl std::fmt::Debug for PrivateFileLease {
     }
 }
 
+impl Drop for PrivateFileLease {
+    fn drop(&mut self) {
+        // A concurrent fork can retain this open-file description until exec.
+        // Release the retired guard's lock before closing its handle, rather
+        // than extending its lifetime through that unrelated inherited fd.
+        // Separately opened leases retain their own locks and still fence GC.
+        let _ = FileExt::unlock(&self._file);
+    }
+}
+
 impl PrivateFileStore {
     pub fn open(root: &Path) -> SetupResultValue<Self> {
         ensure_private_directory(root)?;
@@ -235,6 +245,70 @@ fn windows_read_guard(path: &Path, allow_delete: bool) -> SetupResultValue<std::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn retired_leases_release_inherited_open_file_descriptions() {
+        for exclusive in [false, true] {
+            let temporary = crate::test_tempdir().unwrap();
+            let store = PrivateFileStore::open(&temporary.path().join("private")).unwrap();
+            let path = store
+                .create("hosts.txt", b"pinned-public-host-key")
+                .unwrap();
+            let lease = if exclusive {
+                store.try_exclusive_lease("hosts.txt").unwrap().unwrap()
+            } else {
+                store.shared_lease("hosts.txt").unwrap()
+            };
+            // dup and fork retain the same open-file description. A parallel
+            // spawn can keep this descriptor until exec despite O_CLOEXEC.
+            // Holding the duplicate makes that window deterministic without
+            // forking the multithreaded Rust test process.
+            let inherited = lease._file.try_clone().unwrap();
+            assert!(store.try_exclusive_lease("hosts.txt").unwrap().is_none());
+            drop(lease);
+
+            let removal = store
+                .try_exclusive_lease("hosts.txt")
+                .unwrap()
+                .expect("a retired guard retained its lock through an inherited descriptor");
+            store.remove_leased(&removal).unwrap();
+            assert!(!path.exists());
+            assert!(inherited.metadata().unwrap().len() > 0);
+            drop(inherited);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn independent_lease_still_protects_after_an_inherited_guard_is_retired() {
+        let temporary = crate::test_tempdir().unwrap();
+        let store = PrivateFileStore::open(&temporary.path().join("private")).unwrap();
+        let path = store
+            .create("hosts.txt", b"pinned-public-host-key")
+            .unwrap();
+        let first = store.shared_lease("hosts.txt").unwrap();
+        let inherited = first._file.try_clone().unwrap();
+        // This separately opened lease models another live Runner snapshot,
+        // rather than the incidental descriptor inherited by an unrelated fork.
+        let independent = store.shared_lease("hosts.txt").unwrap();
+        drop(first);
+        assert!(store.try_exclusive_lease("hosts.txt").unwrap().is_none());
+        assert_eq!(
+            store.read("hosts.txt", 64).unwrap(),
+            b"pinned-public-host-key"
+        );
+        drop(independent);
+
+        let removal = store
+            .try_exclusive_lease("hosts.txt")
+            .unwrap()
+            .expect("only an unrelated inherited descriptor remains");
+        store.remove_leased(&removal).unwrap();
+        assert!(!path.exists());
+        assert!(inherited.metadata().unwrap().len() > 0);
+        drop(inherited);
+    }
 
     #[test]
     fn independent_shared_leases_protect_reads_and_exclude_removal() {

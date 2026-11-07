@@ -1,8 +1,92 @@
 use super::super::diagnose::{project_live_options, read_bounded_diagnostic_frame};
 use super::super::protocol::{wait_response, AcpFailure, ReaderEvent};
+use super::super::run::reap_direct_child_until_with_clock;
 use super::*;
+use std::cell::Cell;
 
 const PRIVATE_DIAGNOSTIC: &str = "synthetic-secret-/private/operator/auth-session";
+
+#[test]
+fn direct_child_reap_uses_remaining_budget_after_tree_exit() {
+    let started = Instant::now();
+    let now = Cell::new(started);
+    let mut polls = 0;
+    let mut waits = Vec::new();
+    let reaped = reap_direct_child_until_with_clock(
+        started + ACP_IO_CLEANUP_TIMEOUT,
+        || {
+            polls += 1;
+            // No executable tree member does not imply that the direct child
+            // can already be reaped, especially during Darwin exit teardown.
+            Ok(polls == 3)
+        },
+        || now.get(),
+        |duration| {
+            waits.push(duration);
+            now.set(now.get() + duration);
+        },
+    );
+    assert!(
+        reaped,
+        "a transient unreapable child must use the remaining budget"
+    );
+    assert_eq!(polls, 3);
+    assert_eq!(waits, vec![ACP_POLL, ACP_POLL]);
+    assert_eq!(now.get(), started + ACP_POLL * 2);
+}
+
+#[test]
+fn direct_child_reap_never_restarts_or_exceeds_the_cleanup_deadline() {
+    for remaining in [Duration::ZERO, ACP_POLL * 2 + Duration::from_millis(7)] {
+        let started = Instant::now();
+        let deadline = started + remaining;
+        let now = Cell::new(started);
+        let mut polls = 0;
+        let mut waits = Vec::new();
+        let reaped = reap_direct_child_until_with_clock(
+            deadline,
+            || {
+                polls += 1;
+                Ok(false)
+            },
+            || now.get(),
+            |duration| {
+                assert!(duration <= deadline.saturating_duration_since(now.get()));
+                waits.push(duration);
+                now.set(now.get() + duration);
+            },
+        );
+        assert!(!reaped);
+        assert_eq!(now.get(), deadline);
+        if remaining.is_zero() {
+            assert_eq!(
+                polls, 1,
+                "an exhausted deadline permits only a nonblocking check"
+            );
+            assert!(waits.is_empty());
+        } else {
+            assert_eq!(polls, 4);
+            assert_eq!(waits, vec![ACP_POLL, ACP_POLL, Duration::from_millis(7)]);
+        }
+    }
+}
+
+#[test]
+fn direct_child_reap_stops_on_an_observation_error() {
+    let started = Instant::now();
+    let mut polls = 0;
+    let reaped = reap_direct_child_until_with_clock(
+        started + ACP_IO_CLEANUP_TIMEOUT,
+        || {
+            polls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+        },
+        || started,
+        |_| panic!("an observation error must not add a cleanup wait"),
+    );
+    assert!(!reaped);
+    assert_eq!(polls, 1);
+}
 
 #[test]
 fn unadvertised_select_current_never_leaks_into_diagnostic() {

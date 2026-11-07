@@ -7,6 +7,8 @@
 use super::config::SshConfig;
 use super::output::{CommandResult, ShellCommandResult};
 use super::shutdown::lock_unpoison;
+#[cfg(windows)]
+use super::ssh_credentials::validate_windows_command;
 use super::ssh_credentials::{AskpassLease, ManagedSshConnection};
 use super::RunnerPolicy;
 use std::collections::HashMap;
@@ -442,6 +444,8 @@ impl SshConnectionPool {
                 .arg("LogLevel=ERROR")
                 .arg(&resource.host)
                 .arg(bootstrap);
+            validate_windows_command(&ssh)
+                .map_err(|code| format!("{code}: SSH command was not started"))?;
             return Ok(PreparedSshCommand {
                 command: ssh,
                 transport: PreparedSshTransport::Direct,
@@ -570,6 +574,8 @@ impl SshConnectionPool {
                 .arg("LogLevel=ERROR")
                 .arg(&resource.host)
                 .arg(shell_program);
+            validate_windows_command(&ssh)
+                .map_err(|code| format!("{code}: SSH shell was not started"))?;
             Ok(PreparedPersistentShellCommand {
                 command: ssh,
                 default_cwd: resource.default_cwd.clone(),

@@ -9,6 +9,38 @@ use super::store::DurableDispatchPhase;
 use super::*;
 use webcodex_core::coding_agent::CodingAgentPermissionOutcome;
 
+fn reap_direct_child_until(child: &mut ManagedChild, deadline: Instant) {
+    // A tree with no executable members may still have a direct child that
+    // cannot yet be reaped during OS exit teardown. Spend only the remainder
+    // of the existing cleanup budget; never signal the retired tree again.
+    let _ = reap_direct_child_until_with_clock(
+        deadline,
+        || child.try_wait().map(|status| status.is_some()),
+        Instant::now,
+        thread::sleep,
+    );
+}
+
+pub(super) fn reap_direct_child_until_with_clock(
+    deadline: Instant,
+    mut try_reap: impl FnMut() -> std::io::Result<bool>,
+    mut now: impl FnMut() -> Instant,
+    mut sleep: impl FnMut(Duration),
+) -> bool {
+    loop {
+        match try_reap() {
+            Ok(true) => return true,
+            Err(_) => return false,
+            Ok(false) => {}
+        }
+        let remaining = deadline.saturating_duration_since(now());
+        if remaining.is_zero() {
+            return false;
+        }
+        sleep(remaining.min(ACP_POLL));
+    }
+}
+
 impl CodingAgentManager {
     pub(super) fn terminate_run_io(
         &self,
@@ -23,7 +55,7 @@ impl CodingAgentManager {
         if !remaining.is_zero() {
             let _ = child.wait_tree_exit(remaining);
         }
-        let _ = child.try_wait();
+        reap_direct_child_until(child, deadline);
         let _ = self.worker_threads.reap_finished();
     }
 
@@ -46,7 +78,7 @@ impl CodingAgentManager {
         if !remaining.is_zero() {
             let _ = child.wait_tree_exit(remaining);
         }
-        let _ = child.try_wait();
+        reap_direct_child_until(child, forced_deadline);
         let _ = self.worker_threads.reap_finished();
     }
 
@@ -246,8 +278,9 @@ impl CodingAgentManager {
                     AcpFailure::WorkerIo(error.kind()),
                 );
                 let _ = child.terminate_tree();
-                let _ = child.wait_tree_exit(ACP_IO_CLEANUP_TIMEOUT);
-                let _ = child.try_wait();
+                let deadline = Instant::now() + ACP_IO_CLEANUP_TIMEOUT;
+                let _ = child.wait_tree_exit(deadline.saturating_duration_since(Instant::now()));
+                reap_direct_child_until(&mut child, deadline);
                 return;
             }
         };

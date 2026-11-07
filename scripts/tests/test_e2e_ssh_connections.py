@@ -4,13 +4,21 @@ import os
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import time
 from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from scripts.e2e_ssh_connections import ConnectionAcceptance, HostTools, SshFixture, acl_failure_details, channel_input, git_posix_tools, native_ssh_version, secure_fixture_path
+from scripts.e2e_ssh_connections import (
+    ConnectionAcceptance, FIXTURE_COUNTERS, HostTools, OperatorCallFailed,
+    LITERAL_DOLLAR_ENV, NONEXECUTABLE_DECOY, PIN_PROBE_OUTPUT,
+    PROBE_DIAGNOSTIC_COUNTERS, PROBE_DIAGNOSTIC_STAGES, SshFixture,
+    acl_failure_details, channel_input, encrypted_key_control_copy, git_posix_tools,
+    literal_ssh_option_path, native_ssh_version, observed_probe_diagnostic,
+    prepare_windows_runner, secure_fixture_path, special_key_path, user_known_hosts_command,
+)
 
 
 class Channel:
@@ -47,14 +55,608 @@ class Channel:
         self.closed = True
 
 
+class RunnerRestartReadinessTests(unittest.TestCase):
+    def fixture(self):
+        temporary = tempfile.TemporaryDirectory(prefix="wc-restart-catalog-")
+        self.addCleanup(temporary.cleanup)
+        acceptance = object.__new__(ConnectionAcceptance)
+        acceptance.project_dir = Path(temporary.name).resolve()
+        acceptance.owner = "fixture-owner-token"
+        acceptance.config, acceptance.env = Path("fixture.toml"), {}
+        acceptance.server = acceptance.runner = SimpleNamespace(poll=lambda: None)
+        acceptance.launch = mock.Mock(return_value=SimpleNamespace(poll=lambda: None))
+        acceptance.tool = mock.Mock(side_effect=AssertionError("readiness must not dispatch effects"))
+        row = {
+            "client_id": "ssh-setup-runner", "runner_instance_id": "old-instance", "connected": True,
+            "project_inventory": {"sync_state": "complete"},
+            "projects": [{"id": "fixture", "path": str(acceptance.project_dir),
+                          "root_fingerprint": "wc_projroot_" + "1" * 64, "disabled": False}],
+            "projects_truncated": False, "projects_next_offset": None, "projects_offset": 0,
+        }
+        return acceptance, row
+
+    def catalog(self, row):
+        return {"success": True, "output": {"runners": [] if row is None else [row]}}
+
+    def loaded_resource(self):
+        return {"success": True, "output": {"binding": "opaque-fixture-binding", "resources": [
+            {"name": "password-fixture", "source": "managed", "active": True, "pending_restart": False},
+        ]}}
+
+    def test_restart_does_not_accept_old_inventory_before_the_replacement_catalog(self):
+        with tempfile.TemporaryDirectory(prefix="wc-restart-catalog-") as directory:
+            acceptance = object.__new__(ConnectionAcceptance)
+            acceptance.project_dir = Path(directory).resolve()
+            acceptance.project = "agent:ssh-setup-runner:fixture"
+            acceptance.owner = "fixture-owner-token"
+            acceptance.config, acceptance.env = Path("fixture.toml"), {}
+            acceptance.server = acceptance.runner = SimpleNamespace(poll=lambda: None)
+            project = {"id": "fixture", "path": str(acceptance.project_dir),
+                       "root_fingerprint": "wc_projroot_" + "1" * 64, "disabled": False}
+            resources = [{"name": "password-fixture", "source": "managed",
+                          "active": True, "pending_restart": False}]
+            state = {"launched": False, "catalog_reads": 0, "complete": False,
+                     "ssh_reads": 0, "legacy_reads": 0}
+
+            def launch(*args):
+                state["launched"] = True
+                return SimpleNamespace(poll=lambda: None)
+
+            def post(path, body, token, **kwargs):
+                if path == "/api/tools/call":
+                    if body["tool"] == "list_projects":
+                        # The old wait_ready accepts this retained old-instance
+                        # snapshot even though registration has not completed.
+                        state["legacy_reads"] += 1
+                        return {"success": True, "output": {"projects": [{"id": acceptance.project}]}}
+                    self.assertEqual(body, {"tool": "list_runners", "params": {
+                        "client_id": "ssh-setup-runner", "include_projects": True,
+                        "summary_only": False}})
+                    instance, sync = "old-instance", "complete"
+                    if state["launched"]:
+                        state["catalog_reads"] += 1
+                        if state["catalog_reads"] >= 2:
+                            instance, sync = "replacement-instance", "pending"
+                        if state["catalog_reads"] >= 3:
+                            sync, state["complete"] = "complete", True
+                    return {"success": True, "output": {"runners": [{
+                        "client_id": "ssh-setup-runner", "runner_instance_id": instance,
+                        "connected": True, "project_inventory": {"sync_state": sync},
+                        "projects": [project] if sync == "complete" else [],
+                        "projects_truncated": False, "projects_next_offset": None,
+                        "projects_offset": 0,
+                    }]}}
+                self.assertEqual(path, "/api/runtime-console/ssh-resources/list")
+                self.assertEqual(body, {"runner": "ssh-setup-runner"})
+                state["ssh_reads"] += 1
+                return {"success": True, "output": {"binding": "opaque-fixture-binding",
+                                                     "resources": resources}}
+
+            acceptance.launch, acceptance.post = launch, post
+            with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                    mock.patch("scripts.e2e_ssh_connections.time.sleep"):
+                loaded = acceptance.restart_runner()
+            self.assertTrue(state["complete"],
+                            "restart returned before the replacement project catalog completed")
+            self.assertEqual(state["legacy_reads"], 0)
+            self.assertGreaterEqual(state["catalog_reads"], 4)
+            self.assertEqual(state["ssh_reads"], 1)
+            self.assertEqual(loaded["resources"], resources)
+
+    def test_completed_replacement_with_wrong_missing_disabled_or_truncated_project_fails(self):
+        canary = "private-project-path-canary"
+        for changed in ["missing", "path", "fingerprint", "disabled", "truncated", "offset", "next_page"]:
+            with self.subTest(changed=changed):
+                acceptance, old = self.fixture()
+                project = old["projects"][0].copy()
+                replacement = old | {"runner_instance_id": "replacement-instance", "projects": [project]}
+                if changed == "missing":
+                    replacement["projects"] = []
+                elif changed == "path":
+                    project["path"] = canary
+                elif changed == "fingerprint":
+                    project["root_fingerprint"] = canary
+                elif changed == "disabled":
+                    project["disabled"] = True
+                else:
+                    replacement[{"truncated": "projects_truncated", "offset": "projects_offset",
+                                 "next_page": "projects_next_offset"}[changed]] = 1
+                acceptance.post = mock.Mock(side_effect=[self.catalog(old), self.catalog(replacement)])
+                with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                        self.assertRaises(AssertionError) as error:
+                    acceptance.restart_runner()
+                self.assertNotIn(canary, str(error.exception))
+                self.assertEqual(acceptance.post.call_count, 2)
+                self.assertTrue(all(call.args[1]["tool"] == "list_runners"
+                                    for call in acceptance.post.call_args_list))
+                acceptance.tool.assert_not_called()
+
+    def test_replacement_is_fixed_before_and_after_the_loaded_ssh_observation(self):
+        for boundary in ["pending", "ssh_read"]:
+            with self.subTest(boundary=boundary):
+                acceptance, old = self.fixture()
+                replacement = old | {"runner_instance_id": "replacement-instance"}
+                other = old | {"runner_instance_id": "unexpected-third-instance"}
+                if boundary == "pending":
+                    responses = [self.catalog(old), self.catalog(replacement | {
+                        "project_inventory": {"sync_state": "pending"}, "projects": [],
+                    }), self.catalog(other)]
+                else:
+                    responses = [self.catalog(old), self.catalog(replacement), self.loaded_resource(),
+                                 self.catalog(other)]
+                acceptance.post = mock.Mock(side_effect=responses)
+                with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                        mock.patch("scripts.e2e_ssh_connections.time.sleep"), \
+                        self.assertRaisesRegex(AssertionError, "instance changed"):
+                    acceptance.restart_runner()
+                self.assertEqual(acceptance.post.call_count, len(responses))
+                acceptance.tool.assert_not_called()
+
+    def test_original_root_uses_filesystem_identity_and_retains_the_observed_canonical_path(self):
+        acceptance, old = self.fixture()
+        canonical = r"\\?\C:\fixture\canonical-root"
+        old["projects"][0]["path"] = canonical
+        replacement = old | {"runner_instance_id": "replacement-instance"}
+        acceptance.post = mock.Mock(side_effect=[self.catalog(old), self.catalog(replacement),
+                                                self.loaded_resource(), self.catalog(replacement)])
+        seen = []
+
+        def samefile(observed, expected):
+            seen.append((str(observed), expected))
+            return True
+
+        with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                mock.patch.object(Path, "samefile", samefile):
+            acceptance.restart_runner()
+        self.assertEqual(seen, [(canonical, acceptance.project_dir)])
+        acceptance.tool.assert_not_called()
+
+    def test_original_different_or_unavailable_root_fails_before_process_replacement(self):
+        for samefile in [mock.Mock(return_value=False), mock.Mock(side_effect=OSError("private-path-canary"))]:
+            acceptance, old = self.fixture()
+            acceptance.post = mock.Mock(return_value=self.catalog(old))
+            with mock.patch("scripts.e2e_ssh_connections.stop") as stop, \
+                    mock.patch.object(Path, "samefile", samefile), \
+                    self.assertRaisesRegex(AssertionError, "different fixture Project root") as error:
+                acceptance.restart_runner()
+            self.assertNotIn("private-path-canary", str(error.exception))
+            stop.assert_not_called()
+            acceptance.launch.assert_not_called()
+
+    def test_readiness_pending_or_unloaded_ssh_share_one_deadline_without_effect_retries(self):
+        for stalled in ["old_instance", "pending_catalog", "disconnected", "unloaded_resource"]:
+            with self.subTest(stalled=stalled):
+                acceptance, old = self.fixture()
+                replacement = old | {"runner_instance_id": "replacement-instance"}
+                clock = SimpleNamespace(now=100.0)
+                reads = []
+
+                def post(path, body, token, *, timeout):
+                    reads.append((path, body, timeout))
+                    if len(reads) == 1:
+                        return self.catalog(old)
+                    self.assertGreater(timeout, 0)
+                    self.assertLessEqual(timeout, min(20, 145 - clock.now))
+                    # A read uses a fraction of the shared budget, never a new
+                    # 45-second deadline for the SSH or catalog stage.
+                    clock.now += min(1, timeout)
+                    if path.endswith("ssh-resources/list"):
+                        return {"success": False, "output": {"error_kind": "runner_unavailable"}}
+                    self.assertEqual(body["tool"], "list_runners")
+                    if stalled == "old_instance":
+                        return self.catalog(old)
+                    if stalled == "pending_catalog":
+                        return self.catalog(replacement | {"project_inventory": {"sync_state": "pending"},
+                                                           "projects": []})
+                    if stalled == "disconnected":
+                        return self.catalog(replacement | {"connected": False})
+                    return self.catalog(replacement)
+
+                def sleep(seconds):
+                    self.assertLessEqual(seconds, 145 - clock.now)
+                    clock.now += seconds
+
+                acceptance.post = post
+                with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                        mock.patch("scripts.e2e_ssh_connections.time.monotonic", lambda: clock.now), \
+                        mock.patch("scripts.e2e_ssh_connections.time.sleep", sleep), \
+                        self.assertRaisesRegex(AssertionError, "readiness deadline exceeded"):
+                    acceptance.restart_runner()
+                self.assertAlmostEqual(clock.now, 145)
+                self.assertLess(len(reads), 100)
+                self.assertTrue(all(body == {"runner": "ssh-setup-runner"}
+                                    or body == {"tool": "list_runners", "params": {
+                                        "client_id": "ssh-setup-runner", "include_projects": True,
+                                        "summary_only": False}} for _, body, _ in reads))
+                acceptance.tool.assert_not_called()
+
+    def test_readiness_never_starts_after_deadline_or_accepts_a_late_success(self):
+        acceptance, _ = self.fixture()
+        clock = SimpleNamespace(now=100.0)
+        acceptance.post = mock.Mock(return_value={"success": True})
+        with mock.patch("scripts.e2e_ssh_connections.time.monotonic", lambda: clock.now), \
+                self.assertRaisesRegex(AssertionError, "readiness deadline exceeded"):
+            acceptance.readiness_post("/api/tools/call", {}, 100)
+        acceptance.post.assert_not_called()
+
+        def late_post(*args, timeout):
+            self.assertEqual(timeout, 0.25)
+            clock.now += 0.5
+            return {"success": True}
+
+        acceptance.post = late_post
+        with mock.patch("scripts.e2e_ssh_connections.time.monotonic", lambda: clock.now), \
+                self.assertRaisesRegex(AssertionError, "readiness deadline exceeded"):
+            acceptance.readiness_post("/api/tools/call", {}, 100.25)
+
+    def test_shared_http_timeout_default_and_remaining_budget_are_passed_to_opener(self):
+        acceptance, _ = self.fixture()
+        acceptance.url = "http://127.0.0.1:1"
+        acceptance.opener = mock.MagicMock()
+        acceptance.opener.open.return_value.__enter__.return_value.read.return_value = b'{"success":true}'
+        acceptance.post("/api/tools/call", {}, acceptance.owner)
+        self.assertEqual(acceptance.opener.open.call_args.kwargs["timeout"], 20)
+        acceptance.post("/api/tools/call", {}, acceptance.owner, timeout=0.25)
+        self.assertEqual(acceptance.opener.open.call_args.kwargs["timeout"], 0.25)
+
+    def test_readiness_errors_do_not_echo_server_payload_or_private_paths(self):
+        canary = "private-payload-token-or-path"
+        for failure in [OSError(canary), ValueError(canary)]:
+            acceptance, _ = self.fixture()
+            acceptance.post = mock.Mock(side_effect=failure)
+            with self.assertRaisesRegex(AssertionError, "observation unavailable") as error:
+                acceptance.restart_runner()
+            self.assertNotIn(canary, str(error.exception))
+            acceptance.launch.assert_not_called()
+        acceptance, old = self.fixture()
+        replacement = old | {"runner_instance_id": "replacement-instance"}
+        acceptance.post = mock.Mock(side_effect=[self.catalog(old), self.catalog(replacement),
+            {"success": False, "output": {"error_kind": canary, "error": canary}}])
+        with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                self.assertRaisesRegex(AssertionError, "SSH observation failed") as error:
+            acceptance.restart_runner()
+        self.assertNotIn(canary, str(error.exception))
+        acceptance.tool.assert_not_called()
+
+
 class SshFixtureInputTests(unittest.TestCase):
     def empty_fixture(self):
         fixture = object.__new__(SshFixture)
-        for name in ["password_attempts", "successful_passwords", "executions", "input_eofs",
-                     "commands_started", "commands_finished", "framed_executions",
-                     "execution_failures", "input_timeouts"]:
+        for name in FIXTURE_COUNTERS:
             setattr(fixture, name, 0)
         return fixture
+
+    def diagnostic_line(self, stage="prompt", count=1):
+        return (f"webcodex_ssh_probe: askpass_stage={stage}" + "".join(
+            f" {name}={count}" for name in PROBE_DIAGNOSTIC_COUNTERS)).encode()
+
+    def empty_acceptance(self):
+        acceptance = object.__new__(ConnectionAcceptance)
+        acceptance.logs = []
+        acceptance.ssh = self.empty_fixture()
+        acceptance.ssh.password = "private-password-canary"
+        acceptance.ssh.passphrase = "private-passphrase-canary"
+        acceptance.ssh.ascii_encrypted_key_path = Path("ascii-fixture-key")
+        acceptance.primary_probe_diagnostic = None
+        acceptance.ascii_key_control = None
+        acceptance.begin_stage("encrypted_key_probe")
+        return acceptance
+
+    def pin_acceptance(self):
+        acceptance = self.empty_acceptance()
+        temporary = tempfile.TemporaryDirectory(prefix="wc-native-pin-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "中文 pin %q ${NAME}"
+        root.mkdir()
+        acceptance.ssh.key_path = Path("plain-ascii-fixture-key")
+        acceptance.ssh.correct_hosts_path = root / "selected"
+        acceptance.ssh.wrong_hosts_path = root / "different-key-source"
+        acceptance.ssh.correct_hosts_path.write_bytes(b"known fixture right public key")
+        acceptance.ssh.wrong_hosts_path.write_bytes(b"known fixture wrong public key")
+        acceptance.ssh.tools = HostTools(Path("unused"), "fixture-path", {})
+        acceptance.endpoint = {"host": "127.0.0.1", "port": 22122, "user": "fixture-user"}
+        acceptance.env = {LITERAL_DOLLAR_ENV: "inherited-poison",
+                          "SSH_ASKPASS": "private-helper-canary",
+                          "WEBCODEX_SSH_ASKPASS_REQUEST": "private-request-canary",
+                          "SSH_AUTH_SOCK": "private-agent-canary"}
+        return acceptance
+
+    def test_special_key_path_guarantees_partial_utf8_and_literal_special_characters(self):
+        for length in [1, 15, 31, 60, 90]:
+            with self.subTest(root_length=length):
+                path = special_key_path(Path("r" * length))
+                encoded = str(path).encode("utf-8")
+                self.assertGreater(len(encoded), 100)
+                with self.assertRaises(UnicodeDecodeError):
+                    encoded[:100].decode("utf-8")
+                self.assertIn(" key %q ${WEBCODEX_FIXTURE_UNSET}", str(path))
+                self.assertEqual(path.name, "client-key")
+        with self.assertRaisesRegex(AssertionError, "100-byte key boundary"):
+            special_key_path(Path("r" * 120))
+
+    def test_native_user_known_hosts_arguments_isolate_the_user_pin_and_literal_paths(self):
+        hosts = Path(r"C:\private path\中文 %q ${NAME}\known-hosts")
+        encoded = literal_ssh_option_path(hosts)
+        self.assertTrue(encoded.startswith('"') and encoded.endswith('"'))
+        self.assertIn("%%q", encoded)
+        self.assertIn("${WEBCODEX_SSH_LITERAL_DOLLAR}{NAME}", encoded)
+        self.assertNotIn("${NAME}", encoded)
+        self.assertIn("\\\\", encoded)
+        endpoint = {"host": "127.0.0.1", "port": 22122, "user": "fixture-user"}
+        command = user_known_hosts_command(Path("native-ssh"), endpoint, hosts, Path("plain-key"))
+        options = [command[index + 1] for index, argument in enumerate(command) if argument == "-o"]
+        self.assertEqual([option for option in options if option.startswith("GlobalKnownHostsFile=")],
+                         ["GlobalKnownHostsFile=none"])
+        self.assertEqual([option for option in options if option.startswith("UserKnownHostsFile=")],
+                         ["UserKnownHostsFile=" + encoded])
+        for option in ["StrictHostKeyChecking=yes", "IdentityAgent=none", "IdentitiesOnly=yes",
+                       "BatchMode=yes", "PasswordAuthentication=no", "KbdInteractiveAuthentication=no"]:
+            self.assertIn(option, options)
+        self.assertEqual(command[:8], ["native-ssh", "-F", "none", "-n", "-T", "-p", "22122", "-l"])
+        self.assertEqual(command[8], "fixture-user")
+        self.assertEqual(command[-3:], ["--", "127.0.0.1", "printf 'WEBCODEX_USER_PIN_OK\\n'"])
+
+    def test_native_runner_copy_preserves_exact_hash_and_rejects_tampered_copy_or_decoy(self):
+        with tempfile.TemporaryDirectory(prefix="wc-runner-copy-") as directory:
+            root = Path(directory).resolve()
+            secure_fixture_path(root)
+            source = root / "webcodex-runner.exe"
+            payload = b"exact candidate fixture bytes" * 1024
+            source.write_bytes(payload)
+            fixture = prepare_windows_runner(source, root)
+            self.assertEqual(fixture.executable.read_bytes(), payload)
+            self.assertTrue(fixture.executable.name.isascii())
+            self.assertNotEqual(fixture.executable.name, source.name)
+            self.assertIn("安装", str(fixture.executable.parent))
+            self.assertNotEqual(fixture.caller_cwd, fixture.executable.parent)
+            self.assertEqual(fixture.decoy.name, fixture.executable.name)
+            self.assertEqual(fixture.decoy.read_bytes(), NONEXECUTABLE_DECOY)
+            for target, original in [(source, payload), (fixture.executable, payload),
+                                     (fixture.decoy, NONEXECUTABLE_DECOY)]:
+                target.write_bytes(b"tampered fixture bytes")
+                with self.assertRaises(AssertionError):
+                    fixture.verify()
+                target.write_bytes(original)
+                fixture.verify()
+
+    def test_native_runner_launch_uses_verified_absolute_copy_and_different_cwd(self):
+        with tempfile.TemporaryDirectory(prefix="wc-runner-launch-") as directory:
+            root = Path(directory).resolve()
+            secure_fixture_path(root)
+            source = root / "webcodex-runner.exe"
+            source.write_bytes(b"exact native fixture bytes")
+            acceptance = self.empty_acceptance()
+            acceptance.root = acceptance.bin_dir = root
+            acceptance.native_runner = prepare_windows_runner(source, root)
+            arguments = ["--config", str(root / "runner.toml")]
+            try:
+                with mock.patch("scripts.e2e_ssh_connections.os", SimpleNamespace(name="nt")), \
+                        mock.patch("scripts.e2e_ssh_connections.subprocess.CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                        mock.patch("scripts.e2e_ssh_connections.subprocess.Popen") as launch:
+                    acceptance.launch("webcodex-runner", arguments, {})
+                    call = launch.call_args
+                    self.assertEqual(call.args[0], [str(acceptance.native_runner.executable), *arguments])
+                    self.assertEqual(call.kwargs["cwd"], acceptance.native_runner.caller_cwd)
+                    self.assertEqual(call.kwargs["stdin"], subprocess.DEVNULL)
+                    acceptance.native_runner.executable.write_bytes(b"changed")
+                    with self.assertRaisesRegex(AssertionError, "exact candidate"):
+                        acceptance.launch("webcodex-runner", arguments, {})
+                    self.assertEqual(launch.call_count, 1)
+            finally:
+                for log in acceptance.logs:
+                    log.close()
+
+    def test_wrong_actual_key_requires_an_offer_without_authentication_fallback_or_execution(self):
+        probe = {"binding": {"revision": "fenced"}, "endpoint": {"host": "127.0.0.1"},
+                 "host_key": {"challenge_id": "fenced", "fingerprint": "pinned"},
+                 "authentication": {"type": "password", "password": "private"}}
+        for rejected_case in [None, "no_offer", "accepted_key", "executed", "password_fallback"]:
+            with self.subTest(rejected_case=rejected_case):
+                acceptance = self.empty_acceptance()
+                acceptance.ssh.wrong_key_path = Path("wrong-中文-%q-key")
+                def operator(action, body, *, success=True):
+                    self.assertEqual(action, "probe")
+                    self.assertFalse(success)
+                    self.assertEqual(body, probe | {"authentication": {
+                        "type": "identity_file", "path": str(acceptance.ssh.wrong_key_path)}})
+                    if rejected_case != "no_offer":
+                        acceptance.ssh.publickey_requests += 1
+                    if rejected_case == "accepted_key":
+                        acceptance.ssh.accepted_key_offers += 1
+                    if rejected_case == "executed":
+                        acceptance.ssh.executions += 1
+                    if rejected_case == "password_fallback":
+                        acceptance.ssh.password_attempts += 1
+                    return {"error_kind": "ssh_authentication_failed"}
+                acceptance.operator = operator
+                if rejected_case is None:
+                    acceptance.reject_wrong_key(probe)
+                else:
+                    with self.assertRaises(AssertionError):
+                        acceptance.reject_wrong_key(probe)
+
+    def test_user_only_pin_checks_real_execution_and_rejects_authentication_after_wrong_pin(self):
+        for invalid in [None, "success", "authentication", "no_execution", "wrong_output"]:
+            with self.subTest(invalid=invalid):
+                acceptance = self.pin_acceptance()
+                calls = []
+                def native_probe(arguments, **kwargs):
+                    calls.append(arguments)
+                    self.assertEqual(kwargs["env"][LITERAL_DOLLAR_ENV], "$")
+                    self.assertFalse(any("private-" in value for value in kwargs["env"].values()))
+                    self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+                    if len(calls) == 1:
+                        self.assertEqual(acceptance.ssh.correct_hosts_path.read_bytes(),
+                                         b"known fixture right public key")
+                        acceptance.ssh.publickey_requests += 2
+                        acceptance.ssh.accepted_key_offers += 2
+                        if invalid != "no_execution":
+                            acceptance.ssh.executions += 1
+                        return SimpleNamespace(returncode=0,
+                            stdout=b"incorrect" if invalid == "wrong_output" else PIN_PROBE_OUTPUT,
+                            stderr=b"private-native-path-canary")
+                    self.assertEqual(arguments, calls[0])
+                    self.assertEqual(acceptance.ssh.correct_hosts_path.read_bytes(),
+                                     b"known fixture wrong public key")
+                    if invalid == "authentication":
+                        acceptance.ssh.publickey_requests += 1
+                    return SimpleNamespace(returncode=0 if invalid == "success" else 255,
+                                           stdout=b"", stderr=b"private-native-path-canary")
+                with mock.patch("scripts.e2e_ssh_connections.shutil.which", return_value="native-ssh"), \
+                        mock.patch("scripts.e2e_ssh_connections.subprocess.run", side_effect=native_probe), \
+                        mock.patch("builtins.print") as output:
+                    if invalid is None:
+                        acceptance.check_user_known_hosts_only()
+                        self.assertEqual(len(calls), 2)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            acceptance.check_user_known_hosts_only()
+                    self.assertNotIn("private-native-path-canary", str(output.call_args_list))
+
+    def test_probe_diagnostic_projects_only_complete_closed_bounded_messages(self):
+        canary = b"private-path-prompt-and-credential"
+        for stage in PROBE_DIAGNOSTIC_STAGES:
+            with self.subTest(stage=stage):
+                line = self.diagnostic_line(stage, 16)
+                diagnostic = observed_probe_diagnostic(b"2026-11-07T00:00:00Z \x1b[31mERROR\x1b[0m runner: " + line)
+                self.assertEqual(diagnostic, {"askpass_stage": stage, **{
+                    field: 16 for field in PROBE_DIAGNOSTIC_COUNTERS}})
+        valid = self.diagnostic_line()
+        for malicious in [
+            canary,
+            valid + b" password=" + canary,
+            valid + b"\x00" + canary,
+            valid.replace(b"stage=prompt", b"stage=" + canary),
+            valid.replace(b"entries=1", b"entries=17"),
+            valid.replace(b"entries=1", b"entries=-1"),
+            valid.replace(b"entries=1", b"entries=01"),
+            valid.replace(b" key_load_errors=1", b""),
+            valid + b" x" * 1000,
+        ]:
+            with self.subTest(size=len(malicious)):
+                self.assertIsNone(observed_probe_diagnostic(malicious))
+        latest = observed_probe_diagnostic(valid + b"\n" + canary + b"\n" + self.diagnostic_line("complete", 0))
+        self.assertEqual(latest["askpass_stage"], "complete")
+        self.assertNotIn(canary.decode(), json.dumps(latest))
+        self.assertIsNone(observed_probe_diagnostic(valid + b"\n" + b"x" * 65536))
+
+    def test_probe_diagnostic_never_reuses_an_earlier_stage_log(self):
+        acceptance = self.empty_acceptance()
+        with tempfile.TemporaryDirectory(prefix="webcodex-probe-diagnostic-") as directory:
+            path = Path(directory) / "webcodex-runner-1.log"
+            path.write_bytes(self.diagnostic_line("complete") + b"\n")
+            acceptance.logs = [SimpleNamespace(name=str(path))]
+            acceptance.begin_stage("encrypted_key_probe")
+            self.assertIsNone(acceptance.stage_diagnostic()["runner_probe_observed"])
+            with path.open("ab") as log:
+                log.write(b"PRIVATE PATH AND SECRET\n" + self.diagnostic_line("prompt") + b"\n")
+            diagnostic = acceptance.stage_diagnostic()
+            self.assertEqual(diagnostic["runner_probe_observed"]["askpass_stage"], "prompt")
+            self.assertNotIn(str(path), json.dumps(diagnostic))
+            self.assertNotIn("PRIVATE", json.dumps(diagnostic))
+
+    def test_public_key_offer_counts_do_not_claim_private_key_authentication(self):
+        fixture = self.empty_fixture()
+        fixture.user = "fixture-user"
+        fixture.client_key = object()
+        self.assertFalse(fixture.record_key_offer("other-user", fixture.client_key))
+        self.assertFalse(fixture.record_key_offer(fixture.user, object()))
+        self.assertTrue(fixture.record_key_offer(fixture.user, fixture.client_key))
+        counts = fixture.diagnostic_counts()
+        self.assertEqual(counts["publickey_requests"], 3)
+        self.assertEqual(counts["accepted_key_offers"], 1)
+        self.assertEqual(counts["executions"], 0)
+        self.assertEqual(counts["successful_passwords"], 0)
+
+    def test_ascii_control_preserves_exact_encrypted_bytes_in_a_private_file(self):
+        with tempfile.TemporaryDirectory(prefix="webcodex-key-control-") as directory:
+            root = Path(directory).resolve()
+            secure_fixture_path(root)
+            source = root / "encrypted-长-key"
+            payload = b"synthetic encrypted fixture bytes\x00\r\n"
+            source.write_bytes(payload)
+            secure_fixture_path(source)
+            control = encrypted_key_control_copy(source, root)
+            self.assertNotEqual(source, control)
+            self.assertEqual(control.name, "encrypted-key-ascii")
+            self.assertEqual(control.read_bytes(), payload)
+            self.assertEqual(source.read_bytes(), payload)
+
+    def test_successful_ascii_control_cannot_replace_the_original_unicode_failure(self):
+        acceptance = self.empty_acceptance()
+        primary = OperatorCallFailed("probe", True, {
+            "output": {"error_kind": "ssh_authentication_failed"}})
+        probe = {"binding": {"revision": "fenced"}, "endpoint": {"host": "127.0.0.1"},
+                 "host_key": {"challenge_id": "fenced", "fingerprint": "pinned"},
+                 "authentication": {"type": "identity_file", "path": "private-长-path",
+                                    "passphrase": acceptance.ssh.passphrase}}
+        calls = []
+
+        def operator(action, body):
+            calls.append((action, body))
+            if len(calls) == 1:
+                acceptance.ssh.publickey_requests += 1
+                raise primary
+            acceptance.ssh.publickey_requests += 2
+            acceptance.ssh.accepted_key_offers += 2
+            acceptance.ssh.executions += 1
+            return {"action": "probe"}
+
+        acceptance.operator = operator
+        with self.assertRaises(OperatorCallFailed) as error:
+            acceptance.probe_encrypted_key(probe)
+        self.assertIs(error.exception, primary)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([action for action, _ in calls], ["probe", "probe"])
+        self.assertEqual(calls[1][1], probe | {"authentication": {
+            "type": "identity_file", "path": str(acceptance.ssh.ascii_encrypted_key_path),
+            "passphrase": acceptance.ssh.passphrase,
+        }})
+        summary = acceptance.failure_diagnostic()
+        self.assertEqual(summary["stage"], "encrypted_key_probe")
+        self.assertEqual(summary["stage_delta"]["publickey_requests"], 1)
+        self.assertEqual(summary["stage_delta"]["executions"], 0)
+        self.assertEqual(summary["ascii_key_control"]["outcome"], "succeeded")
+        self.assertEqual(summary["ascii_key_control"]["stage_delta"]["publickey_requests"], 2)
+        self.assertEqual(summary["ascii_key_control"]["stage_delta"]["executions"], 1)
+        for private in [acceptance.ssh.passphrase, acceptance.ssh.password,
+                        "private-长-path", "ascii-fixture-key", "127.0.0.1", "pinned"]:
+            self.assertNotIn(private, json.dumps(summary, ensure_ascii=False))
+
+    def test_control_error_is_closed_and_primary_success_never_runs_a_control(self):
+        canary = "private-secret-or-key-path"
+        for control_error in [OperatorCallFailed("probe", True, {"output": {"error_kind": canary}}),
+                              OSError(canary)]:
+            acceptance = self.empty_acceptance()
+            primary = OperatorCallFailed("probe", True, {"output": {"error_kind": "ssh_authentication_failed"}})
+            acceptance.operator = mock.Mock(side_effect=[primary, control_error])
+            with self.assertRaises(OperatorCallFailed) as error:
+                acceptance.probe_encrypted_key({"authentication": {}})
+            self.assertIs(error.exception, primary)
+            self.assertEqual(acceptance.operator.call_count, 2)
+            self.assertNotIn(canary, json.dumps(acceptance.failure_diagnostic()))
+        acceptance = self.empty_acceptance()
+        acceptance.operator = mock.Mock(return_value={"action": "probe"})
+        self.assertEqual(acceptance.probe_encrypted_key({}), {"action": "probe"})
+        acceptance.operator.assert_called_once_with("probe", {})
+        self.assertIsNone(acceptance.ascii_key_control)
+
+    def test_non_ascii_fixture_root_is_not_misreported_as_an_ascii_control(self):
+        acceptance = self.empty_acceptance()
+        acceptance.ssh.ascii_encrypted_key_path = Path("private-长-root") / "encrypted-key-ascii"
+        primary = OperatorCallFailed("probe", True, {"output": {"error_kind": "ssh_authentication_failed"}})
+        acceptance.operator = mock.Mock(side_effect=primary)
+        with self.assertRaises(OperatorCallFailed) as error:
+            acceptance.probe_encrypted_key({})
+        self.assertIs(error.exception, primary)
+        acceptance.operator.assert_called_once()
+        self.assertEqual(acceptance.ascii_key_control, {"outcome": "not_available"})
+
+    def test_operator_failure_does_not_echo_arbitrary_response_keys_or_codes(self):
+        canary = "private-credential-and-path"
+        error = OperatorCallFailed(canary, True, {canary: canary, "output": {"error_kind": canary}})
+        self.assertEqual(error.error_kind, "unrecognized")
+        self.assertNotIn(canary, str(error))
 
     def test_native_client_diagnostic_contains_only_a_bounded_version(self):
         secret = b"fixture-password-or-private-path"
@@ -67,13 +669,15 @@ class SshFixtureInputTests(unittest.TestCase):
     def test_fixture_native_state_never_uses_the_invoking_users_appdata(self):
         with tempfile.TemporaryDirectory(prefix="webcodex-ssh-state-") as directory:
             root = Path(directory)
-            fixture = SimpleNamespace(remote_cwd="/remote", port=1, user="fixture", password="fixture")
+            fixture = SimpleNamespace(remote_cwd="/remote", port=1, user="fixture", password="fixture",
+                                      diagnostic_counts=lambda: dict.fromkeys(FIXTURE_COUNTERS, 0))
             tools = HostTools(Path("unused"), "fixture-path", {})
             ambient = {"APPDATA": root / "foreign-roaming", "LOCALAPPDATA": root / "foreign-local"}
             for path in ambient.values():
                 path.mkdir()
             with mock.patch.dict(os.environ, {name: str(path) for name, path in ambient.items()}), \
-                    mock.patch("scripts.e2e_ssh_connections.SshFixture", return_value=fixture):
+                    mock.patch("scripts.e2e_ssh_connections.SshFixture", return_value=fixture), \
+                    mock.patch("scripts.e2e_ssh_connections.prepare_windows_runner", return_value=None):
                 acceptance = ConnectionAcceptance(root, root, tools)
             for variable, name in [("APPDATA", "roaming"), ("LOCALAPPDATA", "local")]:
                 self.assertEqual(acceptance.env[variable], str(root / name))
@@ -178,7 +782,8 @@ class SshFixtureInputTests(unittest.TestCase):
         self.assertTrue(channel.closed)
         counts = fixture.diagnostic_counts()
         self.assertEqual(counts, {
-            "password_attempts": 1, "successful_passwords": 1, "executions": 1, "input_eofs": 0,
+            "password_attempts": 1, "successful_passwords": 1, "publickey_requests": 0,
+            "accepted_key_offers": 0, "executions": 1, "input_eofs": 0,
             "commands_started": 0, "commands_finished": 0, "framed_executions": 0,
             "execution_failures": 1, "input_timeouts": 1,
         })
