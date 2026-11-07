@@ -44,12 +44,14 @@ Codex provider 是对已安装 Codex 的实验性接入，存在明确的[生命
 
 ## 开始使用 WebCodex
 
-临时体验单个仓库可先查看[快速试用](docs/QUICK_START.zh-CN.md)，使用 `webcodex share`。长期使用的统一安装流程仍在开发中，请先查看[验收状态](docs/unified-deployment-validation.md)。对应安装包通过验收并发布后，按代码所在位置选择安装方式：
+长期使用，请从[本分支 Releases](https://github.com/9holy/webcodex/releases)下载与你的操作系统和架构对应的完整安装包，再按代码所在位置选择安装方式：
 
 - **一台电脑：**在个人工作站安装 WebCodex，打开 Desktop，并按[统一安装指南](docs/unified-installation.zh-CN.md)操作。每个平台的统一安装包包含 Desktop、CLI、Server 和 Runner。
 - **多台电脑：**在承载 WebCodex Server 的机器以及持有代码仓库的每台机器上安装相同平台安装包。按[统一安装指南](docs/unified-installation.zh-CN.md#多台电脑)和[部署验收清单](docs/unified-deployment-validation.md)操作。
 
-面向 Windows NSIS、macOS 安装包和 Debian 12 / Ubuntu 22.04+ `.deb` 的 x64、arm64 统一安装包是**构建流程定义的交付目标**，六类安装文件仍需完成原生构建和安装验收后才能发布。三种平台的真实机器安装、重启持久性、GUI 行为和升级尚未全部验收；本文档不宣称跨平台体验一致。本分支已发布文件见 [GitHub Releases](https://github.com/9holy/webcodex/releases)。仓库 [`download/`](download/README.md) 目录仅包含静态页面源文件；[下载页 workflow](https://github.com/9holy/webcodex/actions/workflows/download-page.yml) 会在 Release 发布后根据 manifest 构建 GitHub Actions artifact，但不会托管或部署网页。源码预览请检出要验证的功能分支或发布修订，再按 [Desktop 开发指南](docs/DESKTOP_DEVELOPMENT.zh-CN.md#linux-源码预览与已有-server)操作。
+完整安装包包含 Desktop、CLI、Server 和 Runner。Windows 普通 Intel/AMD 电脑选择 `webcodex-unified-…-win32-x64.exe`，ARM 电脑选择 `win32-arm64.exe`。已有安装的用户，请先查看 [Desktop 安装与升级](docs/desktop-install.zh-CN.md)及所选版本的发布说明。
+
+每个 Release 列出实际提供的文件和验收证据。原生构建与自动安装检查不代表所有真实桌面、系统重启和升级场景都已覆盖，具体验收范围见[验收清单](docs/unified-deployment-validation.md)。临时体验单个仓库可查看[快速试用](docs/QUICK_START.zh-CN.md)，使用 `webcodex share`；源码预览则检出要验证的修订，按 [Desktop 开发指南](docs/DESKTOP_DEVELOPMENT.zh-CN.md#linux-源码预览与已有-server)操作。
 
 Linux 机器不安装 Desktop 而加入已有 Server，请看 [Runtime 安装与 CLI 加入](docs/runtime-installation.zh-CN.md)。高级自托管、npm/runtime 压缩包、Docker 和历史版本请看[部署指南](docs/DEPLOYMENT.zh-CN.md)。
 
@@ -103,7 +105,7 @@ WebCodex Server
 
 ## 平台安装包
 
-统一安装包目标平台为 Windows NSIS、macOS 和 Debian 12 / Ubuntu 22.04+ `.deb`，支持 x64 与 arm64。构建流程定义了这些目标；六类安装文件仍需完成原生构建和安装验收后才能发布。详见[统一安装指南](docs/unified-installation.zh-CN.md)和[验收清单](docs/unified-deployment-validation.md)。现有 Release artifact 与 npm/Docker 部署路径仍作为高级历史/兼容参考保留在[部署指南](docs/DEPLOYMENT.zh-CN.md)。
+完整安装包提供 Windows `.exe`、macOS `.pkg` 和 Linux `.deb` / `.rpm` 格式，区分 x64 与 arm64。请下载[对应 Release](https://github.com/9holy/webcodex/releases)实际附带的文件，再按[统一安装指南](docs/unified-installation.zh-CN.md)确认支持的系统和配置步骤。另有独立 Desktop 安装包与 Runtime 压缩包；高级 npm/Docker 部署方式见[部署指南](docs/DEPLOYMENT.zh-CN.md)。仓库 [`download/`](download/README.md) 目录是下载页源文件，本分支对外提供下载的入口为 GitHub Releases。
 
 ## 文档
 

@@ -29,6 +29,49 @@ fn password() -> SshAuthentication {
     }
 }
 
+fn native_askpass_argument(prompt: &[u8]) -> Vec<u8> {
+    #[cfg(not(windows))]
+    {
+        prompt.to_vec()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStringExt;
+        use windows_sys::Win32::Globalization::{MultiByteToWideChar, CP_UTF8};
+
+        let input_length = i32::try_from(prompt.len()).unwrap();
+        // Use the same OS conversion and flags as Win32 OpenSSH, independently
+        // of the Rust projection under test. The buffers have explicit lengths.
+        let length = unsafe {
+            MultiByteToWideChar(
+                CP_UTF8,
+                0,
+                prompt.as_ptr(),
+                input_length,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert!(length > 0);
+        let mut wide = vec![0; length as usize];
+        let written = unsafe {
+            MultiByteToWideChar(
+                CP_UTF8,
+                0,
+                prompt.as_ptr(),
+                input_length,
+                wide.as_mut_ptr(),
+                length,
+            )
+        };
+        assert_eq!(written, length);
+        std::ffi::OsString::from_wide(&wide)
+            .to_string_lossy()
+            .into_owned()
+            .into_bytes()
+    }
+}
+
 #[test]
 fn structured_args_pin_exact_host_without_password_in_argv_environment_or_debug() {
     let root = temporary();
@@ -235,6 +278,45 @@ fn password_prompt_accepts_only_the_exact_user_and_equivalent_endpoint() {
 }
 
 #[test]
+fn windows_key_prompt_preserves_the_exact_truncated_path_representation() {
+    // Win32 OpenSSH truncates UTF-8 before converting the whole command line to
+    // UTF-16. Every possible partial suffix below becomes exactly one U+FFFD.
+    for (character, included_bytes) in [("中", 1), ("中", 2), ("😀", 1), ("😀", 2), ("😀", 3)]
+    {
+        let prefix = format!("/{}", "a".repeat(99 - included_bytes));
+        let path = format!("{prefix}{character}/private-key");
+        let mut raw = b"Enter passphrase for key '".to_vec();
+        raw.extend_from_slice(&path.as_bytes()[..100]);
+        raw.extend_from_slice(b"': ");
+        assert!(std::str::from_utf8(&raw).is_err());
+        let native = format!("Enter passphrase for key '{prefix}\u{fffd}': ");
+        #[cfg(windows)]
+        assert_eq!(native_askpass_argument(&raw), native.as_bytes());
+        assert!(key_prompt_matches(&path, native.as_bytes(), true));
+        assert!(!key_prompt_matches(&path, native.as_bytes(), false));
+        assert!(key_prompt_matches(&path, &raw, false));
+        assert!(!key_prompt_matches(&path, &raw, true));
+        assert!(key_prompt_matches(
+            &path,
+            format!("Enter passphrase for key '{path}': ").as_bytes(),
+            true,
+        ));
+        for unexpected in [
+            format!("Enter passphrase for key '{prefix}': "),
+            format!("Enter passphrase for key '{prefix}\u{fffd}\u{fffd}': "),
+            format!("Enter passphrase for key 'other-{prefix}\u{fffd}': "),
+            format!(
+                "Enter passphrase for key '{}\u{fffd}': ",
+                prefix.replacen('a', "\u{fffd}", 1)
+            ),
+            "Enter passphrase: ".to_string(),
+        ] {
+            assert!(!key_prompt_matches(&path, unexpected.as_bytes(), true));
+        }
+    }
+}
+
+#[test]
 fn key_prompt_matches_only_the_selected_key_including_openssh_byte_truncation() {
     // The 100th byte splits the final Chinese character. The helper must not
     // panic during argv decoding or accidentally accept a generic key prompt.
@@ -253,6 +335,7 @@ fn key_prompt_matches_only_the_selected_key_including_openssh_byte_truncation() 
     let mut prompt = b"Enter passphrase for key '".to_vec();
     prompt.extend_from_slice(&path.as_bytes()[..100]);
     prompt.extend_from_slice(b"': ");
+    let mut prompt = native_askpass_argument(&prompt);
     assert!(prompt_matches(&request, &prompt));
     assert!(prompt_matches(
         &request,
@@ -265,6 +348,54 @@ fn key_prompt_matches_only_the_selected_key_including_openssh_byte_truncation() 
     assert!(!prompt_matches(&request, "Enter passphrase: "));
     prompt[25] = b'x';
     assert!(!prompt_matches(&request, &prompt));
+}
+
+#[test]
+fn key_passphrase_is_bound_to_the_selected_request_and_released_once() {
+    let root = temporary();
+    let private = root.path().join("private-中文");
+    let store = PrivateFileStore::open(&private).unwrap();
+    let identity = store
+        .create("selected-key", b"synthetic key placeholder")
+        .unwrap();
+    let identity_path = identity.to_str().unwrap();
+    let candidate = ConnectionCandidate::create(
+        &private,
+        endpoint(),
+        SshAuthentication::IdentityFile {
+            path: identity_path.to_string(),
+            passphrase: Some(SshSecret::new("synthetic key passphrase".into()).unwrap()),
+        },
+        host_key(),
+    )
+    .unwrap();
+    let mut command = Command::new("ssh");
+    let lease = candidate
+        .connection
+        .configure(&mut command, true)
+        .unwrap()
+        .unwrap();
+    let request_path = lease.store.path(&lease.name).unwrap();
+    let nonce = lease
+        .name
+        .strip_prefix("askpass-")
+        .unwrap()
+        .strip_suffix(".json")
+        .unwrap();
+    for unexpected in [
+        "Enter passphrase: ",
+        "Enter passphrase for key '/other-key': ",
+        "fixture-user@127.0.0.1's password: ",
+    ] {
+        assert!(askpass_secret(&request_path, nonce, unexpected).is_err());
+    }
+    let mut raw = b"Enter passphrase for key '".to_vec();
+    raw.extend_from_slice(&identity_path.as_bytes()[..identity_path.len().min(100)]);
+    raw.extend_from_slice(b"': ");
+    let prompt = native_askpass_argument(&raw);
+    let secret = askpass_secret(&request_path, nonce, &prompt).unwrap();
+    assert_eq!(secret.expose_secret(), "synthetic key passphrase");
+    assert!(askpass_secret(&request_path, nonce, &prompt).is_err());
 }
 
 #[test]

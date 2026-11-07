@@ -683,24 +683,39 @@ fn prompt_matches(request: &AskpassRequest, prompt: impl AsRef<[u8]>) -> bool {
                             _ => false,
                         })
             }),
-        StoredAuthentication::IdentityFile => request.identity_file.as_ref().is_some_and(|path| {
-            let normalized_prompt = prompt
-                .iter()
-                .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
-                .collect::<Vec<_>>();
-            let normalized_path = path.replace('\\', "/");
-            let path_bytes = normalized_path.as_bytes();
-            [path_bytes.len(), path_bytes.len().min(100)]
-                .into_iter()
-                .any(|length| {
-                    let mut expected = b"Enter passphrase for key '".to_vec();
-                    expected.extend_from_slice(&path_bytes[..length]);
-                    expected.extend_from_slice(b"': ");
-                    normalized_prompt == expected
-                })
-        }),
+        StoredAuthentication::IdentityFile => request
+            .identity_file
+            .as_ref()
+            .is_some_and(|path| key_prompt_matches(path, prompt, cfg!(windows))),
         StoredAuthentication::ExistingEnvironment => false,
     }
+}
+
+fn key_prompt_matches(path: &str, prompt: &[u8], windows_argv: bool) -> bool {
+    let normalized_prompt = prompt
+        .iter()
+        .map(|byte| if *byte == b'\\' { b'/' } else { *byte })
+        .collect::<Vec<_>>();
+    let normalized_path = path.replace('\\', "/");
+    let path_bytes = normalized_path.as_bytes();
+    [path_bytes.len(), path_bytes.len().min(100)]
+        .into_iter()
+        .any(|length| {
+            let mut expected = b"Enter passphrase for key '".to_vec();
+            expected.extend_from_slice(&path_bytes[..length]);
+            expected.extend_from_slice(b"': ");
+            // Win32 OpenSSH converts this UTF-8 command line with
+            // MultiByteToWideChar(CP_UTF8, 0) before CreateProcessW. If %.100s
+            // split a key-path character, that exact suffix becomes U+FFFD.
+            // Project only the bound key's expected prompt; received prompts
+            // remain exact, and Unix keeps its original argv bytes.
+            let expected = if windows_argv {
+                String::from_utf8_lossy(&expected).into_owned().into_bytes()
+            } else {
+                expected
+            };
+            normalized_prompt == expected
+        })
 }
 
 pub(crate) fn collect_expired_askpass(store: &PrivateFileStore) {
