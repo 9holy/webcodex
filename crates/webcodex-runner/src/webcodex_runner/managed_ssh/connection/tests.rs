@@ -106,6 +106,9 @@ fn only_authentication_probe_disables_ssh_stdin() {
     .unwrap();
     let (probe, lease) = probe_command(&candidate.connection).unwrap();
     assert!(lease.is_none());
+    assert!(probe.get_envs().any(|(name, value)| {
+        name == "WEBCODEX_SSH_PROBE_DIAGNOSTICS" && value == Some(std::ffi::OsStr::new("1"))
+    }));
     let probe_args: Vec<_> = probe.get_args().collect();
     assert_eq!(probe.get_args().filter(|arg| *arg == "-n").count(), 1);
     assert_eq!(
@@ -120,6 +123,7 @@ fn only_authentication_probe_disables_ssh_stdin() {
     // Applying the same authentication/host-key configuration to a normal
     // execution must preserve stdin for the Windows program frame and user input.
     let mut execution = Command::new(ssh_program("ssh"));
+    execution.env("WEBCODEX_SSH_PROBE_DIAGNOSTICS", "1");
     assert!(candidate
         .connection
         .configure(&mut execution, true)
@@ -128,6 +132,9 @@ fn only_authentication_probe_disables_ssh_stdin() {
     assert!(!execution
         .get_args()
         .any(|arg| arg == "-n" || arg == "StdinNull=yes"));
+    assert!(execution
+        .get_envs()
+        .any(|(name, value)| { name == "WEBCODEX_SSH_PROBE_DIAGNOSTICS" && value.is_none() }));
 }
 
 #[test]
@@ -324,6 +331,14 @@ fn startup_collects_credential_left_by_crash_before_host_key_anchor_creation() {
 
 #[test]
 fn setup_errors_are_static_and_distinguish_host_keys_auth_and_local_key_permissions() {
+    // Remote stderr can spoof a diagnostic marker. It never overrides the
+    // existing failure classification or establishes successful execution.
+    assert_eq!(
+        classify_failure(
+            b"webcodex_ssh_askpass:complete\nuser@host: Permission denied (publickey)."
+        ),
+        "ssh_authentication_failed"
+    );
     assert_eq!(
         classify_failure(
             b"WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\nHost key verification failed."

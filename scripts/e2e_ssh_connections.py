@@ -41,6 +41,89 @@ except ImportError:
     paramiko = None
 
 
+PROBE_DIAGNOSTIC_STAGES = frozenset({
+    "not_observed", "entered", "arguments", "nonce", "clock", "request_path",
+    "request_store", "request_read", "request_decode", "expiry", "prompt", "consume",
+    "credential_read", "credential_decode", "binding", "secret", "stdout", "complete",
+})
+PROBE_DIAGNOSTIC_COUNTERS = (
+    "askpass_entries", "key_load_errors", "identity_unavailable", "askpass_spawn_errors",
+    "authentication_denied",
+)
+FIXTURE_COUNTERS = (
+    "password_attempts", "successful_passwords", "publickey_requests", "accepted_key_offers",
+    "executions", "input_eofs", "commands_started", "commands_finished", "framed_executions",
+    "execution_failures", "input_timeouts",
+)
+ACCEPTANCE_STAGES = frozenset({
+    "prepare", "scope", "host_key_inspection", "wrong_password", "changed_host_key",
+    "password_probe", "plain_key_probe", "encrypted_key_probe", "register",
+    "runner_restart", "remote_shell", "privacy",
+})
+OPERATOR_ERROR_KINDS = frozenset({
+    "permission_denied", "insufficient_scope", "runner_unavailable", "invalid_runner_response",
+    "ssh_resource_invalid", "ssh_resource_registry_unavailable", "ssh_resource_binding_stale",
+    "ssh_connection_setup_unsupported", "ssh_host_key_unavailable", "ssh_host_key_stale",
+    "ssh_host_key_changed", "ssh_authentication_failed", "ssh_connection_failed",
+    "ssh_connection_timeout", "ssh_program_unavailable", "ssh_identity_file_invalid",
+    "ssh_credentials_unavailable", "ssh_client_permission_denied", "ssh_connection_cancelled",
+})
+PROBE_DIAGNOSTIC_PREFIX = b"webcodex_ssh_probe: "
+PROBE_DIAGNOSTIC_PATTERN = re.compile(
+    rb"webcodex_ssh_probe: askpass_stage=(?P<askpass_stage>"
+    + b"|".join(sorted(stage.encode("ascii") for stage in PROBE_DIAGNOSTIC_STAGES)) + rb")"
+    + b"".join(b" " + field.encode("ascii") + b"=(?P<" + field.encode("ascii")
+                + rb">(?:0|[1-9]|1[0-6]))" for field in PROBE_DIAGNOSTIC_COUNTERS)
+)
+
+
+def observed_probe_diagnostic(log: bytes) -> dict | None:
+    """Project one bounded, closed diagnostic; never echo process output.
+
+    These are observed markers, not proof of authentication or a retry permit.
+    In particular, not_observed does not prove the helper was never invoked.
+    """
+    latest = None
+    for line in log[-65536:].splitlines():
+        if len(line) > 1024:
+            continue
+        line = re.sub(rb"\x1b\[[0-9;]*m", b"", line)
+        start = line.find(PROBE_DIAGNOSTIC_PREFIX)
+        if start < 0:
+            continue
+        match = PROBE_DIAGNOSTIC_PATTERN.fullmatch(line[start:])
+        if match is not None:
+            latest = {"askpass_stage": match["askpass_stage"].decode("ascii")}
+            latest.update({field: int(match[field]) for field in PROBE_DIAGNOSTIC_COUNTERS})
+    return latest
+
+
+def counter_delta(before: dict, after: dict) -> dict[str, int]:
+    return {name: max(0, min(1000000, after.get(name, 0) - before.get(name, 0)))
+            for name in FIXTURE_COUNTERS}
+
+
+def operator_error_kind(result: dict) -> str:
+    output = result.get("output")
+    kind = output.get("error_kind") if isinstance(output, dict) else None
+    return kind if isinstance(kind, str) and kind in OPERATOR_ERROR_KINDS else "unrecognized"
+
+
+class OperatorCallFailed(AssertionError):
+    def __init__(self, action: str, success: bool, result: dict):
+        self.error_kind = operator_error_kind(result)
+        action = action if action in {"list", "inspect", "probe", "register", "remove"} else "operation"
+        super().__init__(f"operator {action}: expected success={success}; code={self.error_kind}")
+
+
+def encrypted_key_control_copy(source: Path, root: Path) -> Path:
+    """A second name for identical fixture bytes, never a product fallback."""
+    target = root / "encrypted-key-ascii"
+    shutil.copyfile(source, target)
+    secure_fixture_path(target)
+    return target
+
+
 def git_posix_tools(git: Path) -> tuple[Path, Path]:
     # cmd/git.exe is usual in PowerShell; Git Bash exposes mingw64/bin/git.exe.
     for root in list(git.resolve().parents)[:3]:
@@ -272,6 +355,7 @@ class SshFixture:
             serialization.BestAvailableEncryption(self.passphrase.encode()),
         ))
         secure_fixture_path(self.encrypted_key_path)
+        self.ascii_encrypted_key_path = encrypted_key_control_copy(self.encrypted_key_path, root)
         self.remote = root / "remote"
         self.remote.mkdir(mode=0o700)
         self.remote_cwd = tools.remote_path(self.remote)
@@ -283,15 +367,8 @@ class SshFixture:
         self.closed = threading.Event()
         self.transports = []
         self.threads = []
-        self.password_attempts = 0
-        self.successful_passwords = 0
-        self.executions = 0
-        self.framed_executions = 0
-        self.input_eofs = 0
-        self.commands_started = 0
-        self.commands_finished = 0
-        self.execution_failures = 0
-        self.input_timeouts = 0
+        for name in FIXTURE_COUNTERS:
+            setattr(self, name, 0)
         self.thread = threading.Thread(target=self.accept, daemon=True)
         self.thread.start()
 
@@ -324,7 +401,7 @@ class SshFixture:
                 return paramiko.AUTH_SUCCESSFUL if valid else paramiko.AUTH_FAILED
 
             def check_auth_publickey(self, username, key):
-                valid = username == fixture.user and key == fixture.client_key
+                valid = fixture.record_key_offer(username, key)
                 return paramiko.AUTH_SUCCESSFUL if valid else paramiko.AUTH_FAILED
 
             def check_channel_request(self, kind, chanid):
@@ -390,14 +467,18 @@ class SshFixture:
         finally:
             channel.close()
 
+    def record_key_offer(self, username, key):
+        # OpenSSH may offer the public part before decrypting/signing with the
+        # private key. These counts therefore do not claim successful key login.
+        self.publickey_requests += 1
+        valid = username == self.user and key == self.client_key
+        self.accepted_key_offers += int(valid)
+        return valid
+
     def diagnostic_counts(self):
         # Only fixture-owned counters leave the test. Never print credentials,
         # paths, SSH command/prompt bodies, or captured process output on failure.
-        return {name: getattr(self, name) for name in [
-            "password_attempts", "successful_passwords", "executions", "input_eofs",
-            "commands_started", "commands_finished", "framed_executions",
-            "execution_failures", "input_timeouts",
-        ]}
+        return {name: min(1000000, getattr(self, name)) for name in FIXTURE_COUNTERS}
 
     def close(self):
         self.closed.set()
@@ -422,6 +503,10 @@ class ConnectionAcceptance(Smoke):
             secure_fixture_path(path)
             self.env[variable] = str(path)
         self.ssh = SshFixture(root, tools)
+        self.stage_counts = self.ssh.diagnostic_counts()
+        self.stage_log_offsets = {}
+        self.primary_probe_diagnostic = None
+        self.ascii_key_control = None
         self.remote_cwd = self.ssh.remote_cwd
         self.endpoint = {"host": "127.0.0.1", "port": self.ssh.port, "user": self.ssh.user}
         self.authentication = {"type": "password", "password": self.ssh.password}
@@ -441,12 +526,86 @@ class ConnectionAcceptance(Smoke):
 
     def operator(self, action, body, token=None, success=True):
         result = self.post("/api/runtime-console/ssh-resources/" + action, body, token or self.owner)
-        check(result.get("success") is success,
-              f"operator {action}: expected success={success}; fields={list(result)}; "
-              f"code={result.get('output', {}).get('error_kind')}")
         check(all(secret not in json.dumps(result) for secret in [self.ssh.password, self.ssh.passphrase]),
               "credential appeared in operator response")
+        if result.get("success") is not success:
+            raise OperatorCallFailed(action, success, result)
         return result.get("output", {})
+
+    def runner_log_offsets(self):
+        offsets = {}
+        for log in self.logs[-4:]:
+            path = Path(log.name)
+            if path.name.startswith("webcodex-runner-"):
+                try:
+                    offsets[str(path)] = path.stat().st_size
+                except OSError:
+                    pass
+        return offsets
+
+    def runner_probe_diagnostic(self, offsets):
+        latest = None
+        for name, offset in list(offsets.items())[-2:]:
+            try:
+                with Path(name).open("rb") as stream:
+                    stream.seek(0, os.SEEK_END)
+                    end = stream.tell()
+                    stream.seek(max(offset, end - 65536))
+                    observed = observed_probe_diagnostic(stream.read(65536))
+                    if observed is not None:
+                        latest = observed
+            except OSError:
+                pass
+        return latest
+
+    def begin_stage(self, stage):
+        self.stage = stage
+        self.stage_counts = self.ssh.diagnostic_counts()
+        self.stage_log_offsets = self.runner_log_offsets()
+
+    def stage_diagnostic(self):
+        counts = self.ssh.diagnostic_counts()
+        return {"stage": self.stage if self.stage in ACCEPTANCE_STAGES else "unknown",
+                "counts": counts, "stage_delta": counter_delta(self.stage_counts, counts),
+                "runner_probe_observed": self.runner_probe_diagnostic(self.stage_log_offsets)}
+
+    def diagnose_ascii_key(self, probe):
+        path = self.ssh.ascii_encrypted_key_path
+        if not str(path).isascii():
+            return {"outcome": "not_available"}
+        before = self.ssh.diagnostic_counts()
+        offsets = self.runner_log_offsets()
+        diagnostic = {"outcome": "unconfirmed"}
+        try:
+            self.operator("probe", probe | {"authentication": {
+                "type": "identity_file", "path": str(path), "passphrase": self.ssh.passphrase,
+            }})
+            diagnostic["outcome"] = "succeeded"
+        except OperatorCallFailed as error:
+            diagnostic.update({"outcome": "failed", "error_kind": error.error_kind})
+        except Exception:
+            # A failed diagnostic never replaces or prints the primary failure.
+            pass
+        diagnostic["stage_delta"] = counter_delta(before, self.ssh.diagnostic_counts())
+        diagnostic["runner_probe_observed"] = self.runner_probe_diagnostic(offsets)
+        return diagnostic
+
+    def probe_encrypted_key(self, probe):
+        try:
+            return self.operator("probe", probe)
+        except OperatorCallFailed:
+            # Snapshot the original evidence before making exactly one controlled
+            # comparison. Even successful ASCII authentication cannot pass the
+            # Unicode acceptance or continue to persistence/restart/execution.
+            self.primary_probe_diagnostic = self.stage_diagnostic()
+            self.ascii_key_control = self.diagnose_ascii_key(probe)
+            raise
+
+    def failure_diagnostic(self):
+        summary = dict(self.primary_probe_diagnostic or self.stage_diagnostic())
+        if self.ascii_key_control is not None:
+            summary["ascii_key_control"] = self.ascii_key_control
+        return summary
 
     def observe(self):
         return self.operator("list", {"runner": "ssh-setup-runner"})
@@ -511,11 +670,11 @@ class ConnectionAcceptance(Smoke):
     def run(self):
         self.prepare()
         self.initialize(self.owner)
-        self.stage = "scope"
+        self.begin_stage("scope")
         denied = self.post("/api/runtime-console/ssh-resources/list", {"runner": "ssh-setup-runner"}, self.restricted)
         check(denied.get("success") is not True, "missing ssh:local scope was accepted")
         binding = self.observe()["binding"]
-        self.stage = "host_key_inspection"
+        self.begin_stage("host_key_inspection")
         inspected = self.operator("inspect", {"binding": binding, "endpoint": self.endpoint})
         keys = inspected["host_keys"]
         check(any(key["fingerprint"] == fingerprint(self.ssh.host_key) for key in keys),
@@ -524,7 +683,7 @@ class ConnectionAcceptance(Smoke):
         probe = {"binding": binding, "endpoint": self.endpoint,
                  "authentication": self.authentication, "host_key": trust}
         before = self.ssh.successful_passwords
-        self.stage = "wrong_password"
+        self.begin_stage("wrong_password")
         wrong = self.operator("probe", probe | {"authentication": {"type": "password", "password": "wrong-fixture-password"}}, success=False)
         check(wrong.get("error_kind") == "ssh_authentication_failed", "wrong password was not classified")
         check(self.ssh.successful_passwords == before, "wrong password authenticated")
@@ -532,26 +691,26 @@ class ConnectionAcceptance(Smoke):
         original_key = self.ssh.host_key
         attempts_before_changed_key = self.ssh.password_attempts
         self.ssh.host_key, _ = generated_key()
-        self.stage = "changed_host_key"
+        self.begin_stage("changed_host_key")
         changed = self.operator("probe", probe, success=False)
         check(changed.get("error_kind") == "ssh_host_key_changed", "changed host key was not rejected")
         check(self.ssh.successful_passwords == before, "password sent before host-key verification")
         check(self.ssh.password_attempts == attempts_before_changed_key,
               "changed host key reached password authentication")
         self.ssh.host_key = original_key
-        self.stage = "password_probe"
+        self.begin_stage("password_probe")
         valid = self.operator("probe", probe)
         check(valid["host_key_fingerprint"] == trust["fingerprint"], "probe acknowledged another key")
         check(self.ssh.successful_passwords > before, "successful probe did not perform password authentication")
 
         key_probe = probe | {"authentication": {"type": "identity_file", "path": str(self.ssh.key_path)}}
-        self.stage = "plain_key_probe"
+        self.begin_stage("plain_key_probe")
         self.operator("probe", key_probe)
         encrypted_key_probe = probe | {"authentication": {"type": "identity_file",
             "path": str(self.ssh.encrypted_key_path), "passphrase": self.ssh.passphrase}}
-        self.stage = "encrypted_key_probe"
-        self.operator("probe", encrypted_key_probe)
-        self.stage = "register"
+        self.begin_stage("encrypted_key_probe")
+        self.probe_encrypted_key(encrypted_key_probe)
+        self.begin_stage("register")
         saved = self.operator("register", {
             "binding": binding, "name": "password-fixture", "default_cwd": self.remote_cwd,
             "connection": {"kind": "direct", "endpoint": self.endpoint,
@@ -567,7 +726,7 @@ class ConnectionAcceptance(Smoke):
               "inventory disclosed authentication data")
         print("PASS: scope, real host-key inspection, wrong password, changed key, password/plain/encrypted-key login, staged save")
 
-        self.stage = "runner_restart"
+        self.begin_stage("runner_restart")
         stop(self.runner)
         self.runner = self.launch("webcodex-runner", ["--config", str(self.config)], self.env)
         self.wait_ready(self.project, self.owner)
@@ -590,7 +749,7 @@ class ConnectionAcceptance(Smoke):
         check(updated.get("project") == self.project and updated.get("session_id") == session_id
               and updated.get("execution_context") == execution_context,
               "MCP context update did not bind the exact Session and SSH resource")
-        self.stage = "remote_shell"
+        self.begin_stage("remote_shell")
         output = self.tool("run_shell", {"project": self.project,
             "session_id": session_id,
             "command": "printf 'SSH_PASSWORD_ROUTE_OK\\n' > remote-proof.txt; cat remote-proof.txt",
@@ -604,7 +763,7 @@ class ConnectionAcceptance(Smoke):
         check(self.ssh.password not in json.dumps(output), "MCP output disclosed the password")
         print("PASS: persisted password survives Runner restart; MCP run_shell executes on the selected SSH resource")
 
-        self.stage = "privacy"
+        self.begin_stage("privacy")
         stop(self.runner)
         stop(self.server)
         for directory in [self.root / "data", self.root / "traces"]:
@@ -647,9 +806,8 @@ def main():
         try:
             acceptance.run()
         except Exception:
-            print("SSH acceptance diagnostic: " + json.dumps({
-                "stage": acceptance.stage, "counts": acceptance.ssh.diagnostic_counts(),
-            }, sort_keys=True), flush=True)
+            print("SSH acceptance diagnostic: " + json.dumps(acceptance.failure_diagnostic(),
+                                                             sort_keys=True), flush=True)
             raise
         finally:
             acceptance.close()

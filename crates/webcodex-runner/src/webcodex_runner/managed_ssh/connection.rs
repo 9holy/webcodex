@@ -1,6 +1,8 @@
 use super::*;
 use crate::webcodex_runner::shutdown::lock_unpoison;
-use crate::webcodex_runner::ssh_credentials::{AskpassLease, ConnectionCandidate, HostKey};
+use crate::webcodex_runner::ssh_credentials::{
+    enable_probe_diagnostics, probe_failure_summary, AskpassLease, ConnectionCandidate, HostKey,
+};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -358,6 +360,7 @@ fn probe_command(
 ) -> Result<(Command, Option<AskpassLease>), &'static str> {
     let mut command = Command::new(ssh_program("ssh"));
     let lease = connection.configure(&mut command, true)?;
+    enable_probe_diagnostics(&mut command);
     command
         // This fixed authentication probe never has program input. Tell SSH
         // explicitly, rather than relying on inherited Windows NUL semantics.
@@ -384,6 +387,9 @@ fn probe_connection(
     {
         Ok(())
     } else {
+        // Untrusted, closed observations only: never log the captured stderr,
+        // and never use these diagnostic markers to authorize or retry work.
+        tracing::warn!("{}", probe_failure_summary(&output.stderr));
         Err(classify_failure(&output.stderr))
     }
 }

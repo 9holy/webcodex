@@ -14,6 +14,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use webcodex_core::ssh_resource::{SshAuthentication, SshEndpoint, SshSecret};
 use webcodex_environment::private_files::{PrivateFileLease, PrivateFileStore};
 
+mod probe_diagnostics;
+pub(crate) use probe_diagnostics::{enable_probe_diagnostics, probe_failure_summary};
+use probe_diagnostics::{record_stage, AskpassStage, DIAGNOSTICS_ENV};
+
 const ASKPASS_REQUEST_ENV: &str = "WEBCODEX_SSH_ASKPASS_REQUEST";
 const ASKPASS_NONCE_ENV: &str = "WEBCODEX_SSH_ASKPASS_NONCE";
 const KNOWN_HOSTS_PATH_ENV: &str = "WEBCODEX_SSH_KNOWN_HOSTS_FILE";
@@ -437,6 +441,7 @@ impl ManagedSshConnection {
             .env_remove("SSH_ASKPASS_REQUIRE")
             .env_remove(ASKPASS_REQUEST_ENV)
             .env_remove(ASKPASS_NONCE_ENV)
+            .env_remove(DIAGNOSTICS_ENV)
             .env_remove("SSHPASS");
         match self.stored.authentication {
             StoredAuthentication::ExistingEnvironment => {
@@ -570,6 +575,12 @@ fn now_seconds() -> Result<u64, &'static str> {
 /// Called before CLI parsing, tracing, service handling, or any other output.
 pub(crate) fn maybe_run_askpass() -> Option<i32> {
     let path = std::env::var_os(ASKPASS_REQUEST_ENV)?;
+    let diagnostics = std::env::var(DIAGNOSTICS_ENV).as_deref() == Ok("1");
+    record_stage(
+        diagnostics,
+        AskpassStage::Entered,
+        &mut std::io::stderr().lock(),
+    );
     let result = (|| {
         // OpenSSH truncates key names to 100 bytes in its passphrase prompt,
         // which can split UTF-8. Keep the original Unix bytes before normal
@@ -578,7 +589,7 @@ pub(crate) fn maybe_run_askpass() -> Option<i32> {
         if args.len() != 1
             || std::env::var("SSH_ASKPASS_PROMPT").is_ok_and(|value| !value.is_empty())
         {
-            return Err("ssh_credentials_unavailable");
+            return Err(AskpassStage::Arguments);
         }
         #[cfg(unix)]
         let prompt = {
@@ -588,17 +599,24 @@ pub(crate) fn maybe_run_askpass() -> Option<i32> {
         #[cfg(not(unix))]
         let prompt = args[0].to_string_lossy().as_bytes().to_vec();
         if prompt.len() > 8192 {
-            return Err("ssh_credentials_unavailable");
+            return Err(AskpassStage::Arguments);
         }
-        let nonce = std::env::var(ASKPASS_NONCE_ENV).map_err(|_| "ssh_credentials_unavailable")?;
+        let nonce = std::env::var(ASKPASS_NONCE_ENV).map_err(|_| AskpassStage::Nonce)?;
         let secret = askpass_secret(Path::new(&path), &nonce, &prompt)?;
         let mut stdout = std::io::stdout().lock();
         stdout
             .write_all(secret.expose_secret().as_bytes())
             .and_then(|()| stdout.write_all(b"\n"))
             .and_then(|()| stdout.flush())
-            .map_err(|_| "ssh_credentials_unavailable")
+            .map_err(|_| AskpassStage::Stdout)
     })();
+    record_stage(
+        diagnostics,
+        result
+            .as_ref()
+            .map_or_else(|stage| *stage, |_| AskpassStage::Complete),
+        &mut std::io::stderr().lock(),
+    );
     Some(if result.is_ok() { 0 } else { 1 })
 }
 
@@ -606,47 +624,52 @@ fn askpass_secret(
     path: &Path,
     nonce: &str,
     prompt: impl AsRef<[u8]>,
-) -> Result<SshSecret, &'static str> {
+) -> Result<SshSecret, AskpassStage> {
     let prompt = prompt.as_ref();
-    if !valid_id(nonce) || prompt.iter().any(u8::is_ascii_control) {
-        return Err("ssh_credentials_unavailable");
+    if !valid_id(nonce) {
+        return Err(AskpassStage::Nonce);
     }
-    let root = path.parent().ok_or("ssh_credentials_unavailable")?;
+    if prompt.iter().any(u8::is_ascii_control) {
+        return Err(AskpassStage::Prompt);
+    }
+    let root = path.parent().ok_or(AskpassStage::RequestPath)?;
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or("ssh_credentials_unavailable")?;
+        .ok_or(AskpassStage::RequestPath)?;
     if name != format!("askpass-{nonce}.json") {
-        return Err("ssh_credentials_unavailable");
+        return Err(AskpassStage::RequestPath);
     }
-    let store = PrivateFileStore::existing(root).map_err(|_| "ssh_credentials_unavailable")?;
+    let store = PrivateFileStore::existing(root).map_err(|_| AskpassStage::RequestStore)?;
     let bytes = store
         .read(name, SECRET_FILE_MAX_BYTES)
-        .map_err(|_| "ssh_credentials_unavailable")?;
+        .map_err(|_| AskpassStage::RequestRead)?;
     let request: AskpassRequest =
-        serde_json::from_slice(&bytes).map_err(|_| "ssh_credentials_unavailable")?;
-    let now = now_seconds()?;
-    if request.nonce != nonce
-        || request.expires_at < now
-        || request.expires_at > now.saturating_add(ASKPASS_LIFETIME_SECS)
-        || !prompt_matches(&request, prompt)
-    {
-        return Err("ssh_credentials_unavailable");
+        serde_json::from_slice(&bytes).map_err(|_| AskpassStage::RequestDecode)?;
+    let now = now_seconds().map_err(|_| AskpassStage::Clock)?;
+    if request.nonce != nonce {
+        return Err(AskpassStage::Nonce);
+    }
+    if request.expires_at < now || request.expires_at > now.saturating_add(ASKPASS_LIFETIME_SECS) {
+        return Err(AskpassStage::Expiry);
+    }
+    if !prompt_matches(&request, prompt) {
+        return Err(AskpassStage::Prompt);
     }
     // Exclusive creation is the linearization point: retries and concurrent
     // askpass processes cannot release this request's secret a second time.
     store
         .create(&format!("used-{nonce}.json"), b"used")
-        .map_err(|_| "ssh_credentials_unavailable")?;
+        .map_err(|_| AskpassStage::Consume)?;
     let bytes = store
         .read(&request.credential_file, SECRET_FILE_MAX_BYTES)
-        .map_err(|_| "ssh_credentials_unavailable")?;
+        .map_err(|_| AskpassStage::CredentialRead)?;
     let credential: PrivateCredential =
-        serde_json::from_slice(&bytes).map_err(|_| "ssh_credentials_unavailable")?;
+        serde_json::from_slice(&bytes).map_err(|_| AskpassStage::CredentialDecode)?;
     if credential.binding != request.binding {
-        return Err("ssh_credentials_unavailable");
+        return Err(AskpassStage::Binding);
     }
-    validate_secret(credential.secret.expose_secret())?;
+    validate_secret(credential.secret.expose_secret()).map_err(|_| AskpassStage::Secret)?;
     Ok(credential.secret)
 }
 

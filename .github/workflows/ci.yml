@@ -1045,6 +1045,15 @@ jobs:
             -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") `
             -OutputDir $stage
           "config=$(Join-Path $stage 'tauri.bundle.conf.json')" >> $env:GITHUB_OUTPUT
+      - name: Verify native Windows OpenSSH password onboarding and remote execution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Run against the exact staged runtime before the slower NSIS build.
+          # The script pins System32 OpenSSH and refuses Git's SSH client.
+          # Git Bash is only the Paramiko server's disposable remote shell.
+          & $env:WEBCODEX_SSH_ACCEPTANCE_PYTHON scripts/e2e_ssh_connections.py --bin-dir target/dogfood
+          if ($LASTEXITCODE -ne 0) { throw "Native Windows SSH authentication/remote execution failed" }
       - name: Build unsigned NSIS installer
         working-directory: apps/desktop
         shell: pwsh
@@ -1096,15 +1105,6 @@ jobs:
             -InstallDir (Join-Path $env:RUNNER_TEMP "WebCodex Upstream Upgrade") `
             -PreviousInstaller $previous `
             -PreviousInstallerSha256 "dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6"
-      - name: Verify native Windows OpenSSH password onboarding and remote execution
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          # The script pins System32 OpenSSH and refuses Git's SSH client.
-          # Git Bash is only the Paramiko server's disposable remote shell.
-          & $env:WEBCODEX_SSH_ACCEPTANCE_PYTHON scripts/e2e_ssh_connections.py --bin-dir target/dogfood
-          if ($LASTEXITCODE -ne 0) { throw "Native Windows SSH authentication/remote execution failed" }
-
   test-windows:
     needs: [contract, changes, test-windows-core, test-windows-runner, test-windows-package, test-windows-desktop]
     # Preserve the stable Windows aggregate while allowing each heavy lane to be

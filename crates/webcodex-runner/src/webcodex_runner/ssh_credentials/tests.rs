@@ -139,7 +139,10 @@ fn structured_args_pin_exact_host_without_password_in_argv_environment_or_debug(
     );
     let secret = askpass_secret(&lease_path, nonce, &exact_prompt).unwrap();
     assert_eq!(secret.expose_secret(), "synthetic password '$` 中文");
-    assert!(askpass_secret(&lease_path, nonce, &exact_prompt).is_err());
+    assert!(matches!(
+        askpass_secret(&lease_path, nonce, &exact_prompt),
+        Err(AskpassStage::Consume)
+    ));
     drop(lease);
     assert!(!lease_path.exists());
 }
@@ -178,7 +181,10 @@ fn helper_rejects_expired_and_cross_profile_credentials() {
         .store
         .create(&lease.name, &serde_json::to_vec(&request).unwrap())
         .unwrap();
-    assert!(askpass_secret(&path, nonce, "fixture-user@127.0.0.1's password: ").is_err());
+    assert!(matches!(
+        askpass_secret(&path, nonce, "fixture-user@127.0.0.1's password: "),
+        Err(AskpassStage::Expiry)
+    ));
     request.expires_at = now_seconds().unwrap() + ASKPASS_LIFETIME_SECS;
     request.binding = "a different profile".into();
     lease.store.remove(&lease.name).unwrap();
@@ -186,7 +192,10 @@ fn helper_rejects_expired_and_cross_profile_credentials() {
         .store
         .create(&lease.name, &serde_json::to_vec(&request).unwrap())
         .unwrap();
-    assert!(askpass_secret(&path, nonce, "fixture-user@127.0.0.1's password: ").is_err());
+    assert!(matches!(
+        askpass_secret(&path, nonce, "fixture-user@127.0.0.1's password: "),
+        Err(AskpassStage::Binding)
+    ));
 }
 
 #[test]
