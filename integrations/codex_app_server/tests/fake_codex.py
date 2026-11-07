@@ -139,7 +139,7 @@ for raw in sys.stdin.buffer:
             print("x" * (1024 * 1024 + 1), flush=True)
         else:
             item({"id": "command", "type": "commandExecution", "status": "inProgress", "command": "fixture"})
-            Path(cwd, "native-result.txt").write_text("actual fixture execution\n", encoding="utf-8")
+            Path(cwd, "native-result.txt").write_bytes(b"actual fixture execution\n")
             item({"id": "command", "type": "commandExecution", "status": "completed",
                   "aggregatedOutput": "private-test-secret"}, True)
             complete()

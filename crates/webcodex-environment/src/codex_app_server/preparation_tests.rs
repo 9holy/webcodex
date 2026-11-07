@@ -58,7 +58,7 @@ fn preparation_uses_bundled_resources_and_unique_receipts_without_enabling() {
         eprintln!("skipping Codex preparation roundtrip: Python 3.10+ is unavailable");
         return;
     };
-    let directory = tempfile::tempdir().unwrap();
+    let directory = crate::test_tempdir().unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../integrations/codex_app_server/tests/fake_codex.py")
         .canonicalize()
@@ -80,6 +80,55 @@ fn preparation_uses_bundled_resources_and_unique_receipts_without_enabling() {
     assert!(!first.profile.enabled);
     assert!(!options.config_dir.join("runner.toml").exists());
     assert!(!options.config_dir.join("coding-agents.json").exists());
+    let failure = prepare_codex(&PrepareCodexOptions {
+        expected_version: Some("999".into()),
+        ..options
+    })
+    .unwrap_err();
+    assert_eq!(failure.code, "codex_version_mismatch");
+    let receipts = std::fs::read_dir(Path::new(&first.receipt).parent().unwrap())
+        .unwrap()
+        .filter(|entry| {
+            entry
+                .as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("codex-compatibility-")
+        })
+        .count();
+    assert_eq!(
+        receipts, 2,
+        "failed preparation must discard only its own reserved slot"
+    );
+    assert_eq!(std::fs::read(&first.receipt).unwrap(), original);
+}
+
+#[test]
+fn preparation_rejects_linked_receipt_without_changing_the_target() {
+    let directory = crate::test_tempdir().unwrap();
+    let private = directory.path().join("private");
+    ensure_private_directory(&private).unwrap();
+    let receipt = NewReceipt::reserve(&private).unwrap();
+    assert!(read_private(&receipt.path).unwrap().is_empty());
+    assert!(
+        open_private(&receipt.path, true).is_err(),
+        "the slot is reserved with create_new"
+    );
+    let target = directory.path().join("original.json");
+    let mut file = open_private(&target, true).unwrap();
+    file.write_all(b"original receipt\n").unwrap();
+    drop(file);
+    #[cfg(windows)]
+    let owner = crate::storage::windows_path_owner(&target).unwrap();
+    std::fs::remove_file(&receipt.path).unwrap();
+    std::fs::hard_link(&target, &receipt.path).unwrap();
+    assert_eq!(receipt.finish().unwrap_err().code, "state_io");
+    #[cfg(windows)]
+    assert_eq!(crate::storage::windows_path_owner(&target).unwrap(), owner);
+    receipt.discard();
+    assert!(!receipt.path.exists());
+    assert_eq!(read_private(&target).unwrap(), b"original receipt\n");
 }
 
 #[test]

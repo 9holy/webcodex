@@ -137,7 +137,7 @@ class AdapterTests(unittest.TestCase):
         self.prompt()
         terminal, events = self.terminal()
         self.assertEqual(terminal["result"], {"stopReason": "end_turn"})
-        self.assertEqual((self.root / "native-result.txt").read_text(), "actual fixture execution\n")
+        self.assertEqual((self.root / "native-result.txt").read_bytes(), b"actual fixture execution\n")
         updates = [frame["params"]["update"] for frame in events]
         self.assertEqual([update["kind"] for update in updates if update["sessionUpdate"].startswith("tool_call")], ["execute", "execute"])
         self.assertEqual("".join(update["content"]["text"] for update in updates if "content" in update), "完成 🌎")

@@ -6,7 +6,7 @@
 
 use crate::process::CommandOutputExt;
 use crate::storage::{
-    ensure_private_directory, open_existing_private, open_private, read_private,
+    ensure_private_directory, is_link, open_existing_private, open_private, read_private,
     validate_existing_private_directory,
 };
 use crate::{SetupDiagnostic, SetupResultValue};
@@ -270,6 +270,94 @@ fn validate_prepared(
     Ok(())
 }
 
+/// A destination reserved by this preparation, never an existing provider's
+/// receipt. Python atomically replaces this slot; the host then applies the
+/// same private-file contract used for the bundled source files.
+struct NewReceipt {
+    path: PathBuf,
+}
+
+impl NewReceipt {
+    fn reserve(directory: &Path) -> SetupResultValue<Self> {
+        validate_existing_private_directory(directory)?;
+        let path = directory.join(format!(
+            "codex-compatibility-{}.json",
+            uuid::Uuid::new_v4().simple()
+        ));
+        // A create_new failure returns before any child runs or cleanup owns
+        // this name. Never adopt or remove a pre-existing file on collision.
+        drop(open_private(&path, true)?);
+        Ok(Self { path })
+    }
+
+    fn finish(&self) -> SetupResultValue<()> {
+        let parent = self.path.parent().ok_or_else(SetupDiagnostic::io)?;
+        validate_existing_private_directory(parent)?;
+        let metadata = std::fs::symlink_metadata(&self.path).map_err(|_| SetupDiagnostic::io())?;
+        if !metadata.is_file()
+            || is_link(&metadata)
+            || metadata.len() == 0
+            || metadata.len() > 16 * 1024
+        {
+            return Err(SetupDiagnostic::io());
+        }
+        #[cfg(windows)]
+        let _guard = self.secure_windows_file()?;
+        // Keep the Windows guard alive through the existing owner/ACL and
+        // bounded-content validation; none of those checks are bypassed.
+        let bytes = read_private(&self.path)?;
+        if bytes.is_empty() || bytes.len() > 16 * 1024 {
+            return Err(preparation_error("invalid_receipt"));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn secure_windows_file(&self) -> SetupResultValue<std::fs::File> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY,
+            FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_READ,
+        };
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(&self.path)
+            .map_err(|_| SetupDiagnostic::io())?;
+        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), &mut information) } == 0
+            || information.dwFileAttributes
+                & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)
+                != 0
+            || information.nNumberOfLinks != 1
+            || information.nFileSizeHigh != 0
+            || information.nFileSizeLow == 0
+            || information.nFileSizeLow > 16 * 1024
+        {
+            return Err(SetupDiagnostic::io());
+        }
+        // mkstemp inherits a DACL, but its default token owner may be a group.
+        // Normalize only this fresh, single-link file while the guard denies
+        // data writes, rename and deletion. Reuse the existing native policy.
+        crate::storage::secure_windows_path(&self.path)?;
+        Ok(file)
+    }
+
+    fn discard(&self) {
+        // Do not follow a replaced directory during failure cleanup. The
+        // supervisor has already stopped the entire preparation process tree.
+        if self
+            .path
+            .parent()
+            .is_some_and(|parent| validate_existing_private_directory(parent).is_ok())
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Prepare the bundled adapter against the exact installed Codex. Compatibility
 /// readiness does not prove account access, model availability, or OS sandbox
 /// readiness. Those are checked when the independently authorized Run starts.
@@ -296,16 +384,13 @@ pub fn prepare_codex(options: &PrepareCodexOptions) -> SetupResultValue<Prepared
     let directory = adapter
         .parent()
         .ok_or_else(|| preparation_error("invalid_adapter"))?;
-    let receipt = directory.join(format!(
-        "codex-compatibility-{}.json",
-        uuid::Uuid::new_v4().simple()
-    ));
+    let receipt = NewReceipt::reserve(directory)?;
     let mut command = Command::new(&python);
     command
         .arg("-E")
         .arg(&adapter)
         .args(["prepare", "--experimental", "--receipt"])
-        .arg(&receipt)
+        .arg(&receipt.path)
         .arg("--codex-bin")
         .arg(
             options
@@ -343,16 +428,14 @@ pub fn prepare_codex(options: &PrepareCodexOptions) -> SetupResultValue<Prepared
         }
         let prepared: PreparedCodex = serde_json::from_slice(&output.stdout)
             .map_err(|_| preparation_error("invalid_profile"))?;
-        validate_prepared(&prepared, &python, &adapter, &receipt)?;
-        if read_private(&receipt)?.len() > 16 * 1024 {
-            return Err(preparation_error("invalid_receipt"));
-        }
+        validate_prepared(&prepared, &python, &adapter, &receipt.path)?;
+        receipt.finish()?;
         Ok(prepared)
     })();
     if result.is_err() {
         // The UUID receipt belongs solely to this failed preparation; no saved
         // profile can reference it. The supervisor has already stopped its tree.
-        let _ = std::fs::remove_file(&receipt);
+        receipt.discard();
     }
     result
 }
