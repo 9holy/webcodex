@@ -31,47 +31,68 @@ pub(crate) async fn restore_upgrade_programs(
     record: &EnvironmentRecord,
     operation_id: &str,
 ) -> SetupResultValue<()> {
-    #[cfg(unix)]
-    if crate::installer_unix::child_channel_active() {
-        return crate::installer_unix::child_restore(operation_id);
-    }
-    if elevated()? {
-        return crate::upgrade::restore_programs_from_journal(
+    #[cfg(windows)]
+    {
+        // Windows package destinations and their parents must already belong
+        // to this exact owner. Restoring those files needs no service/UAC
+        // authority. Launching the installed CLI as an elevated restore helper
+        // would lock the very image that rollback must replace.
+        if current_account()?.identity != record.request.account.identity {
+            return Err(SetupDiagnostic::new(
+                "upgrade_restore_authorization",
+                "Program restoration must run as the original Environment owner",
+                "Run the verified full installer as the account that owns this Environment",
+            ));
+        }
+        crate::upgrade::restore_programs_from_journal(
             store.root(),
             operation_id,
             &record.request.account.identity,
-        );
+        )
     }
-    let nonce = uuid::Uuid::new_v4().simple().to_string();
-    let request_path = store.root().join(format!(".service-request-{nonce}.json"));
-    let response_path = store.root().join(format!(".service-result-{nonce}.json"));
-    let request = RestoreRequest {
-        kind: "restore_upgrade_programs".into(),
-        operation_id: operation_id.into(),
-        requester: record.request.account.clone(),
-    };
-    atomic_private_write(
-        &request_path,
-        &serde_json::to_vec(&request).map_err(|_| SetupDiagnostic::io())?,
-    )?;
-    atomic_private_write(&response_path, b"null")?;
-    let launch = elevate(&record.request.binaries.cli, &request_path, &response_path).await;
-    let bytes = crate::storage::read_private(&response_path)?;
-    let result: Option<Result<(), SetupDiagnostic>> =
-        serde_json::from_slice(&bytes).map_err(|_| SetupDiagnostic::io())?;
-    match result {
-        Some(result) => {
-            let _ = std::fs::remove_file(&request_path);
-            let _ = std::fs::remove_file(&response_path);
-            result
+    #[cfg(unix)]
+    {
+        if crate::installer_unix::child_channel_active() {
+            return crate::installer_unix::child_restore(operation_id);
         }
-        None => Err(launch.err().unwrap_or_else(|| {
-            SetupDiagnostic::new(
+        if elevated()? {
+            return crate::upgrade::restore_programs_from_journal(
+                store.root(),
+                operation_id,
+                &record.request.account.identity,
+            );
+        }
+        let nonce = uuid::Uuid::new_v4().simple().to_string();
+        let request_path = store.root().join(format!(".service-request-{nonce}.json"));
+        let response_path = store.root().join(format!(".service-result-{nonce}.json"));
+        let request = RestoreRequest {
+            kind: "restore_upgrade_programs".into(),
+            operation_id: operation_id.into(),
+            requester: record.request.account.clone(),
+        };
+        atomic_private_write(
+            &request_path,
+            &serde_json::to_vec(&request).map_err(|_| SetupDiagnostic::io())?,
+        )?;
+        atomic_private_write(&response_path, b"null")?;
+        let launch = elevate(&record.request.binaries.cli, &request_path, &response_path).await;
+        let bytes = crate::storage::read_private(&response_path)?;
+        let result: Option<Result<(), SetupDiagnostic>> =
+            serde_json::from_slice(&bytes).map_err(|_| SetupDiagnostic::io())?;
+        match result {
+            Some(result) => {
+                let _ = std::fs::remove_file(&request_path);
+                let _ = std::fs::remove_file(&response_path);
+                result
+            }
+            None => Err(launch.err().unwrap_or_else(|| {
+                SetupDiagnostic::new(
                 "upgrade_restore_outcome_unknown",
                 "The privileged restore did not report a result",
                 "Inspect the retained backup and installed program hashes before retrying rollback",
             )
-        })),
+            })),
+        }
     }
 }
 
@@ -133,6 +154,20 @@ pub(crate) async fn service_operation_spec(
         requester: record.request.account.clone(),
         project: record.request.project.clone(),
     };
+    // An active Windows upgrade may have removed or damaged the installed
+    // CLI. Only its verified current candidate can replace that helper; the
+    // service request, owner checks and explicit UAC boundary stay unchanged.
+    #[cfg(windows)]
+    let upgrade_helper =
+        crate::upgrade::windows_service_helper(store, record, &request.spec, request.operation)?;
+    #[cfg(windows)]
+    let helper_cli = upgrade_helper
+        .as_ref()
+        .map_or(record.request.binaries.cli.as_path(), |helper| {
+            helper.path()
+        });
+    #[cfg(not(windows))]
+    let helper_cli = record.request.binaries.cli.as_path();
     atomic_private_write(
         &request_path,
         &serde_json::to_vec(&request).map_err(|_| SetupDiagnostic::io())?,
@@ -140,7 +175,7 @@ pub(crate) async fn service_operation_spec(
     // The elevated child writes through this existing private file without
     // changing its owner, following a link, or selecting another destination.
     atomic_private_write(&response_path, b"null")?;
-    let launch = elevate(&record.request.binaries.cli, &request_path, &response_path).await;
+    let launch = elevate(helper_cli, &request_path, &response_path).await;
     let bytes = crate::storage::read_private(&response_path)?;
     let result: Option<Result<ServiceStatus, SetupDiagnostic>> =
         serde_json::from_slice(&bytes).map_err(|_| SetupDiagnostic::io())?;

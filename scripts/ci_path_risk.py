@@ -324,6 +324,7 @@ def _classify_path(risk: Risk, path: str) -> None:
     if path in {
         "scripts/prepare_desktop_bundle.ps1",
         "scripts/desktop_install_windows_smoke.ps1",
+        "scripts/build_windows_unified_bootstrap.py",
     }:
         _mark_windows_desktop(risk, "windows-desktop-package")
         if path == "scripts/desktop_install_windows_smoke.ps1":

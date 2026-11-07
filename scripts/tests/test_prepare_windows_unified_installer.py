@@ -56,7 +56,7 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
             (self.bridge / name).write_text("fixture-only excluded content", encoding="utf-8")
         self.enterContext(mock.patch.object(nsis, "BRIDGE_SOURCE", self.bridge))
 
-    def fixture(self, root: Path, platform="win32-x64") -> dict:
+    def fixture(self, root: Path, platform="win32-x64", binary_bytes: bytes | None = None) -> dict:
         bin_dir = root / "artifacts" / "bin"
         bin_dir.mkdir(parents=True)
         infos = {}
@@ -72,7 +72,7 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
             if name == "webcodex": info["windows_guarded_bootstrap_contract"] = 1
             infos[name] = info
             path = bin_dir / f"{name}.exe"
-            path.write_bytes(pe(machine))
+            path.write_bytes(binary_bytes if binary_bytes is not None else pe(machine))
             relative = path.relative_to(root).as_posix()
             digest = hashlib.sha256(path.read_bytes()).hexdigest()
             sums[relative] = digest
@@ -234,7 +234,10 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
                 self.assertIn('"$WebCodexTrustedCLI"', guarded[0])
                 self.assertIn('--operation-id "$WebCodexBoundOperation"', guarded[0])
             self.assertLess(section.index('Guarded installation cannot fall back'), section.index('StrCpy $WebCodexPackageUpgrade 1'))
-            self.assertIn('${If} $WebCodexUpgradeTargetFile == ""\n    StrCpy $WebCodexTrustedCLI', section)
+            # A fork upgrade must never ask the old publisher's CLI to validate
+            # the new publisher's package. The candidate remains hash-bound.
+            trusted_assignments = [line.strip() for line in script.splitlines() if line.strip().startswith("StrCpy $WebCodexTrustedCLI ")]
+            self.assertEqual(trusted_assignments, ['StrCpy $WebCodexTrustedCLI "$WebCodexCandidate\\artifacts\\bin\\webcodex.exe"'])
             self.assertIn("installer-verify", section)
             self.assertIn("installer-verify-same", section)
             self.assertIn("Goto webcodex_bootstrap_done", section)
@@ -259,12 +262,16 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
                 self.assertIn('"$WebCodexCandidate\\artifacts\\bin\\webcodex.exe"', body)
                 self.assertIn('--expected-runtime-dir "$WebCodexInstallDir\\webcodex-runtime"', body)
                 self.assertIn('--environment-dir "$WebCodexEnvironmentDir"', body)
-            # Candidate trust is established before classification; only the
-            # explicitly matched Environment owner delegates to installed CLI.
+            # Candidate trust precedes classification and all lifecycle calls.
+            # Owner/path/receipt checks remain in that same-source coordinator.
             self.assertLess(section.index("manifest-bound SHA-256 check"), section.index("installer-classify"))
-            self.assertLess(section.index('"kind":"environment"'), section.index('StrCpy $WebCodexTrustedCLI "$WebCodexInstallDir'))
-            self.assertIn('"kind":"legacy"', section)
+            self.assertNotIn('StrCpy $WebCodexTrustedCLI "$WebCodexInstallDir', script)
+            self.assertNotIn('"kind":"legacy"', section)
             self.assertIn('"kind":"unconfigured"', section)
+            lifecycle_commands = [line for line in script.splitlines() if "ExecWait " in line and " environment upgrade-" in line]
+            self.assertTrue(lifecycle_commands)
+            self.assertTrue(all('\'"$WebCodexTrustedCLI" environment ' in line for line in lifecycle_commands))
+            self.assertLess(section.index("WebCodexRequireStopped"), section.index("upgrade-preflight"))
             self.assertIn(r'"$WebCodexTrustedCLI" environment upgrade-rollback', script)
             self.assertIn("SetEnvironmentVariableW", section)
             self.assertIn("-EncodedCommand", section)
@@ -280,6 +287,45 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
                 if token in ("SectionEnd", "FunctionEnd"): self.assertEqual(depth, 0, line)
             self.assertEqual(depth, 0)
             self.assertNotIn("the previous environment was restored", script)
+
+    def test_outer_directory_selection_and_command_line_share_the_validated_destination(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "candidate"
+            infos = self.fixture(root)
+            inner = Path(temp) / "inner.exe"; inner.write_bytes(pe(0x8664))
+            with mock.patch.object(nsis.collector, "probe", side_effect=lambda path, name: infos[name]):
+                script = bootstrap.render(root, inner, Path(temp) / "unified.exe", "win32-x64")
+        self.assertIn("!insertmacro MUI_PAGE_DIRECTORY", script)
+        self.assertLess(script.index("MUI_PAGE_DIRECTORY"), script.index("MUI_PAGE_INSTFILES"))
+        initial = script.split("Function .onInit\n", 1)[1].split("FunctionEnd", 1)[0]
+        validate = script.split("Function WebCodexValidateInstallDir\n", 1)[1].split("FunctionEnd", 1)[0]
+        section = script.split('Section "-WebCodexUnifiedBootstrap"\n', 1)[1].split("SectionEnd", 1)[0]
+        self.assertIn('${If} $INSTDIR == "${WEBCODEX_DEFAULT_DIR}"', initial)
+        self.assertIn("StrCpy $INSTDIR $WebCodexRegisteredDir", initial)
+        self.assertIn("Call WebCodexValidateInstallDir", initial)
+        self.assertIn("${AndIf} $INSTDIR != $WebCodexRegisteredDir", validate)
+        self.assertIn("$(WebCodexDirectoryMismatch)", validate)
+        self.assertIn("StrCpy $WebCodexInstallDir $INSTDIR", validate)
+        self.assertTrue(section.startswith("  Call WebCodexValidateInstallDir\n"))
+        self.assertIn("/D=$WebCodexInstallDir", section)
+
+    def test_standard_installer_preserves_upstream_identity_and_uses_exact_file_busy_checks(self):
+        root = SCRIPTS.parent
+        config = json.loads((root / "apps/desktop/src-tauri/tauri.conf.json").read_text())
+        self.assertEqual((config["productName"], config["mainBinaryName"], config["identifier"]),
+                         ("WebCodex Desktop", "WebCodex", "dev.webcodex.desktop"))
+        settings = config["bundle"]["windows"]["nsis"]
+        self.assertEqual(settings["installMode"], "currentUser")
+        hook = (root / "apps/desktop/src-tauri" / settings["installerHooks"]).read_text(encoding="utf-8")
+        self.assertIn("!macroundef CheckIfAppIsRunning", hook)
+        self.assertIn("kernel32::CreateFileW", hook)
+        self.assertIn("i 0xC0000000, i 0", hook)
+        self.assertIn("IfSilent webcodex_stopped_cancel_", hook)
+        self.assertIn('WebCodexRequireStopped "$INSTDIR\\WebCodex.exe"', hook)
+        self.assertNotIn("::KillProcess", hook)
+        self.assertNotIn("::FindProcess", hook)
+        self.assertNotIn("RmDir", hook)
+        self.assertNotIn("DeleteRegKey", hook)
 
     def test_guarded_outer_requires_explicit_same_source_cli_attestation(self):
         for marker in (None, True, "1", 0, 2):

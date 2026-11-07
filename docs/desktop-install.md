@@ -42,7 +42,7 @@ and keep API keys, tokens, and other secrets out of prompts, screenshots, Git,
 issues, and shared logs.
 
 1. **Install and open WebCodex Desktop.** Download the Windows installer or DMG
-   matching your machine's architecture from [GitHub Releases](https://github.com/yyjeqhc/webcodex/releases).
+   matching your machine's architecture from [this distribution's GitHub Releases](https://github.com/9holy/webcodex/releases).
    On macOS, use **System Settings → Privacy & Security → Open Anyway** if the
    current non-notarized build is blocked; do not disable Gatekeeper globally.
 2. **Create the main node.** Choose **Create main node** to configure separate
@@ -102,10 +102,36 @@ Contributors who want to modify Desktop or build their own Windows/macOS package
 
 ## 1. Install WebCodex Desktop
 
-Download the matching Desktop artifact from the [GitHub Releases](https://github.com/yyjeqhc/webcodex/releases) page:
+Download the matching Desktop artifact from [this distribution's GitHub Releases](https://github.com/9holy/webcodex/releases):
 
 - **Windows:** use the installer matching your architecture, x64 or ARM64. Windows ARM64 Desktop is part of the v0.4.2+ release build path.
 - **macOS:** use the DMG matching your Mac architecture, Intel or Apple Silicon.
+
+**Windows installation and upgrades.** A new installation offers a destination
+folder. The full **webcodex-unified-…-win32-….exe** includes Desktop, CLI, Server
+and Runner and coordinates upgrades of an already configured background
+Environment. Use it when Server or Runner runs as an installed service. The
+**webcodex-desktop-…-setup.exe** is the standard Desktop setup, with the same
+product identity and user-data location as the supported upstream installation.
+
+An upgrade detects and reuses the existing folder, including a custom folder
+chosen in upstream setup. Keep that folder to preserve the Environment's
+Runtime paths. The full installer displays it and rejects a different directory
+or conflicting **/D=** argument; it does not silently install somewhere else.
+Moving an existing Environment is a separate operation. A normal upgrade
+preserves settings, projects, credentials and history; do not uninstall the
+upstream application or delete its configuration first. In standard setup's
+maintenance page, choose the option that keeps the existing installation.
+Choosing uninstall runs the previous version's uninstaller and is separate from
+an in-place update; the full installer directly uses the update path.
+
+If files are busy, use **Quit WebCodex** from the tray menu of that installation,
+then select **Retry**. Closing the window only hides it. Persistent services can
+continue after Desktop quits: use the full installer to coordinate their
+upgrade, or stop those services through the existing Environment controls before
+using standard setup. The full installer and the standard installer's update
+path check the selected files, and do not stop other installations by executable
+name.
 
 macOS signing has three explicit modes: `self-signed` is the current persistent fallback for public releases and long-lived dogfood; `developer-id` uses Developer ID Application plus notarization/stapling when Apple credentials are available; `adhoc` is only for disposable CI/local verification and promises no TCC upgrade continuity. Keep the same self-signed certificate **and private key** across builds and upgrades. Recreating a certificate with the same name changes identity. Both Desktop (`dev.webcodex.desktop`) and bundled Runner (`dev.webcodex.runner`) use certificate-anchored designated requirements without binary cdhash. Final app/DMG verification runs after Tauri nested signing. This does not preserve grants from historical ad-hoc builds automatically: users may need to reauthorize the new persistent identity once. Self-signed distribution is not Apple notarized; use **System Settings → Privacy & Security → Open Anyway** if Gatekeeper requires it, without disabling Gatekeeper globally.
 

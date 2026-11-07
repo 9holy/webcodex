@@ -907,6 +907,21 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Test native Windows installer directory and upstream coordinator routing
+        shell: pwsh
+        env:
+          WEBCODEX_REQUIRE_NSIS_TESTS: "1"
+        run: |
+          $ErrorActionPreference = "Stop"
+          choco install nsis --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "NSIS compiler installation failed" }
+          python -c "from scripts.tests.test_windows_installer_native import nsis_compiler; assert nsis_compiler() is not None, 'Required NSIS compiler is unavailable'"
+          if ($LASTEXITCODE -ne 0) { throw "Native installer gate cannot skip without NSIS" }
+          python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native -v
+          if ($LASTEXITCODE -ne 0) { throw "Native installer directory/upgrade contracts failed" }
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
@@ -1010,6 +1025,23 @@ jobs:
             -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") `
             -Platform win32-x64 `
             -InstallDir $customInstallDir
+      - name: Upgrade the pinned upstream Desktop installation without changing its folder or data
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $previous = Join-Path $env:RUNNER_TEMP "webcodex-desktop-upstream-v0.5.0-x64-setup.exe"
+          Invoke-WebRequest `
+            -Uri "https://github.com/yyjeqhc/webcodex/releases/download/v0.5.0/webcodex-desktop-v0.5.0-win32-x64-setup.exe" `
+            -OutFile $previous
+          & .\scripts\desktop_install_windows_smoke.ps1 `
+            -Installer $env:DESKTOP_CI_INSTALLER `
+            -Version "${{ steps.runtime.outputs.version }}" `
+            -SourceSha "${{ steps.runtime.outputs.source }}" `
+            -BuiltAt ([Int64]"${{ steps.runtime.outputs.built_at }}") `
+            -Platform win32-x64 `
+            -InstallDir (Join-Path $env:RUNNER_TEMP "WebCodex Upstream Upgrade") `
+            -PreviousInstaller $previous `
+            -PreviousInstallerSha256 "dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6"
 
   test-windows:
     needs: [contract, changes, test-windows-core, test-windows-runner, test-windows-package, test-windows-desktop]

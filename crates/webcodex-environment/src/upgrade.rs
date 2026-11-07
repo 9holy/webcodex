@@ -22,12 +22,16 @@ mod observation;
 mod runtime_package_tests;
 mod status;
 pub mod windows_package;
+#[cfg(windows)]
+mod windows_recovery;
 pub(crate) use observation::upgrade_observation_under_lock;
 pub use observation::{upgrade_observation, UpgradeObservation, UpgradeOutcome};
 pub use status::{
     upgrade_status, upgrade_status_at, UpgradeFileComponent, UpgradePhase, UpgradeServiceComponent,
     UpgradeServiceKind, UpgradeStatus, UpgradeTarget,
 };
+#[cfg(windows)]
+pub(crate) use windows_recovery::service_helper as windows_service_helper;
 
 use crate::unified_update::install::package::{self, PackageInspection};
 use crate::unified_update::{InstallerTarget, PackageFlavor};
@@ -2181,6 +2185,8 @@ impl NativeEnvironment {
                 "A completed upgrade cannot restore an older live-data snapshot",
             ));
         }
+        #[cfg(windows)]
+        windows_recovery::ensure_external_restore_process(&journal)?;
         let from = journal.rollback_from.unwrap_or(journal.phase);
         journal.rollback_from = Some(from);
         journal.phase = Phase::Restoring;
@@ -2568,6 +2574,8 @@ pub(crate) fn restore_programs_from_journal(
             "The upgrade journal does not authorize program restoration",
         ));
     }
+    #[cfg(windows)]
+    windows_recovery::ensure_external_restore_process(&journal)?;
     checked_owner(root, &journal.record.request.account.identity)?;
     checked_owner(&path, &journal.record.request.account.identity)?;
     // Restore the launcher last so a self-replacement failure cannot prevent
@@ -2628,9 +2636,19 @@ pub(crate) fn restore_programs_from_journal(
             ));
         }
         for ancestor in item.target.ancestors() {
-            let metadata =
-                std::fs::symlink_metadata(ancestor).map_err(|_| SetupDiagnostic::io())?;
-            if metadata.is_symlink() {
+            let metadata = match std::fs::symlink_metadata(ancestor) {
+                Ok(metadata) => metadata,
+                #[cfg(windows)]
+                Err(error)
+                    if ancestor == item.target && error.kind() == std::io::ErrorKind::NotFound =>
+                {
+                    // The sealed exact target can be recreated only inside its
+                    // existing, owner-verified directory below.
+                    continue;
+                }
+                Err(_) => return Err(SetupDiagnostic::io()),
+            };
+            if crate::storage::is_link(&metadata) {
                 return Err(error(
                     "upgrade_restore_authorization",
                     "A restore target contains a link",
@@ -2709,6 +2727,7 @@ fn authorize_restore_destinations(root: &Path, journal: &UpgradeJournal) -> Setu
         targets.push(&desktop.target);
     }
     for target in targets {
+        #[cfg(unix)]
         let parent = target.parent().ok_or_else(SetupDiagnostic::io)?;
         #[cfg(unix)]
         {
@@ -2731,15 +2750,7 @@ fn authorize_restore_destinations(root: &Path, journal: &UpgradeJournal) -> Setu
             }
         }
         #[cfg(windows)]
-        for path in [parent, target] {
-            if crate::storage::windows_path_owner(path)? != journal.record.request.account.identity
-            {
-                return Err(error(
-                    "upgrade_restore_authorization",
-                    "A restore destination is not owned by the original user",
-                ));
-            }
-        }
+        windows_recovery::authorize_destination(target, &journal.record.request.account.identity)?;
     }
     Ok(())
 }
@@ -2849,6 +2860,9 @@ fn restore_program(backup: &ProgramBackup) -> SetupResultValue<()> {
     }
     #[cfg(windows)]
     {
+        // Only the newly created UUID copy is normalized. This also preserves
+        // the original user's file ownership when their token is elevated.
+        crate::storage::secure_windows_path(&temporary)?;
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::{
             MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,

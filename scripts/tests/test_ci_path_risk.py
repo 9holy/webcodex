@@ -222,6 +222,9 @@ class PathRiskFixtureTests(unittest.TestCase):
                 self.assertEqual(result["needs_macos"], "true")
 
     def test_windows_installer_and_npm_package_choose_windows_package_lanes(self) -> None:
+        bootstrap = classify("scripts/build_windows_unified_bootstrap.py")
+        self.assertEqual(bootstrap["needs_windows_desktop"], "true")
+        self.assertEqual(bootstrap["needs_macos"], "false")
         desktop = classify("scripts/desktop_install_windows_smoke.ps1")
         self.assertEqual(desktop["needs_windows_desktop"], "true")
         self.assertEqual(desktop["needs_windows_package"], "true")
