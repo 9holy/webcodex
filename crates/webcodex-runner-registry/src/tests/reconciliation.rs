@@ -48,6 +48,7 @@ fn reconciliation_capabilities() -> RunnerCapabilities {
         structured_cargo_check_packages: true,
         job_state_reconciliation: true,
         coding_agent_runs: false,
+        coding_agent_permission_responses: false,
         ..Default::default()
     }
 }

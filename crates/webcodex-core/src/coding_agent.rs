@@ -9,6 +9,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod permission;
+pub use permission::*;
+
 pub const CODING_AGENT_MAX_PROVIDERS: usize = 8;
 pub const CODING_AGENT_MAX_PROVIDER_ID_BYTES: usize = 64;
 pub const CODING_AGENT_MAX_PROVIDER_NAME_BYTES: usize = 128;
@@ -303,6 +306,10 @@ pub struct CodingAgentObserveRequest {
     pub after_sequence: Option<u64>,
     pub limit: usize,
     pub wait_secs: u64,
+    /// Negotiated additive projection. Old Servers omit it, so new Runners
+    /// never send an unknown permission field to their closed response parser.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_pending_permission: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -410,6 +417,7 @@ pub enum CodingAgentRequest {
     Start(CodingAgentStartRequest),
     Observe(CodingAgentObserveRequest),
     Cancel(CodingAgentCancelRequest),
+    RespondPermission(CodingAgentRespondPermissionRequest),
     Diagnose(CodingAgentDiagnoseRequest),
 }
 
@@ -419,6 +427,7 @@ impl CodingAgentRequest {
             Self::Start(request) => &request.run_id,
             Self::Observe(request) => &request.run_id,
             Self::Cancel(request) => &request.run_id,
+            Self::RespondPermission(request) => &request.run_id,
             Self::Diagnose(request) => &request.run_id,
         }
     }
@@ -427,6 +436,9 @@ impl CodingAgentRequest {
         match self {
             Self::Start(request) => Some((&request.provider_id, &request.provider_instance_id)),
             Self::Diagnose(request) => Some((&request.provider_id, &request.provider_instance_id)),
+            Self::RespondPermission(request) => {
+                Some((&request.provider_id, &request.provider_instance_id))
+            }
             Self::Observe(_) | Self::Cancel(_) => None,
         }
     }
@@ -441,6 +453,8 @@ pub struct CodingAgentObserveResult {
     pub next_sequence: u64,
     pub has_more: bool,
     pub history_lost: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_permission: Option<CodingAgentPendingPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -454,6 +468,11 @@ pub enum CodingAgentResponsePayload {
     },
     Cancel {
         run: CodingAgentRunSnapshot,
+    },
+    RespondPermission {
+        run: CodingAgentRunSnapshot,
+        request_id: String,
+        decision: CodingAgentPermissionDecision,
     },
     Diagnose {
         provider_id: String,
@@ -608,6 +627,9 @@ pub fn validate_request(request: &CodingAgentRequest) -> Result<(), String> {
             }
         }
         CodingAgentRequest::Cancel(_) => {}
+        CodingAgentRequest::RespondPermission(request) => {
+            validate_permission_response_request(request)?
+        }
         CodingAgentRequest::Diagnose(request) => {
             validate_provider_id(&request.provider_id)?;
             validate_provider_instance_id(&request.provider_instance_id)?;
@@ -684,7 +706,20 @@ pub fn validate_response_for_request(
     }
     let run = match (request, payload) {
         (CodingAgentRequest::Start(_), CodingAgentResponsePayload::Start { run }) => run,
-        (CodingAgentRequest::Observe(_), CodingAgentResponsePayload::Observe { observation }) => {
+        (
+            CodingAgentRequest::Observe(request),
+            CodingAgentResponsePayload::Observe { observation },
+        ) => {
+            if let Some(pending) = observation.pending_permission.as_ref() {
+                validate_pending_permission(pending)?;
+                if !request.include_pending_permission
+                    || observation.run.state != CodingAgentRunState::WaitingPermission
+                {
+                    return Err(
+                        "ACP permission is pending on a Run that is not waiting_permission".into(),
+                    );
+                }
+            }
             if observation.events.len() > CODING_AGENT_MAX_EVENTS_PER_RESPONSE {
                 return Err("CodingAgentRun response contains too many events".to_string());
             }
@@ -728,6 +763,28 @@ pub fn validate_response_for_request(
             &observation.run
         }
         (CodingAgentRequest::Cancel(_), CodingAgentResponsePayload::Cancel { run }) => run,
+        (
+            CodingAgentRequest::RespondPermission(request),
+            CodingAgentResponsePayload::RespondPermission {
+                run,
+                request_id,
+                decision,
+            },
+        ) => {
+            if request_id != &request.request_id
+                || decision != &request.decision
+                || run.authority_fingerprint != request.authority_fingerprint
+                || run.runtime_project_id != request.runtime_project_id
+                || run.provider_id != request.provider_id
+                || run.provider_instance_id != request.provider_instance_id
+            {
+                return Err(
+                    "ACP permission receipt does not match its exact request binding".into(),
+                );
+            }
+            validate_permission_decision(decision)?;
+            run
+        }
         _ => {
             return Err("CodingAgentRun response kind does not match request operation".to_string())
         }
@@ -1345,6 +1402,7 @@ mod tests {
                 next_sequence: 1,
                 has_more: false,
                 history_lost: false,
+                pending_permission: None,
             },
         });
         let observe_request = CodingAgentRequest::Observe(CodingAgentObserveRequest {
@@ -1352,6 +1410,7 @@ mod tests {
             after_sequence: None,
             limit: 8,
             wait_secs: 0,
+            include_pending_permission: false,
         });
         assert!(validate_response_for_request(&observe_request, &response).is_err());
     }

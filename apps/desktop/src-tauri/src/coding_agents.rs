@@ -99,6 +99,29 @@ pub struct CodingAgentRemove {
     pub provider_id: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CodexPrepareRequest {
+    pub target: crate::webcodex::settings::SettingsTarget,
+    pub expected_revision: u64,
+    #[serde(default)]
+    pub python_bin: Option<PathBuf>,
+    #[serde(default)]
+    pub codex_bin: Option<PathBuf>,
+    #[serde(default)]
+    pub codex_args: Vec<String>,
+    #[serde(default)]
+    pub expected_version: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct PreparedCodexAgent {
+    pub target: crate::webcodex::settings::SettingsTarget,
+    pub expected_revision: u64,
+    pub codex_version: String,
+    pub profile: CodingAgentProfile,
+}
+
 #[derive(Clone)]
 pub struct CodingAgentStore {
     path: PathBuf,
@@ -246,7 +269,7 @@ impl CodingAgentStore {
         Ok(())
     }
 
-    fn check_revision(&self, revision: u64) -> DesktopResult<()> {
+    pub(crate) fn check_revision(&self, revision: u64) -> DesktopResult<()> {
         if self.invalid {
             return Err(invalid());
         }
@@ -278,7 +301,7 @@ fn read_optional(path: &Path) -> DesktopResult<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
-fn validate_profile(profile: &CodingAgentProfile) -> DesktopResult<()> {
+pub(crate) fn validate_profile(profile: &CodingAgentProfile) -> DesktopResult<()> {
     if validate_provider_id(&profile.provider_id).is_err()
         || profile.name.trim().is_empty()
         || profile.name.len() > 128
@@ -348,7 +371,7 @@ fn validate_manifest(manifest: &Manifest) -> DesktopResult<()> {
     }
     if let Some(settings) = &manifest.global_settings {
         if !(1..=8).contains(&settings.max_concurrent_runs)
-            || !(1..=60).contains(&settings.permission_timeout_secs)
+            || !(1..=600).contains(&settings.permission_timeout_secs)
         {
             return Err(invalid());
         }

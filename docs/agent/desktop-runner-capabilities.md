@@ -177,6 +177,38 @@ Remote connections require an operator-approved pairing code instead. Grants are
 never attempted automatically, including after a failure. No Server, Runner, or
 Tunnel restart is required for the scope update.
 
+ACP callback approval is a separate opt-in. The ordinary grant above never adds
+`coding_agent:approve`. A separately confirmed native request with
+`permission_approval: true` adds only that scope to the exact existing user key;
+it does not fill in missing SSH, Run, Project or administrator scopes. Status
+adds `permission_approval`, and older Servers omitting it do not acquire support
+by inference. The Desktop clears the confirmation when the connection changes
+and re-observes the same credential after the grant.
+
+The approval panel reads caller-owned Run inventory and complete bounded
+`pending_permission` details, then sends the fixed canonical
+`respond_coding_agent_permission` tool with one exact `run_id`, `request_id` and
+selection/cancellation. Native connection and settings-generation fences remain
+in force before and after the request. A response receipt is not provider
+completion; the panel refreshes the same Run and never retries a mutation
+automatically. The configured permission wait defaults to 300 seconds, accepts
+1–600 seconds, and cannot outlive the Run's remaining deadline.
+
+This grants an approval capability to a trusted client, not an unforgeable human
+identity. Every program given the same approval-capable credential has the same
+authority. Keep it separate from clients that should only start/observe Runs;
+existing OAuth clients and grants are not silently widened.
+
+## Codex configuration and approval UI contracts
+
+Desktop exposes **Configure Codex (experimental)** on the existing Coding agents page. The native `prepare_codex_coding_agent` request carries the captured `SettingsTarget` and desired-state revision. It rejects a replacement connection or stale manifest before installing resources or running a probe. It calls the shared `webcodex_environment::codex_app_server::prepare_codex` helper on a bounded worker: bundled source resources, Python/Codex discovery, exact version/schema checks, a unique private receipt, and a disabled typed profile. It does not save desired state, authorize scopes or restart processes.
+
+The successful dialog presents **Save and enable Codex**. That explicit action uses the existing `save_coding_agent` revision/ownership transaction, with `enabled: true`; a replacement names the existing Desktop-owned provider. Uncertain saves require observation before another attempt. The normal apply bar exposes **Restart Runner**. Executable paths, up to eight fixed launcher arguments and the optional exact version are advanced inputs; no TOML-edit instruction is part of the normal product flow.
+
+The Web **Runtime → Approvals** tab and Desktop **Coding agents → Review approvals** share the same bounded request/receipt UI. It renders complete provider `details` as escaped plain text, offers only actual one-time provider options plus explicit cancellation, fences component state by connection identity, disables expired requests and synchronously locks double submissions. Polling never interrupts a slower in-flight read. The UI rejects an HTTP-success response unless the canonical tool also returns `success: true` and `output.response_accepted: true`; stable `output.error_kind` values carry permission/stale failures without exposing arbitrary diagnostic text.
+
+Desktop's closed `workspace_query` vocabulary adds `coding_agent_runs` and `coding_agent_permission`, each with the exact expected settings target. The native bridge verifies that target before dispatch, keeps credentials native, and retains the existing runtime/operation generation fence after dispatch. Inventory uses `/api/runtime-console/coding-agent-runs`; the mutation calls only `/api/tools/call` with the fixed `respond_coding_agent_permission` tool. The Web adapter uses the same routes and its credential-revision fence. Read coalescing never includes a mutation.
+
 ## Validation and manual acceptance
 
 Automated coverage includes safe full/compact/focused discovery, Project ownership,

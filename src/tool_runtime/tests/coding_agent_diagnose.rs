@@ -631,6 +631,7 @@ async fn diagnose_live_probe_authority_holds_through_full_dispatch() {
                     "inst-mini",
                     RunnerCapabilities {
                         coding_agent_runs: true,
+                        coding_agent_permission_responses: false,
                         ..Default::default()
                     },
                 )

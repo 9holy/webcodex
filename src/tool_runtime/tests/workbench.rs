@@ -35,6 +35,7 @@ async fn register_runner_with_run_inventory(
                 "inst",
                 RunnerCapabilities {
                     coding_agent_runs: true,
+                    coding_agent_permission_responses: false,
                     ..Default::default()
                 },
             )

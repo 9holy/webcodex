@@ -524,6 +524,7 @@ async fn lease_replacement_transfers_exact_detached_inventory_to_new_instance() 
         async_shell_jobs: true,
         job_state_reconciliation: true,
         coding_agent_runs: false,
+        coding_agent_permission_responses: false,
         structured_process_argv: true,
         structured_execution_jobs: true,
         detached_process_jobs: true,

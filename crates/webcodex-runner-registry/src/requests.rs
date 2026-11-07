@@ -2259,6 +2259,10 @@ impl RunnerRegistry {
     ) -> Result<(String, oneshot::Receiver<CodingAgentResponse>), String> {
         validate_coding_agent_request(&operation)
             .map_err(|error| format!("invalid CodingAgentRun request: {error}"))?;
+        let requires_permission_response = matches!(
+            &operation,
+            CodingAgentRequest::RespondPermission(_)
+        ) || matches!(&operation, CodingAgentRequest::Observe(request) if request.include_pending_permission);
         if let Some((provider_id, provider_instance_id)) = operation.provider_binding() {
             if provider_id != expected_provider_id
                 || provider_instance_id != expected_provider_instance_id
@@ -2289,6 +2293,16 @@ impl RunnerRegistry {
             .supports(RunnerFeature::CodingAgentRuns)
         {
             return Err("exact Runner does not support CodingAgentRun".to_string());
+        }
+        if requires_permission_response
+            && !runner
+                .runner_features
+                .supports(RunnerFeature::CodingAgentPermissionResponses)
+        {
+            return Err(
+                "exact Runner does not support ACP permission responses; upgrade this Runner"
+                    .to_string(),
+            );
         }
         if runner.runner_instance_id != expected_runner_instance_id {
             return Err("stale Runner identity; CodingAgentRun was not dispatched".to_string());

@@ -13,6 +13,7 @@ fn test_tempdir() -> std::io::Result<tempfile::TempDir> {
 }
 
 mod cloudflare_tunnel;
+pub mod codex_app_server;
 pub use cloudflare_tunnel::{
     cloudflare_ingress_port, cloudflare_tunnel_profile, cloudflare_tunnel_profiles,
     load_cloudflare_server_ingress_port, load_cloudflare_server_materializations,

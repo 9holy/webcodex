@@ -8,7 +8,7 @@ import { WorkspaceDialog } from "../workspace/WorkspaceDialog";
 
 type Props = {
   settings: RunnerSettings | null;
-  capability: "coding_agents" | "ssh_resources";
+  capability: "coding_agents" | "ssh_resources" | "permission_approval_granted";
   disabled: boolean;
   refreshKey?: number;
   onAuthorized: () => void;
@@ -21,6 +21,8 @@ export function RunnerCapabilityAuthorization({ settings, ...props }: Props) {
 
 function AuthorizationFlow({ target, capability, disabled, refreshKey, onAuthorized }: Omit<Props, "settings"> & { target: SettingsTarget }) {
   const p = useProduct(); const r = useRunnerCapabilitiesText();
+  const approvalOnly = capability === "permission_approval_granted";
+  const [consent, setConsent] = useState(false);
   const [status, setStatus] = useState<RunnerCapabilityAuthorizationSnapshot | null>(null);
   const [failed, setFailed] = useState(false); const [unavailable, setUnavailable] = useState(false);
   const [confirming, setConfirming] = useState(false); const [busy, setBusy] = useState(false);
@@ -40,12 +42,13 @@ function AuthorizationFlow({ target, capability, disabled, refreshKey, onAuthori
     return () => { mounted.current = false; ++sequence.current; };
   }, [target.client_id, target.config_path, target.server_url, revision, refreshKey]);
 
+  const canAuthorize = Boolean(status?.can_authorize && (!approvalOnly || status.permission_approval_grant_available));
   const authorize = async () => {
-    if (!confirming || !status?.can_authorize || inFlight.current || disabled) return;
+    if (!confirming || !canAuthorize || (approvalOnly && !consent) || inFlight.current || disabled) return;
     inFlight.current = true; setBusy(true); setConfirming(false); setFailed(false);
     const current = ++sequence.current;
     try {
-      const value = await desktopApi.authorizeRunnerCapabilities(target);
+      const value = await (approvalOnly ? desktopApi.authorizeRunnerCapabilities(target, true) : desktopApi.authorizeRunnerCapabilities(target));
       if (!matches(value)) throw new Error("connection_changed");
       if (!mounted.current || current !== sequence.current) return;
       setStatus(value);
@@ -63,16 +66,18 @@ function AuthorizationFlow({ target, capability, disabled, refreshKey, onAuthori
     } finally { inFlight.current = false; if (mounted.current) setBusy(false); }
   };
   if (!failed && status?.[capability]) return null;
-  return <div className="workspace-notice runner-capability-authorization" aria-label="Runner Capability Authorization">
+  return <div className="workspace-notice runner-capability-authorization" aria-label={approvalOnly ? "Coding Approval Authorization" : "Runner Capability Authorization"}>
     {(unavailable || failed) && <p role="alert">{r(failed ? "authorizeFailed" : "authorizationUnavailable")}</p>}
     {status && !status[capability] && <>
-      <p>{r(status.can_authorize ? "authorizationNeeded" : "operatorPairingNeeded")}</p>
-      {status.can_authorize && <button type="button" className="secondary-button" aria-label="Authorize Runner Capabilities" disabled={disabled || busy} onClick={() => setConfirming(true)}>{r("authorize")}</button>}
+      <p>{r(approvalOnly ? canAuthorize ? "approvalAuthorizationNeeded" : "approvalOperatorNeeded" : status.can_authorize ? "authorizationNeeded" : "operatorPairingNeeded")}</p>
+      {canAuthorize && <button type="button" className="secondary-button" aria-label={approvalOnly ? "Authorize Coding Approvals" : "Authorize Runner Capabilities"} disabled={disabled || busy} onClick={() => { setConsent(false); setConfirming(true); }}>{r(approvalOnly ? "authorizeApprovals" : "authorize")}</button>}
     </>}
-    {(unavailable || failed || status) && <button type="button" className="text-button" aria-label="Refresh Runner Authorization" disabled={disabled || busy} onClick={() => { setFailed(false); setRevision(value => value + 1); }}>{p("refresh")}</button>}
-    {confirming && <WorkspaceDialog title={r("authorize")} onClose={() => setConfirming(false)} busy={busy}>
-      <p>{r("authorizeHelp")}</p><div className="connection-actions">
-        <button type="button" className="primary-button" aria-label="Confirm Authorize Runner Capabilities" disabled={disabled || busy} onClick={() => void authorize()}>{r("authorize")}</button>
+    {(unavailable || failed || status) && <button type="button" className="text-button" aria-label={approvalOnly ? "Refresh Coding Approval Authorization" : "Refresh Runner Authorization"} disabled={disabled || busy} onClick={() => { setFailed(false); setRevision(value => value + 1); }}>{p("refresh")}</button>}
+    {confirming && <WorkspaceDialog title={r(approvalOnly ? "authorizeApprovals" : "authorize")} onClose={() => setConfirming(false)} busy={busy}>
+      <p>{r(approvalOnly ? "authorizeApprovalsHelp" : "authorizeHelp")}</p>
+      {approvalOnly && <label className="profile-checkbox"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} disabled={busy} />{r("approvalConsent")}</label>}
+      <div className="connection-actions">
+        <button type="button" className="primary-button" aria-label={approvalOnly ? "Confirm Authorize Coding Approvals" : "Confirm Authorize Runner Capabilities"} disabled={disabled || busy || (approvalOnly && !consent)} onClick={() => void authorize()}>{r(approvalOnly ? "authorizeApprovals" : "authorize")}</button>
         <button type="button" className="secondary-button" disabled={busy} onClick={() => setConfirming(false)}>{p("cancel")}</button>
       </div>
     </WorkspaceDialog>}

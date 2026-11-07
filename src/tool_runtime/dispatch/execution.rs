@@ -55,6 +55,23 @@ impl ToolRuntime {
                     .await
             }
             ToolCall::CodingAgentCancel { run_id } => self.coding_agent_cancel(run_id, auth).await,
+            ToolCall::CodingAgentRespondPermission {
+                run_id,
+                request_id,
+                outcome,
+                option_id,
+            } => {
+                self.coding_agent_respond_permission(
+                    run_id,
+                    request_id,
+                    webcodex_core::coding_agent::CodingAgentPermissionDecision {
+                        outcome,
+                        option_id,
+                    },
+                    auth,
+                )
+                .await
+            }
             ToolCall::CodingAgentDiagnose {
                 project,
                 provider_id,

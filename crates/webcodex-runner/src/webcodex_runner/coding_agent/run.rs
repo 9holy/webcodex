@@ -2,11 +2,12 @@
 
 use super::protocol::{
     error_frame, normalize_update, notification_frame, permission_event, remaining_run_budget,
-    request_frame, result_frame, wait_outbound_write, AcpFailure, AcpOutboundWriter,
+    request_frame, result_frame, wait_outbound_write, AcpCallbackId, AcpFailure, AcpOutboundWriter,
     OutboundWriteOutcome, ReaderEvent,
 };
 use super::store::DurableDispatchPhase;
 use super::*;
+use webcodex_core::coding_agent::CodingAgentPermissionOutcome;
 
 impl CodingAgentManager {
     pub(super) fn terminate_run_io(
@@ -90,6 +91,68 @@ impl CodingAgentManager {
                 failure.diagnose(run_id, uncertainty_code, child.try_wait().ok().flatten());
                 self.terminate_run_io(child, outbound);
                 self.mark_lost(run_id, entry, uncertainty_code);
+                false
+            }
+        }
+    }
+
+    fn write_permission_response(
+        &self,
+        run_id: &str,
+        entry: &Arc<RunEntry>,
+        child: &mut ManagedChild,
+        outbound: &mut AcpOutboundWriter,
+        request_id: &str,
+        rpc_id: &AcpCallbackId,
+        deadline: Instant,
+    ) -> bool {
+        // Serialize the irreversible writer handoff with cancel. If cancel
+        // wins this gate, only ACP Cancelled can be sent. If the selection
+        // wins, later cancellation observes the same Run; it cannot replay it.
+        let gate = entry.prompt_dispatch.lock().unwrap();
+        let decision = entry.take_permission_decision(
+            request_id,
+            self.accepting.load(Ordering::Acquire),
+            self.permission_project_current(entry),
+        );
+        let selected = decision.outcome == CodingAgentPermissionOutcome::Selected;
+        let outcome = if selected {
+            json!({"outcome":"selected", "optionId": decision.option_id})
+        } else {
+            json!({"outcome":"cancelled"})
+        };
+        let pending = result_frame(rpc_id, json!({"outcome": outcome}))
+            .map_err(|_| AcpFailure::InvalidFrame)
+            .and_then(|frame| outbound.start_frame(frame));
+        drop(gate);
+        let pending = match pending {
+            Ok(pending) => pending,
+            Err(error) => {
+                error.diagnose(
+                    run_id,
+                    "coding_agent_permission_response_uncertain",
+                    child.try_wait().ok().flatten(),
+                );
+                self.terminate_run_io(child, outbound);
+                self.mark_lost(run_id, entry, "coding_agent_permission_response_uncertain");
+                return false;
+            }
+        };
+        match wait_outbound_write(
+            pending,
+            deadline,
+            selected.then_some(&entry.cancel_requested),
+            Some(&self.accepting),
+        ) {
+            OutboundWriteOutcome::Written => true,
+            outcome => {
+                outcome.failure().expect("non-written outcome").diagnose(
+                    run_id,
+                    "coding_agent_permission_response_uncertain",
+                    child.try_wait().ok().flatten(),
+                );
+                self.terminate_run_io(child, outbound);
+                self.mark_lost(run_id, entry, "coding_agent_permission_response_uncertain");
                 false
             }
         }
@@ -443,7 +506,7 @@ impl CodingAgentManager {
                     if message.get("method").and_then(Value::as_str)
                         == Some("session/request_permission")
                     {
-                        let Some(id) = message.get("id").and_then(Value::as_u64) else {
+                        let Some(id) = message.get("id").and_then(AcpCallbackId::from_value) else {
                             self.terminate_run_io(&mut child, &mut outbound);
                             self.mark_lost(
                                 &request.run_id,
@@ -464,17 +527,31 @@ impl CodingAgentManager {
                             );
                             return;
                         }
-                        entry.push_event(permission_event(&params));
-                        entry.update_snapshot(|snapshot| {
-                            snapshot.state = CodingAgentRunState::WaitingPermission
-                        });
                         let permission_deadline =
                             (Instant::now() + self.permission_timeout).min(run_deadline);
-                        while Instant::now() < permission_deadline
-                            && !entry.cancel_requested.load(Ordering::Acquire)
-                            && self.accepting.load(Ordering::Acquire)
-                        {
-                            thread::sleep(ACP_POLL);
+                        let mut event = permission_event(&params);
+                        let pending_id = match super::permission::normalize_permission(
+                            &params,
+                            &session_id,
+                            permission_deadline,
+                        ) {
+                            Ok(pending) => {
+                                let pending_id = pending.request_id.clone();
+                                if entry.begin_permission(pending, permission_deadline) {
+                                    Some(pending_id)
+                                } else {
+                                    None
+                                }
+                            }
+                            Err(reason) => {
+                                event.status = Some(reason.to_owned());
+                                event.text = Some("This ACP permission request could not be represented completely within the approval bounds and was cancelled. Observe the same Run for the provider's terminal outcome; do not redispatch.".to_owned());
+                                None
+                            }
+                        };
+                        entry.push_event(event);
+                        if let Some(pending_id) = pending_id.as_deref() {
+                            entry.wait_permission_decision(pending_id, &self.accepting);
                         }
                         let lifecycle_interrupted = entry.cancel_requested.load(Ordering::Acquire)
                             || Instant::now() >= run_deadline
@@ -485,18 +562,29 @@ impl CodingAgentManager {
                         } else {
                             (Instant::now() + ACP_CANCEL_GRACE).min(run_deadline)
                         };
-                        // P1 never selects an allow/reject option. Cancelled is
-                        // the only fail-closed ACP outcome emitted by WebCodex.
-                        if !self.write_post_prompt_frame(
-                            &request.run_id,
-                            &entry,
-                            &mut child,
-                            &mut outbound,
-                            result_frame(id, json!({"outcome":{"outcome":"cancelled"}})),
-                            response_deadline,
-                            !lifecycle_interrupted,
-                            "coding_agent_permission_response_uncertain",
-                        ) {
+                        let written = if let Some(pending_id) = pending_id.as_deref() {
+                            self.write_permission_response(
+                                &request.run_id,
+                                &entry,
+                                &mut child,
+                                &mut outbound,
+                                pending_id,
+                                &id,
+                                response_deadline,
+                            )
+                        } else {
+                            self.write_post_prompt_frame(
+                                &request.run_id,
+                                &entry,
+                                &mut child,
+                                &mut outbound,
+                                result_frame(&id, json!({"outcome":{"outcome":"cancelled"}})),
+                                response_deadline,
+                                !lifecycle_interrupted,
+                                "coding_agent_permission_response_uncertain",
+                            )
+                        };
+                        if !written {
                             return;
                         }
                         entry.update_snapshot(|snapshot| {
@@ -531,13 +619,13 @@ impl CodingAgentManager {
                     if message.get("method").is_some() {
                         let deadline = *cancel_deadline
                             .get_or_insert_with(|| Instant::now() + ACP_CANCEL_GRACE);
-                        if let Some(id) = message.get("id").and_then(Value::as_u64) {
+                        if let Some(id) = message.get("id").and_then(AcpCallbackId::from_value) {
                             if !self.write_post_prompt_frame(
                                 &request.run_id,
                                 &entry,
                                 &mut child,
                                 &mut outbound,
-                                error_frame(id, -32601, "unsupported ACP client request"),
+                                error_frame(&id, -32601, "unsupported ACP client request"),
                                 deadline,
                                 true,
                                 "coding_agent_transport_lost",

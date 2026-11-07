@@ -146,6 +146,7 @@ fn desktop_builder() -> tauri::Builder<tauri::Wry> {
             commands::save_tunnel_profile,
             commands::save_mcp_provider,
             commands::remove_mcp_provider,
+            commands::prepare_codex_coding_agent,
             commands::save_coding_agent,
             commands::remove_coding_agent,
             commands::ssh_resource_list,

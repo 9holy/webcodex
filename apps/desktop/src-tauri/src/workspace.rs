@@ -18,6 +18,17 @@ pub enum WorkspaceRequest {
     RunnerDetails {},
     BrowserStatus {},
     Windows {},
+    CodingAgentRuns {
+        expected: crate::webcodex::settings::SettingsTarget,
+    },
+    CodingAgentPermission {
+        expected: crate::webcodex::settings::SettingsTarget,
+        run_id: String,
+        request_id: String,
+        outcome: webcodex_core::coding_agent::CodingAgentPermissionOutcome,
+        #[serde(default)]
+        option_id: Option<String>,
+    },
     Sessions {
         project: String,
     },
@@ -70,6 +81,13 @@ fn response_error(status: reqwest::StatusCode) -> DesktopError {
             "The user cannot access this Server view",
             "Check the existing user's permissions on the Server.",
         ),
+        reqwest::StatusCode::CONFLICT
+        | reqwest::StatusCode::GONE
+        | reqwest::StatusCode::NOT_FOUND => DesktopError::new(
+            "workspace_request_changed",
+            "The request changed or is no longer available",
+            "Refresh the current state before choosing again.",
+        ),
         _ => unavailable(),
     }
 }
@@ -103,6 +121,28 @@ fn request_body(
             ("browser-status", json!({"client_id": runner}))
         }
         WorkspaceRequest::Windows {} => ("windows", json!({"limit": 64})),
+        WorkspaceRequest::CodingAgentRuns { .. } => ("coding-agent-runs", json!({})),
+        WorkspaceRequest::CodingAgentPermission {
+            run_id,
+            request_id,
+            outcome,
+            option_id,
+            ..
+        } if webcodex_core::coding_agent::validate_run_id(&run_id).is_ok()
+            && webcodex_core::coding_agent::validate_permission_request_id(&request_id).is_ok() =>
+        {
+            let decision =
+                webcodex_core::coding_agent::CodingAgentPermissionDecision { outcome, option_id };
+            webcodex_core::coding_agent::validate_permission_decision(&decision)
+                .map_err(|_| unavailable())?;
+            let mut params = serde_json::to_value(decision).map_err(|_| unavailable())?;
+            params["run_id"] = run_id.into();
+            params["request_id"] = request_id.into();
+            (
+                "coding-agent-permission",
+                json!({"tool":"respond_coding_agent_permission", "params":params}),
+            )
+        }
         WorkspaceRequest::Sessions { project } if valid(&project) => (
             "workflow-sessions",
             json!({"project": project, "limit": 50}),
@@ -149,14 +189,18 @@ fn request_body(
 }
 
 pub async fn query(runtime: &StoredRuntime, request: WorkspaceRequest) -> DesktopResult<Value> {
+    if let WorkspaceRequest::CodingAgentRuns { expected }
+    | WorkspaceRequest::CodingAgentPermission { expected, .. } = &request
+    {
+        crate::webcodex::settings::verify_target(runtime, expected)?;
+    }
     let (route, body) = request_body(request, runtime.runner_client_id.as_deref())?;
-    post(
-        runtime,
-        &format!("/api/runtime-console/{route}"),
-        body,
-        Duration::from_secs(12),
-    )
-    .await
+    let path = if route == "coding-agent-permission" {
+        "/api/tools/call".to_owned()
+    } else {
+        format!("/api/runtime-console/{route}")
+    };
+    post(runtime, &path, body, Duration::from_secs(12)).await
 }
 
 // Native callers choose fixed routes and schemas; never expose a generic WebView dispatch.
@@ -247,6 +291,80 @@ mod tests {
             "workspace_unavailable"
         );
     }
+    #[test]
+    fn permission_bridge_uses_one_fixed_tool_and_exact_decision_schema() {
+        let expected = json!({"config_path":"/fixture/runner.toml","client_id":"runner","server_url":"http://127.0.0.1:62645"});
+        for decision in [
+            json!({"outcome":"selected","option_id":"provider-option"}),
+            json!({"outcome":"cancelled"}),
+        ] {
+            let mut request = decision.clone();
+            request["kind"] = "coding_agent_permission".into();
+            request["expected"] = expected.clone();
+            request["run_id"] = "wc_agent_run_fixture".into();
+            request["request_id"] = "wc_agent_permission_fixture".into();
+            let request: WorkspaceRequest = serde_json::from_value(request).unwrap();
+            let (route, body) = request_body(request, Some("runner")).unwrap();
+            assert_eq!(route, "coding-agent-permission");
+            assert_eq!(body["tool"], "respond_coding_agent_permission");
+            assert_eq!(body["params"]["outcome"], decision["outcome"]);
+            assert_eq!(body["params"]["run_id"], "wc_agent_run_fixture");
+            assert_eq!(body["params"]["request_id"], "wc_agent_permission_fixture");
+            assert_eq!(body["params"].get("option_id"), decision.get("option_id"));
+            assert!(body["params"].get("expected").is_none());
+        }
+        for decision in [
+            json!({"outcome":"selected"}),
+            json!({"outcome":"cancelled","option_id":"provider-option"}),
+        ] {
+            let mut request = decision;
+            request["kind"] = "coding_agent_permission".into();
+            request["expected"] = expected.clone();
+            request["run_id"] = "wc_agent_run_fixture".into();
+            request["request_id"] = "wc_agent_permission_fixture".into();
+            assert!(
+                request_body(serde_json::from_value(request).unwrap(), Some("runner")).is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_bridge_rejects_a_replaced_connection_before_reading_credentials_or_sending() {
+        let runtime = StoredRuntime {
+            server_url: "http://127.0.0.1:62645".into(),
+            runner_config: Some("/fixture/runner.toml".into()),
+            runner_client_id: Some("runner".into()),
+            server_env_file: None,
+            user_token_file: None,
+            project_id: None,
+            runtime_project_id: None,
+        };
+        let mut expected = crate::webcodex::settings::target(&runtime).unwrap();
+        expected.client_id = "replacement".into();
+        let request = WorkspaceRequest::CodingAgentPermission {
+            expected,
+            run_id: "wc_agent_run_fixture".into(),
+            request_id: "wc_agent_permission_fixture".into(),
+            outcome: webcodex_core::coding_agent::CodingAgentPermissionOutcome::Cancelled,
+            option_id: None,
+        };
+        let error = query(&runtime, request).await.unwrap_err();
+        // A transport or credential error would mean the old connection escaped the fence.
+        assert_eq!(
+            error.code,
+            crate::webcodex::settings::verify_target(
+                &runtime,
+                &crate::webcodex::settings::SettingsTarget {
+                    config_path: "/fixture/runner.toml".into(),
+                    client_id: "replacement".into(),
+                    server_url: runtime.server_url.clone(),
+                }
+            )
+            .unwrap_err()
+            .code
+        );
+    }
+
     #[test]
     fn request_vocabulary_is_closed_and_selectors_are_bounded() {
         assert!(serde_json::from_value::<WorkspaceRequest>(

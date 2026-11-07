@@ -9,11 +9,13 @@ import {
   Play,
   Server,
 } from "lucide-react";
-import { useRef, useEffect, useState } from "react";
+import { useRef, useEffect, useMemo, useState } from "react";
 import type { RuntimeLanguage } from "../../runtime_i18n.js";
 import { translate } from "../../runtime_i18n.js";
 import type { RuntimeV2Client } from "../api/client.js";
 import type { Availability, RuntimeOverview } from "../model/types.js";
+import { CodingAgentPermissionPanel } from "../../ui/CodingAgentPermissionPanel.js";
+import { codingAgentPermissionClient } from "../api/coding-agents.js";
 import { AgentsPanel } from "../components/AgentsPanel.js";
 import { CopyIdentity } from "../components/ui/CopyIdentity.js";
 import { TraceSearch } from "../components/TraceSearch.js";
@@ -30,7 +32,7 @@ const CONFIG_LABELS: Record<string, string> = {
   "continuation_wait_secs": "Continuation wait"
 };
 
-type RuntimeMode = "overview" | "agents";
+type RuntimeMode = "overview" | "agents" | "approvals";
 
 function buildAlignmentLabel(value: string | undefined, t: (source: string) => string): string {
   switch (value) {
@@ -79,6 +81,7 @@ export function RuntimeView({
   onUnauthorized,
 }: Props) {
   const t = (value: string) => translate(value, language);
+  const approvalClient = useMemo(() => codingAgentPermissionClient(client), [client]);
   const [mode, setMode] = useState<RuntimeMode>("overview");
   const selectionRef = useRef<HTMLDivElement | null>(null);
   useFlowingSelection(selectionRef, mode, { variant: "underline" });
@@ -117,6 +120,7 @@ export function RuntimeView({
         <button className={mode === "agents" ? "active" : ""} role="tab" aria-selected={mode === "agents"} onClick={() => setMode("agents")}>
           <Bot size={15} /> {t("Agents")}
         </button>
+        <button className={mode === "approvals" ? "active" : ""} role="tab" aria-selected={mode === "approvals"} onClick={() => setMode("approvals")}>{language.startsWith("zh") ? "权限审批" : "Approvals"}</button>
       </div>
 
       {mode === "overview" ? (
@@ -222,6 +226,8 @@ export function RuntimeView({
             <TraceSearch title="Call diagnostics" client={client} language={language} onSelectWindow={key => onOpenWindow?.(key)} />
           </section>
         </>
+      ) : mode === "approvals" ? (
+        <CodingAgentPermissionPanel identity={String(client.authorityRevision)} client={approvalClient} language={language} onUnauthorized={onUnauthorized} />
       ) : (
         <AgentsPanel client={client} language={language} onUnauthorized={onUnauthorized} selectedAgentId={requestedAgentId} onSelectedAgentConsumed={() => setRequestedAgentId("")} />
       )}

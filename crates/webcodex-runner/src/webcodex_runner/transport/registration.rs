@@ -530,6 +530,10 @@ pub(crate) fn build_register_request_with_provider_status(
         RunnerCapabilityId::CodingAgentRuns,
         !coding_agent_providers.is_empty(),
     );
+    capabilities.set(
+        RunnerCapabilityId::CodingAgentPermissionResponses,
+        !coding_agent_providers.is_empty(),
+    );
     let (mut tool_providers, revision) = hot.external_tools.registration_status();
     tool_providers.config_reload = hot.reload_status();
     (

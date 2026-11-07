@@ -34,6 +34,7 @@ use std::sync::Arc;
 use webcodex_core::runner_job_lifecycle::RunnerJobLifecycle;
 use webcodex_tool_contracts::tool_call::BrowserObserveToolCall;
 
+mod coding_agents;
 mod communication;
 mod goals;
 mod job_projection;
@@ -94,6 +95,10 @@ pub(crate) fn routes() -> Router {
     Router::new()
         .push(Router::with_path(api_path(RouteId::RuntimeConsoleOverview)).post(overview))
         .push(Router::with_path(api_path(RouteId::RuntimeConsoleRunner)).post(runner))
+        .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleCodingAgentRuns))
+                .post(coding_agents::list),
+        )
         .push(
             Router::with_path(api_path(RouteId::RuntimeConsoleBrowserStatus)).post(browser_status),
         )

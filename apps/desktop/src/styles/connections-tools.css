@@ -29,3 +29,10 @@
 .server-owned-apply p { margin: 6px 0 0; color: var(--ui-text-secondary); font-size: 14px; line-height: 1.6; }
 .server-owned-apply button { justify-self: end; }
 @media (max-width: 680px) { .server-owned-apply { grid-template-columns: 1fr; }.server-owned-apply button { justify-self: start; } }
+
+.codex-prepared-details {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: .85rem;
+  line-height: 1.5;
+}

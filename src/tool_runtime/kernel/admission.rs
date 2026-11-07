@@ -5,6 +5,7 @@ use crate::auth::AuthContext;
 use crate::tool_runtime::tool_definition::{
     runtime_tool_operator_extension_family, ToolOperatorExtensionFamily,
 };
+use webcodex_core::authority::SCOPE_CODING_AGENT_APPROVE;
 
 /// Shared scope projection for authenticated discovery surfaces. Operator
 /// extensions always require their declared authority; ordinary non-OAuth
@@ -18,6 +19,9 @@ pub(crate) fn runtime_tool_scope_allows_discovery(
         || matches!(
             crate::auth::scopes::oauth_scope_policy_for_runtime_tool(tool_name),
             OAuthToolScopePolicy::RequireAny(_)
+        )
+        || policy_requires_coding_agent_approval(
+            crate::auth::scopes::oauth_scope_policy_for_runtime_tool(tool_name),
         );
     !requires_check || check_runtime_tool_scope(auth, tool_name).is_ok()
 }
@@ -29,7 +33,7 @@ pub(crate) fn check_runtime_tool_scope(
     let policy = crate::auth::scopes::oauth_scope_policy_for_runtime_tool(tool_name);
     let Some(auth) = auth else {
         // Preserve historical unauthenticated compatibility for unrelated
-        // internal tools, but explicit Memory and administrator authority is
+        // internal tools, but explicit Memory, callback approval and administrator authority is
         // intentionally never inferred from surface presence or a missing
         // credential. This derives only from the canonical ToolDefinition
         // authority policy; it is not a tool-name registry.
@@ -57,6 +61,7 @@ pub(crate) fn check_runtime_tool_scope(
                     crate::auth::SCOPE_MEMORY_READ
                         | crate::auth::SCOPE_MEMORY_MANAGE
                         | crate::auth::SCOPE_ADMIN
+                        | SCOPE_CODING_AGENT_APPROVE
                 ) =>
             {
                 Some(scope)
@@ -67,6 +72,7 @@ pub(crate) fn check_runtime_tool_scope(
                     crate::auth::SCOPE_MEMORY_READ
                         | crate::auth::SCOPE_MEMORY_MANAGE
                         | crate::auth::SCOPE_ADMIN
+                        | SCOPE_CODING_AGENT_APPROVE
                 )
             }),
             _ => None,
@@ -79,6 +85,21 @@ pub(crate) fn check_runtime_tool_scope(
         }
         return Ok(());
     };
+
+    if policy_requires_coding_agent_approval(policy)
+        && (!matches!(
+            auth.kind,
+            crate::auth::AuthKind::Bootstrap
+                | crate::auth::AuthKind::ApiToken
+                | crate::auth::AuthKind::OAuth2Token
+        ) || auth.is_oauth_shared_key_subject()
+            || auth.is_project_scoped_model_subject())
+    {
+        return Err(ToolCallErrorStatus::InsufficientScope {
+            required_scope: Some(SCOPE_CODING_AGENT_APPROVE),
+            description: "ACP callback approval requires a managed-user or bootstrap credential with independent approval authority".to_string(),
+        });
+    }
 
     match policy {
         OAuthToolScopePolicy::RequireAny(scopes) => {
@@ -121,6 +142,14 @@ pub(crate) fn check_runtime_tool_scope(
                 })
             }
         }
+    }
+}
+
+fn policy_requires_coding_agent_approval(policy: OAuthToolScopePolicy) -> bool {
+    match policy {
+        OAuthToolScopePolicy::Require(scope) => scope == SCOPE_CODING_AGENT_APPROVE,
+        OAuthToolScopePolicy::RequireAll(scopes) => scopes.contains(&SCOPE_CODING_AGENT_APPROVE),
+        _ => false,
     }
 }
 

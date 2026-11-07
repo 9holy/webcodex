@@ -96,6 +96,14 @@ pub async fn ssh_resource_remove(
 }
 
 #[tauri::command]
+pub async fn prepare_codex_coding_agent(
+    state: State<'_, AppState>,
+    request: crate::coding_agents::CodexPrepareRequest,
+) -> DesktopResult<crate::coding_agents::PreparedCodexAgent> {
+    state.prepare_codex_coding_agent(request).await
+}
+
+#[tauri::command]
 pub async fn save_coding_agent(
     app: AppHandle,
     state: State<'_, AppState>,

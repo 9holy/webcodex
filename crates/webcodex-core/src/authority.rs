@@ -38,6 +38,9 @@ pub const SCOPE_PLUGIN_INVOKE: &str = "plugin:invoke";
 pub const SCOPE_PLUGIN_MANAGE: &str = "plugin:manage";
 pub const SCOPE_SSH_LOCAL: &str = "ssh:local";
 pub const SCOPE_CODING_AGENT_RUN: &str = "coding_agent:run";
+/// Explicit decisions for a caller-owned live provider callback. Run execution
+/// authority and trusted_agent never imply this independent human-review grant.
+pub const SCOPE_CODING_AGENT_APPROVE: &str = "coding_agent:approve";
 pub const SCOPE_AGENT_REGISTER: &str = "agent:register";
 pub const SCOPE_ADMIN: &str = "admin";
 pub const SCOPE_AGENT_POLL: &str = "agent:poll";
@@ -142,6 +145,7 @@ pub const KNOWN_SCOPES: &[&str] = &[
     SCOPE_PLUGIN_MANAGE,
     SCOPE_SSH_LOCAL,
     SCOPE_CODING_AGENT_RUN,
+    SCOPE_CODING_AGENT_APPROVE,
     SCOPE_ACCOUNT_MANAGE,
     SCOPE_AGENT_REGISTER,
     SCOPE_AGENT_POLL,

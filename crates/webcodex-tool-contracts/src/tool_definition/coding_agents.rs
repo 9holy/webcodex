@@ -75,7 +75,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             false,
             super::ToolSessionEvidencePolicy::NONE,
         ),
-        "Observe one existing CodingAgentRun with bounded events and Run-bound tokens for only-new follow-ups; history loss/reset is explicit. waiting_permission has no WebCodex approval UI/API: at its deadline the Runner answers ACP Cancelled. Observe the same Run for the provider's terminal outcome or explicitly cancel_coding_agent. Observation never starts, retries, resumes or approves ACP work.",
+        "Observe one existing CodingAgentRun with bounded events and Run-bound tokens; history loss/reset is explicit. waiting_permission may include a complete pending_permission for explicit human review. respond_coding_agent_permission requires separate approval authority; never infer consent. Timeout/cancel fail closed. Observe the same Run for terminal outcome; observation never starts, retries, resumes or approves work.",
     ),
     permission_risk(
         model_spec(
@@ -117,6 +117,43 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
         ),
         PERMISSION_RISK_WRITE,
     ),
+    model_spec(
+        require_all_scopes(
+            def(
+                "respond_coding_agent_permission",
+                super::ToolAuditPolicy::typed_fields(&[
+                    super::ToolAuditResultField::value("run_id"),
+                    super::ToolAuditResultField::value("project"),
+                    super::ToolAuditResultField::value("provider_id"),
+                    super::ToolAuditResultField::value("request_id"),
+                    super::ToolAuditResultField::value("outcome"),
+                    super::ToolAuditResultField::value("response_accepted"),
+                    super::ToolAuditResultField::value("error_kind"),
+                ]),
+                ModelVisible,
+                TOOL_CATEGORY_CODING_AGENT,
+                None,
+                TOOL_PROVIDER_RUNNER,
+                super::ToolSemanticContract {
+                    effect: super::ToolEffect::Mutate,
+                    risk: super::ToolRisk::RunControl,
+                    // No per-action PermissionEvaluator re-admission. Explicit
+                    // approval scope, exact callback and user selection own this
+                    // boundary; trusted_agent can never supply the selection.
+                    approval: super::ToolApprovalPolicy::InheritFromStart,
+                    idempotency: super::ToolIdempotency::FencedReplay,
+                },
+                Some(webcodex_core::authority::SCOPE_CODING_AGENT_APPROVE),
+                false,
+                NoPath,
+                true,
+                false,
+                super::ToolSessionEvidencePolicy::NONE,
+            ),
+            &[CODING_AGENT_RUN, webcodex_core::authority::SCOPE_CODING_AGENT_APPROVE, webcodex_core::authority::SCOPE_PROJECT_WRITE],
+        ),
+        "Answer one exact pending ACP callback on an owned Run after explicit review of complete details. Requires coding_agent:approve and Run/Project authority. Select an advertised option or cancel; never infer consent. Same request+decision returns its receipt; stale/expired/changed requests fail closed. response_accepted is receipt only: observe the same Run. Own Host-reviewed callable; no gateway fallback.",
+    ).with_individual_host_review(179),
     model_spec(
         def(
             "diagnose_coding_agent",

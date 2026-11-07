@@ -1425,6 +1425,7 @@ async fn detached_process_lost_initiation_after_server_restart_recovers_same_job
         detached_process_jobs: true,
         job_state_reconciliation: true,
         coding_agent_runs: false,
+        coding_agent_permission_responses: false,
         ..Default::default()
     };
     restarted

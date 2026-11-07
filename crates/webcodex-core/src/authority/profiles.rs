@@ -123,6 +123,7 @@ mod tests {
                 SCOPE_ACCOUNT_MANAGE,
                 SCOPE_JOB_DETACH,
                 SCOPE_PLUGIN_MANAGE,
+                SCOPE_CODING_AGENT_APPROVE,
             ] {
                 assert!(!profile.contains(&forbidden));
             }

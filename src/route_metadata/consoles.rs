@@ -67,6 +67,15 @@ pub(super) const PUBLIC_WEB_ROUTES: &[RouteSpec] = &[
 // Runtime Console routes use ordinary delegated runtime/project/session scopes.
 pub(super) const ROUTES: &[RouteSpec] = &[
     route(
+        RuntimeConsoleCodingAgentRuns,
+        Post,
+        "/api/runtime-console/coding-agent-runs",
+        Require(webcodex_core::authority::SCOPE_CODING_AGENT_RUN),
+        RuntimeConsole,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
         RuntimeConsoleExtensions,
         Post,
         "/api/runtime-console/extensions",

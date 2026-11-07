@@ -2492,28 +2492,30 @@ fn mcp_coding_agent_permission_guidance_survives_compact_discovery() {
         }
         crate::mcp::discovery::compact_tool(&mut descriptor);
         let description = descriptor["description"].as_str().unwrap();
-        if app_only {
-            assert!(description.len() <= 100);
-            for fact in [
+        let facts: &[&str] = if app_only {
+            // The App consumes the exact typed response schema. Its transport
+            // descriptor retains the selection boundary without duplicating
+            // the full model-facing operational guidance.
+            assert!(description.chars().count() <= 100);
+            &[
                 "same Run",
-                "never redispatch",
+                "pending_permission",
+                "separate approval",
+                "Timeout/cancel fail closed",
+            ]
+        } else {
+            assert_eq!(description, canonical);
+            &[
                 "waiting_permission",
-                "no approval UI/API",
-                "ACP Cancelled",
-            ] {
-                assert!(description.contains(fact), "{fact}: {description}");
-            }
-            continue;
-        }
-        assert_eq!(description, canonical);
-        for fact in [
-            "waiting_permission",
-            "no WebCodex approval UI/API",
-            "answers ACP Cancelled",
-            "same Run",
-            "cancel_coding_agent",
-            "never starts, retries, resumes or approves",
-        ] {
+                "pending_permission",
+                "explicit human review",
+                "separate approval authority",
+                "Timeout/cancel fail closed",
+                "same Run",
+                "never starts, retries, resumes or approves",
+            ]
+        };
+        for &fact in facts {
             assert!(description.contains(fact), "{fact}: {description}");
         }
     }

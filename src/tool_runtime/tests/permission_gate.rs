@@ -9,6 +9,84 @@ use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+#[tokio::test]
+async fn provider_callback_approval_requires_independent_managed_scope_even_when_trusted() {
+    use super::super::kernel::{check_runtime_tool_scope, runtime_tool_scope_allows_discovery};
+    use crate::auth::{AuthContext, AuthKind};
+    use webcodex_core::authority::{
+        SCOPE_CODING_AGENT_APPROVE, SCOPE_CODING_AGENT_RUN, SCOPE_PROJECT_WRITE,
+    };
+    use webcodex_core::coding_agent::CodingAgentPermissionDecision;
+
+    let runtime = ToolRuntime::new_for_tests()
+        .with_permission_evaluator(PermissionEvaluator::with_mode(AuthorityMode::TrustedAgent));
+    let tool = "respond_coding_agent_permission";
+    assert!(check_runtime_tool_scope(None, tool).is_err());
+    assert!(!runtime_tool_scope_allows_discovery(None, tool));
+    let absent = runtime
+        .coding_agent_respond_permission(
+            "wc_agent_run_unknown".into(),
+            "wc_agent_permission_unknown".into(),
+            CodingAgentPermissionDecision::cancelled(),
+            None,
+        )
+        .await;
+    assert_eq!(absent.output["error_kind"], "permission_denied");
+
+    for scopes in [
+        vec![SCOPE_CODING_AGENT_RUN, SCOPE_PROJECT_WRITE],
+        vec![SCOPE_CODING_AGENT_APPROVE, SCOPE_CODING_AGENT_RUN],
+        vec![SCOPE_CODING_AGENT_APPROVE, SCOPE_PROJECT_WRITE],
+    ] {
+        let mut auth = AuthContext::new(AuthKind::ApiToken);
+        auth.scopes = scopes.into_iter().map(str::to_owned).collect();
+        assert!(check_runtime_tool_scope(Some(&auth), tool).is_err());
+        assert!(!runtime_tool_scope_allows_discovery(Some(&auth), tool));
+    }
+    for kind in [
+        AuthKind::OpenAnonymous,
+        AuthKind::SharedKey,
+        AuthKind::ProjectCredential,
+        AuthKind::AgentToken,
+        AuthKind::AccountCredential,
+    ] {
+        let mut auth = AuthContext::new(kind);
+        // Even a wrongly assembled lightweight context must not turn explicit
+        // string scopes into a managed approval principal.
+        auth.scopes = [
+            SCOPE_CODING_AGENT_APPROVE,
+            SCOPE_CODING_AGENT_RUN,
+            SCOPE_PROJECT_WRITE,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert!(check_runtime_tool_scope(Some(&auth), tool).is_err());
+    }
+    let mut allowed = AuthContext::new(AuthKind::ApiToken);
+    allowed.user_id = Some("owner".into());
+    allowed.username = Some("owner".into());
+    allowed.scopes = [
+        SCOPE_CODING_AGENT_APPROVE,
+        SCOPE_CODING_AGENT_RUN,
+        SCOPE_PROJECT_WRITE,
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect();
+    assert!(check_runtime_tool_scope(Some(&allowed), tool).is_ok());
+    assert!(runtime_tool_scope_allows_discovery(Some(&allowed), tool));
+    let unknown = runtime
+        .coding_agent_respond_permission(
+            "wc_agent_run_unknown".into(),
+            "wc_agent_permission_unknown".into(),
+            CodingAgentPermissionDecision::cancelled(),
+            Some(&allowed),
+        )
+        .await;
+    assert_eq!(unknown.output["error_kind"], "unknown_coding_agent_run");
+}
+
 fn write_tool_call(
     project: String,
     path: &str,

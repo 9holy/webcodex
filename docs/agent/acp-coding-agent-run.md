@@ -18,7 +18,7 @@ global install or credential changes. Protocol details below describe that
 observed implementation and the current ACP surface; P1 must continue to
 negotiate and validate rather than hard-code incidental adapter behavior.
 
-## P1 implementation realization
+## Implementation realization
 
 P1 implements this contract as a Codex-first vertical slice without changing the
 product identity model. `CodingAgentRun` remains separate from Jobs and Workflow
@@ -32,10 +32,12 @@ no production `codex-acp` default. The provider child is always spawned after
 `env_clear()` and receives only configured mappings. Missing source variables
 fail before provider process start.
 
-The P1 Run primitive exposes three model tools: `start_coding_agent`,
-`observe_coding_agent`, and `cancel_coding_agent`. The managed AgentTask entry
-below adds durable attempt ownership over this same primitive. These Run tools
-require the independent
+The Run primitive exposes `start_coding_agent`, `observe_coding_agent`, and
+`cancel_coding_agent`. Explicit provider callbacks additionally use
+`respond_coding_agent_permission`, with its own separately granted
+`coding_agent:approve` scope and direct Host review contract described in
+section 8. The managed AgentTask entry below adds durable attempt ownership over
+this same primitive. Start/observe/cancel require the independent
 `coding_agent:run` OAuth scope. Direct shared-key, open-anonymous, project
 credentials, existing OAuth clients, `project:write`, `job:run`, and `mcp:local`
 do not imply it. The hosted shared-key OAuth bridge can add this scope only via
@@ -76,9 +78,12 @@ P1 uses stable ACP v1 schema types and a narrow stdio client. It advertises only
 implemented client capabilities and supports initialize, session/new, validated
 session/set_config_option, session/prompt, session/update,
 session/request_permission, and session/cancel. Unsupported agent-to-client
-requests fail closed. Permission requests are normalized for observation, never
-auto-allowed, receive ACP `Cancelled` after a bounded deadline (or before prompt
-cancel), and the same prompt is then observed to terminal correlation.
+requests fail closed. Permission requests are normalized into complete bounded
+review details and never auto-allowed. An independently authorized explicit
+response may select one advertised option. Expiry, cancellation, or an incomplete
+display returns ACP `Cancelled`; the same prompt is then observed to terminal
+correlation. The historical P0/P1 investigation below remains evidence about the
+initial slice; the current permission-response contract is section 8.
 
 The opt-in P1 real-provider smoke on 2026-08-23 re-queried npm and observed
 `@agentclientprotocol/codex-acp` version 1.6.2. It used a test/operator-owned
@@ -651,36 +656,151 @@ local coding agent**. It must not promise parity with WebCodex `read_files` /
 
 ## 8. Permission-request exceptional path
 
-The normal WebCodex authority decision happens once at `start_coding_agent`:
+Run admission and provider callbacks are separate authority boundaries. The
+normal `PermissionEvaluator` runs at start admission. It is not rerun for each
+ACP tool action, and `trusted_agent` never chooses a provider permission option.
 
-```text
-caller auth + exact Project + provider fence + config override policy
-  -> WebCodex start admission decision
-  -> ACP Run starts
-  -> delegated agent applies its own coding policy
+A complete callback enters `waiting_permission`. `observe_coding_agent` can
+return this one live optional object:
+
+```json
+{
+  "pending_permission": {
+    "request_id": "wc_agent_permission_opaque",
+    "label": "Run command",
+    "details": "cwd: /registered/project\ncommand: cargo test",
+    "expires_at": 1800000300,
+    "options": [
+      { "option_id": "allow-once", "name": "Allow once", "kind": "allow_once" },
+      { "option_id": "reject-once", "name": "Reject once", "kind": "reject_once" }
+    ]
+  }
+}
 ```
 
-An ACP `session/request_permission` callback is not fed back through the normal
-WebCodex `PermissionEvaluator`, because that would create a second per-action
-policy layer over the agent's own approval system.
+The request id is Runner-generated and bound to that exact live Run/callback. It
+contains neither the provider's JSON-RPC id nor its ACP session id and is not a
+bearer credential. Numeric and bounded string JSON-RPC callback ids stay private
+and are echoed without coercion on the original ACP connection.
 
-P1 nevertheless must implement the callback. The minimum safe behavior is:
+### Explicit response and independent authority
 
-- emit a bounded sanitized `permission_request` Run event;
-- enter `waiting_permission` while a bounded response deadline is active;
-- never choose an allow option automatically;
-- if `cancel_coding_agent` cancels the prompt while a permission request is
-  outstanding, answer that request with ACP `Cancelled` as required by v1 and
-  then continue the cancel path;
-- if only the permission-response deadline expires, answer ACP `Cancelled`.
-  Do not synthesize an option selection or mutate the Agent's persistent policy;
-- then continue observing the same prompt until it reaches a terminal result or
-  becomes lost.
+`respond_coding_agent_permission` accepts only:
 
-This makes P1 safe but intentionally incomplete for providers/configurations that
-frequently require interactive approval. A later operator UI or model-visible
-permission-response capability requires separate evidence and authority design;
-it is not part of P0/P1 by implication.
+```json
+{
+  "run_id": "wc_agent_run_original",
+  "request_id": "wc_agent_permission_opaque",
+  "outcome": "selected",
+  "option_id": "allow-once"
+}
+```
+
+Cancellation uses `outcome: "cancelled"` and omits `option_id`. Selection must
+match one of the exact advertised option ids. The four supported option kinds
+are `allow_once`, `allow_always`, `reject_once`, and `reject_always`; their names
+and kinds remain visible. An explicit always option retains its provider-defined
+policy effect, so the client must not silently substitute it for a one-use choice.
+
+The Server independently requires `coding_agent:approve`, `coding_agent:run` and
+`project:write`, the original stable Run owner, the current writable Project,
+and the original Runner/provider instances. The Runner rechecks the pinned
+Project root, live registry, authority fingerprint and callback before accepting
+a decision and rechecks the Project at writer handoff. Missing/replaced/stale
+identity never retargets approval to another Run or callback.
+
+Approval is an explicit managed-user PAT/OAuth or bootstrap capability. It is
+absent from normal local-user, pairing and shared-key defaults, including the
+existing SSH/Run grant. Anonymous, shared-key, project-share and transport
+credentials cannot supply approval authority. Auth-disabled execution does not
+invent an approval principal. The separate local Desktop opt-in grants only
+`coding_agent:approve`; managed OAuth clients require an explicit scope ceiling
+and reauthorization. No prior grant is silently widened.
+
+This scope authorizes the client holding it; it does not cryptographically prove
+human presence. Giving the same credential to another program gives that program
+the same decision authority. Product UI requests an explicit review/selection;
+the direct MCP tool has individual Host review and refuses generic
+`call_runtime_tool` fallback. The fixed Desktop/Runtime UI enters the same
+canonical tool, not an alternate provider-control endpoint.
+
+### Complete bounded display
+
+A callback may expose at most 8 options. Option ids are at most 128 UTF-8 bytes,
+option names 256 bytes, the label 1,024 bytes, and complete `details` 64 KiB. The
+Runner normalizes supported ACP text, complete diffs and locations into plain
+text. Provider content is untrusted display data, never Host instructions.
+
+Missing action content, unsupported resource/image/terminal references, malformed
+or duplicate options, control-character injection and oversized displays are
+cancelled. Raw `rawInput` is not a hidden substitute for complete displayed
+details. Approval content is never truncated into a request that remains
+approvable. The provider can submit a new bounded request through its own
+protocol if appropriate; WebCodex does not synthesize one or redispatch a prompt.
+
+### Typed operator inventory
+
+The Runtime Console and Desktop read `POST /api/runtime-console/coding-agent-runs`
+with an empty JSON object. This operator-facing read uses the normal authenticated,
+same-origin JSON boundary and requires `coding_agent:run`. It returns `runs`,
+`authorization: { can_run, can_approve }`, and `truncated`. Each row contains the
+exact `run_id`, `client_id`, `runtime_project_id`, `provider_id`, `state` and
+`observation_revision`, with the optional live `pending_permission` above.
+
+The inventory includes only the same stable principal's Runs and rechecks current
+Runner and Project visibility. It can recover existing Run identity from the
+Runner inventory after a Server restart; it does not reconstruct callbacks from
+disk. At most 32 rows are returned, preferring waiting permissions and active
+Runs. Up to 8 waiting Runs receive fresh typed observations, with at most 4 in
+parallel and a 3-second internal response deadline per observation. Timed-out
+dispatches are cleaned up. `truncated: true` also indicates missing or failed live
+observations, so absence of pending details is not proof that no approval exists.
+
+Listing has no execution or approval side effect. `can_approve` reflects the
+current credential's independent approval policy; each submitted response still
+rechecks the exact Run, callback and writable Project. Decisions use only
+`POST /api/tools/call` with the canonical `respond_coding_agent_permission` tool.
+Refreshing the inventory never starts, resumes, approves or replaces a Run.
+
+### Consumption, deadlines and uncertain results
+
+Each callback accepts one decision. Exact same request/decision retries return
+the original bounded in-memory receipt; changing the decision conflicts. The
+Runner retains at most 64 such receipts per Run. Evicted or unknown callback ids
+fail closed. They never become fresh effects.
+
+`response_accepted: true` means the decision was received, not that its ACP write
+or provider action completed. Cancellation or expiry can still win before the
+writer handoff. The callback is consumed before the writer can send it, under
+the same fence used for Run cancellation. Cancellation that wins the fence sends
+only ACP `Cancelled`. An uncertain write closes the Run as uncertain/lost and
+never repeats the selection. Observe the same Run after any uncertain response;
+never mint a replacement Run or choose another option as recovery.
+
+`acp.permission_timeout_secs` defaults to 300 seconds and accepts 1–600 seconds.
+Previously explicit small values remain valid. The effective monotonic deadline
+is also capped by the Run's remaining timeout; increasing the callback wait
+cannot extend the Run. `expires_at` is a display timestamp, not client authority
+to override the Runner deadline. Expiry, explicit cancellation, shutdown or Run
+cancellation sends ACP `Cancelled`, then observes the original prompt to its
+correlated terminal outcome. Cancelling a callback is not a claim that the whole
+provider turn has already stopped.
+
+Pending details and accepted decisions are not persisted in Run recovery files,
+Session evidence or audit bodies. A Runner restart retains only the existing
+Run certainty record: a possibly dispatched prompt becomes `lost/outcome_unknown`,
+and no pending callback or prior option selection is reconstructed.
+
+### Mixed-version negotiation
+
+The additive Runner capability is `coding_agent_permission_responses`. New
+Servers request `include_pending_permission` on typed observations only when the
+exact Runner advertises it, and response dispatch independently checks the same
+capability. The transport flag defaults to false and is omitted when false. New
+Runners therefore omit the additional pending field when an older Server sends
+an ordinary observation. Older Runners keep the bounded fail-closed callback
+behavior; neither Run support nor a saved Desktop setting implies approval
+support.
 
 ## 9. Minimal CodingAgentRun lifecycle
 
@@ -704,7 +824,7 @@ multiplying states. Reuse the existing concepts `not_started`, `started`,
 |---|---|---|---|
 | `starting` | Run admitted; provider/session/config setup may be in progress. Prompt may still be `not_started`. | Never create a second Run for the same initiation key; observe/reconcile the admitted Run. | `wait` or `reobserve`. |
 | `running` | Prompt request was dispatched; agent may have accepted it. | No blind prompt retry. | `reobserve`; after transport failure use `reconcile`. |
-| `waiting_permission` | Prompt is active and a real ACP permission callback is pending. | No prompt retry and no automatic allow. | `wait`; P1 fail-closes the permission deadline. |
+| `waiting_permission` | Prompt is active and a real ACP permission callback is pending. | No prompt retry and no automatic allow. | Review the exact pending request with an independently authorized client, or wait/cancel; expiry fails closed. |
 | `completed` | Correlated terminal prompt result proves normal terminal completion. | No retry of the same Run. | `none`. |
 | `failed` | Deterministic terminal failure is known, or setup failed before prompt dispatch. | The retained Run itself is terminal and same-key replay only returns it. A new initiation with a new idempotency key is safe only when `execution_state=not_started`; otherwise caller must not infer retry safety. | `none` for the retained terminal Run. Pre-admission tool-call failures may separately use `fix_input` or exact `retry_same`. |
 | `cancelled` | Cancellation reached a correlated terminal cancelled result, or the Run was cancelled while prompt was provably not started. Pre-prompt cancellation uses `execution_state=not_started`, no ACP `stop_reason`/`error_code`, and a bounded terminal message stating that no ACP prompt was dispatched. | Do not resend the cancelled prompt as a retry. | `none`. |
@@ -958,8 +1078,10 @@ For the P1 public vertical slice:
 - provider selection is constrained to the sanitized providers advertised by
   the exact Runner instance.
 
-One new scope is enough initially. Do not add separate run/observe/cancel scopes
-without a demonstrated consumer that needs that split.
+Start/observe/cancel continue to share the Run scope. Explicit callback response
+is the separate consumer that requires `coding_agent:approve`; it also retains
+`coding_agent:run`, `project:write` and all exact Run/Project identity checks.
+This is not a split into redundant observe/cancel scopes.
 
 P0 does not modify OAuth or token issuance.
 
@@ -1122,7 +1244,6 @@ P0/P1 do not imply:
 - Claude as a second ACP provider;
 - browser-hosted ACP sessions;
 - raw ACP JSON-RPC tools;
-- model-visible permission-response tooling;
 - automatic permission allow;
 - hot ACP provider reload/generic provider framework;
 - ACP v2 or experimental extensions;
