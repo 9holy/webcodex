@@ -44,12 +44,14 @@ The upstream project's community recognition is retained below:
 
 ## Start using WebCodex
 
-For a temporary one-repository trial, start with [Quick Trial](docs/QUICK_START.md) and `webcodex share`. For a persistent setup, the unified installer workflow below is under development; see the [validation status](docs/unified-deployment-validation.md) before choosing an artifact. Once a validated installer is available, choose the setup that matches where your code lives:
+For a persistent setup, download the complete installer for your operating system and architecture from [this fork's Releases](https://github.com/9holy/webcodex/releases). Choose the setup that matches where your code lives:
 
 - **One computer:** install WebCodex on your personal workstation, open Desktop, and follow [Unified installation](docs/unified-installation.md). This setup includes Desktop, CLI, Server, and Runner in one platform package.
 - **Several computers:** install the same package on the machine that will host the WebCodex Server and on each machine that owns repositories. Follow [Unified installation](docs/unified-installation.md#several-computers) and [Deployment validation](docs/unified-deployment-validation.md).
 
-The build pipeline defines unified Windows NSIS, macOS package, and Debian 12 / Ubuntu 22.04+ `.deb` installer targets for x64 and arm64. The six installer variants still require native build and installation acceptance before release. Real-machine installation, reboot persistence, GUI behavior, and upgrade have not been accepted across all three platforms; this documentation makes no claim of identical cross-platform behavior. Published files for this fork are listed in [GitHub Releases](https://github.com/9holy/webcodex/releases). The [`download/`](download/README.md) directory contains static page source only; the [download-page workflow](https://github.com/9holy/webcodex/actions/workflows/download-page.yml) builds a Release-manifest-based GitHub Actions artifact after publication, but does not host or deploy a page. For a source preview, check out the exact feature or release revision you intend to evaluate and follow [Desktop development](docs/DESKTOP_DEVELOPMENT.md#linux-source-preview-against-an-existing-server).
+The complete installer includes Desktop, CLI, Server, and Runner. On Windows, use the `webcodex-unified-…-win32-x64.exe` file for a typical Intel/AMD PC, or `win32-arm64.exe` for an ARM PC. For an existing installation, follow [Desktop installation and upgrades](docs/desktop-install.md) and the selected Release's notes before upgrading.
+
+Each Release lists its available files and validation evidence. Native builds and automated installation checks do not cover every real desktop, reboot, or upgrade scenario; the [validation checklist](docs/unified-deployment-validation.md) explains those boundaries. For a temporary one-repository trial, see [Quick Trial](docs/QUICK_START.md) and `webcodex share`. For a source preview, follow [Desktop development](docs/DESKTOP_DEVELOPMENT.md#linux-source-preview-against-an-existing-server) at the revision you intend to evaluate.
 
 For Linux machines that join an existing Server without Desktop, see [Runtime installation and CLI join](docs/runtime-installation.md). For advanced self-hosting, npm/runtime archives, Docker, or historical release artifacts, see [Deployment](docs/DEPLOYMENT.md).
 
@@ -103,7 +105,7 @@ This chart tracks the upstream [yyjeqhc/webcodex](https://github.com/yyjeqhc/web
 
 ## Platform packages
 
-The unified installer targets Windows NSIS, macOS, and Debian 12 / Ubuntu 22.04+ `.deb` on x64 and arm64. The build pipeline defines these targets; the six installer variants still require native build and installation acceptance before release. See [Unified installation](docs/unified-installation.md) and the [validation checklist](docs/unified-deployment-validation.md). Existing release artifacts and npm/Docker deployment paths remain documented as advanced historical/current compatibility references in [Deployment](docs/DEPLOYMENT.md).
+Complete installer formats are Windows `.exe`, macOS `.pkg`, and Linux `.deb` / `.rpm`, with x64 and arm64 variants. Download the files actually attached to the [selected Release](https://github.com/9holy/webcodex/releases), then follow [Unified installation](docs/unified-installation.md) for supported systems and setup. Separate Desktop installers and runtime archives are also available; advanced npm/Docker deployment paths are described in [Deployment](docs/DEPLOYMENT.md). The [`download/`](download/README.md) directory contains download-page source; the public download destination for this fork is GitHub Releases.
 
 ## Documentation
 
