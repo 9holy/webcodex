@@ -22,7 +22,7 @@ function download(overrides: Partial<UpdateDownloadStatus> = {}): UpdateDownload
     cancelled: false, ...overrides };
 }
 function status(value = download()): UpdateStatus {
-  return { state: "available", latest: { version: "0.5.0", runtime_version: "0.4.9", release_url: "https://github.com/yyjeqhc/webcodex/releases/tag/v0.5.0", compatibility: "runtime_compatible" },
+  return { release_repository: "9holy/webcodex", state: "available", latest: { version: "0.5.0", runtime_version: "0.4.9", release_url: "https://github.com/9holy/webcodex/releases/tag/v0.5.0", compatibility: "runtime_compatible" },
     update_available: true, show_banner: true, cached: false, last_check_at_ms: 100, manual_error: null,
     automatic_download: true, download: value };
 }

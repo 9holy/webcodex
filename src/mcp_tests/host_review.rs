@@ -463,6 +463,75 @@ async fn host_review_sidecar_forms_are_rejected_on_direct_and_gateway_calls() {
 }
 
 #[tokio::test]
+async fn host_review_sidecar_failure_records_specific_reason_without_effects() {
+    let (_temp, runtime) = review_runtime(true, true);
+    let auth = review_auth("review-diagnostic-owner");
+    let created = runtime.create_goal_with_plan(
+        Some(&auth),
+        crate::db::NewGoal {
+            title: "Diagnostic refusal".into(),
+            objective: "Reject before any sidecar effect".into(),
+            controller_agent_id: None,
+            completion_conditions: vec![],
+            steps: vec![crate::db::NewGoalStep {
+                id: "inspect".into(),
+                title: "Inspect".into(),
+            }],
+            idempotency_key: "diagnostic-refusal-goal".into(),
+        },
+    );
+    assert!(created.success);
+    let goal_id = created.output["goal"]["summary"]["goal_id"]
+        .as_str()
+        .unwrap();
+    for (wrapper, expected_kind) in [
+        (
+            json!({"control":{"before":{"goal_progress":{
+                "goal_id":goal_id, "expected_revision":1, "completed_step_ids":["inspect"],
+                "summary":"PRIVATE_SIDECAR_TEXT", "idempotency_key":"private-sidecar-diagnostic"
+            }}}}),
+            "direct_host_review_required",
+        ),
+        (
+            json!({"direct_host_review_required: PRIVATE_FIELD":true}),
+            "invalid_arguments",
+        ),
+    ] {
+        let mut telemetry = None;
+        let outcome = handle_mcp_request_with_lifecycle(
+            &runtime,
+            rpc(
+                "tools/call",
+                Some(json!(29)),
+                mcp_2026_params(json!({"name":"get_runtime_status", "arguments":{"_wc":wrapper}})),
+            ),
+            Some(&auth),
+            McpProtocolEra::Stateless2026,
+            HostFileImportTrust::Untrusted,
+            None,
+            None,
+            Some(&mut telemetry),
+            true,
+            true,
+            None,
+        )
+        .await;
+        assert!(matches!(outcome, McpOutcome::BadRequest(_)));
+        let telemetry = telemetry.expect("pre-dispatch refusal retains its bounded reason");
+        assert_eq!(telemetry.error_kind.as_deref(), Some(expected_kind));
+        assert_eq!(telemetry.execution_state.as_deref(), Some("not_started"));
+        assert!(!telemetry.success);
+        assert!(!serde_json::to_string(&telemetry)
+            .unwrap()
+            .contains("PRIVATE"));
+        let goal = runtime.get_goal(Some(&auth), goal_id.to_string());
+        assert!(goal.success);
+        assert_eq!(goal.output["goal"]["summary"]["revision"], 1);
+        assert_eq!(agent_count(&runtime, Some(&auth)), 0);
+    }
+}
+
+#[tokio::test]
 async fn host_review_retained_session_message_sidecar_executes_and_replays_through_mcp() {
     for apps in [false, true] {
         for gateway in [false, true] {

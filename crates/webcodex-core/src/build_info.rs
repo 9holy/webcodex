@@ -6,8 +6,11 @@ use serde::Serialize;
 /// and downloaded manifests cannot select a different update authority.
 pub const RELEASE_REPOSITORY: &str = match option_env!("WEBCODEX_RELEASE_REPOSITORY") {
     Some(repository) => repository,
-    None => "yyjeqhc/webcodex",
+    None => "9holy/webcodex",
 };
+
+/// Attribution stays with the original project, independently of the publisher.
+pub const UPSTREAM_REPOSITORY: &str = "yyjeqhc/webcodex";
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BuildInfo {

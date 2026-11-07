@@ -19,19 +19,28 @@ pub fn directory(path: &Path) -> DesktopResult<()> {
 }
 
 pub fn url(url: &str) -> DesktopResult<()> {
+    validate_url(url)?;
+    open_literal(std::ffi::OsStr::new(url))
+}
+
+pub(crate) fn validate_url(url: &str) -> DesktopResult<()> {
     let parsed = url::Url::parse(url).map_err(|_| unavailable())?;
     let local = matches!(
         parsed.host_str(),
         Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
     );
-    let release_repository = format!("/{}", webcodex_core::build_info::RELEASE_REPOSITORY);
     let github = parsed.scheme() == "https"
         && parsed.host_str() == Some("github.com")
         && parsed.port().is_none()
-        && (parsed.path() == "/yyjeqhc/webcodex"
-            || parsed.path().starts_with("/yyjeqhc/webcodex/")
-            || parsed.path() == release_repository
-            || parsed.path().starts_with(&format!("{release_repository}/")));
+        && [
+            webcodex_core::build_info::RELEASE_REPOSITORY,
+            webcodex_core::build_info::UPSTREAM_REPOSITORY,
+        ]
+        .into_iter()
+        .any(|repository| {
+            let root = format!("/{repository}");
+            parsed.path() == root || parsed.path().starts_with(&format!("{root}/"))
+        });
     if (!local && !github)
         || !matches!(parsed.scheme(), "http" | "https")
         || !parsed.username().is_empty()
@@ -44,7 +53,7 @@ pub fn url(url: &str) -> DesktopResult<()> {
     if local && parsed.path() != "/runtime" && parsed.path() != "/runtime/" {
         return Err(unavailable());
     }
-    open_literal(std::ffi::OsStr::new(url))
+    Ok(())
 }
 
 fn open_literal(target: &std::ffi::OsStr) -> DesktopResult<()> {
@@ -89,5 +98,33 @@ fn open_literal(target: &std::ffi::OsStr) -> DesktopResult<()> {
             let _ = child.wait();
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_navigation_admits_only_the_compiled_publisher_and_upstream() {
+        let publisher = webcodex_core::build_info::RELEASE_REPOSITORY;
+        for repository in [publisher, webcodex_core::build_info::UPSTREAM_REPOSITORY] {
+            for suffix in ["", "/releases", "/releases/latest", "/issues/new"] {
+                assert!(validate_url(&format!("https://github.com/{repository}{suffix}")).is_ok());
+            }
+        }
+        for url in [
+            format!("https://github.com/{publisher}-untrusted/releases"),
+            format!("https://github.com/{publisher}?redirect=other"),
+            format!("https://github.com/{publisher}#fragment"),
+            format!("http://github.com/{publisher}"),
+            format!("https://github.com:8443/{publisher}"),
+            format!("https://user@github.com/{publisher}"),
+            format!("https://github.com.invalid/{publisher}"),
+        ] {
+            assert!(validate_url(&url).is_err(), "{url}");
+        }
+        assert!(validate_url("http://127.0.0.1:4000/runtime").is_ok());
+        assert!(validate_url("http://127.0.0.1:4000/admin").is_err());
     }
 }

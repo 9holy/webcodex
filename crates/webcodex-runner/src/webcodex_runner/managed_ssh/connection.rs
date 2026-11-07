@@ -1,6 +1,6 @@
 use super::*;
 use crate::webcodex_runner::shutdown::lock_unpoison;
-use crate::webcodex_runner::ssh_credentials::{ConnectionCandidate, HostKey};
+use crate::webcodex_runner::ssh_credentials::{AskpassLease, ConnectionCandidate, HostKey};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -353,18 +353,29 @@ fn scan_host_keys(
     Ok(keys.into_values().collect())
 }
 
+fn probe_command(
+    connection: &ManagedSshConnection,
+) -> Result<(Command, Option<AskpassLease>), &'static str> {
+    let mut command = Command::new(ssh_program("ssh"));
+    let lease = connection.configure(&mut command, true)?;
+    command
+        // This fixed authentication probe never has program input. Tell SSH
+        // explicitly, rather than relying on inherited Windows NUL semantics.
+        // Actual remote execution keeps its stdin/program transport unchanged.
+        .arg("-n")
+        .arg("-T")
+        .arg("-o")
+        .arg("LogLevel=ERROR")
+        .arg(&connection.stored.endpoint.host)
+        .arg("echo WEBCODEX_SSH_CONNECTION_OK");
+    Ok((command, lease))
+}
+
 fn probe_connection(
     candidate: &ConnectionCandidate,
     stop: Option<&AtomicBool>,
 ) -> Result<(), &'static str> {
-    let mut command = Command::new(ssh_program("ssh"));
-    let _lease = candidate.connection.configure(&mut command, true)?;
-    command
-        .arg("-T")
-        .arg("-o")
-        .arg("LogLevel=ERROR")
-        .arg(&candidate.connection.stored.endpoint.host)
-        .arg("echo WEBCODEX_SSH_CONNECTION_OK");
+    let (mut command, _lease) = probe_command(&candidate.connection)?;
     let output = bounded_output(&mut command, stop)?;
     if output.success
         && String::from_utf8_lossy(&output.stdout)

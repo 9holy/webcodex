@@ -1,6 +1,8 @@
 import { Select, TextInput } from "@mantine/core";
 import { memo, useCallback, useMemo, useRef, useState } from "react";
 import { useFlowingSelection } from "../../ui/useFlowingSelection.js";
+import { CallFailureDiagnostics, CallFailureNotice } from "../../ui/CallFailureNotice.js";
+import { callStatusLabel, isFailedCallStatus, type CallFailure } from "../../ui/callFailure.js";
 import type { RuntimeV2Client } from "../api/client.js";
 import { TraceCallDetails } from "./TraceCallDetails.js";
 import { CopyIdentity } from "./ui/CopyIdentity.js";
@@ -16,6 +18,7 @@ const CALL_PAGE_SIZE = 80;
 type Call = {
   key: string; traceRef?: string; tool: string; project?: string; startedAt: number; duration: number;
   status: string; expectation?: string; sessions: string[]; asyncJobId?: string; observedJobIds: string[]; running: boolean;
+  failure?: CallFailure;
 };
 type Props = {
   client?: RuntimeV2Client;
@@ -70,7 +73,7 @@ function WindowActivityContent({
       return {
         key: identity + "#" + occurrence, traceRef: row.server_trace_id, tool: row.tool_name || row.method,
         project: row.project, startedAt: row.started_at_ms, duration: row.duration_ms, status: row.status,
-        expectation: row.failure_expectation_result,
+        expectation: row.failure_expectation_result, failure: row.failure,
         sessions: [...new Set(row.workflow_sessions.map(link => link.workflow_session_id))].sort((left, right) =>
           (sessionOrder.get(left) ?? Number.MAX_SAFE_INTEGER) - (sessionOrder.get(right) ?? Number.MAX_SAFE_INTEGER)),
         asyncJobId: row.async_job_id, observedJobIds: row.observed_job_ids || [], running: false,
@@ -96,7 +99,7 @@ function WindowActivityContent({
       if (focusedKeys && !focusedKeys.has(call.key)) return false;
       if (!needle) return true;
       const project = call.project ? projectIndex.get(call.project) : undefined;
-      const text = [call.tool, call.status, call.expectation, call.project, project?.name, project?.path,
+      const text = [call.tool, call.status, call.expectation, call.failure?.error_kind, call.failure?.failure_kind, call.project, project?.name, project?.path,
         call.traceRef, call.asyncJobId, ...call.observedJobIds, ...call.sessions,
         ...call.sessions.map(id => sessionMeta.get(id)?.title)].filter(Boolean).join(" ").toLowerCase();
       return text.includes(needle);
@@ -188,7 +191,7 @@ const WindowCallCard = memo(function WindowCallCard({
   const expected = ["matched_expected_failure", "matched_expected_result"].includes(call.expectation || "");
   const mismatch = mismatches.has(call.expectation || "");
   const expectationLabel = expected ? "Expected result" : mismatch ? "Expectation not met" : "";
-  const status = call.running ? "Running" : success ? "Succeeded" : failureStatuses.has(call.status.toLowerCase()) ? "Failed" : call.status;
+  const status = call.running ? "Running" : callStatusLabel(call.status, call.failure);
   const primarySession = call.sessions.find(sessionId => sessionMeta.has(sessionId));
   const selectable = Boolean(primarySession && onSelectSession);
   const asyncJobLabel = asyncJob ? asyncJob.active ? t("Background running")
@@ -230,6 +233,11 @@ const WindowCallCard = memo(function WindowCallCard({
           <time dateTime={new Date(call.startedAt).toISOString()} title={absoluteTime(call.startedAt)}>{clockTime(call.startedAt)}</time>
         </span><span className="window-call-duration"><small>{t("Duration")}</small><strong>{durationText(call.duration)}</strong></span></>}
     </div>
+    {!call.running && isFailedCallStatus(call.status) && <details className="call-failure-details" onClick={event => event.stopPropagation()}>
+      <summary>{t("Why this call failed")}</summary>
+      <CallFailureNotice failure={call.failure} toolName={call.tool} t={t} />
+      <details className="call-technical-details"><summary>{t("Technical details")}</summary><CallFailureDiagnostics failure={call.failure} t={t} /></details>
+    </details>}
     {client && call.traceRef && <TraceCallDetails client={client} traceRef={call.traceRef} language={language}
       expanded={expanded} onExpandedChange={open => onExpandedChange(call.key, open)} />}
   </article>;

@@ -372,7 +372,7 @@ the source and choose the explicit build path:
 
 ```bash
 # For a fork, select its owner/repository before cloning and building.
-export WEBCODEX_RELEASE_REPOSITORY=yyjeqhc/webcodex
+export WEBCODEX_RELEASE_REPOSITORY=9holy/webcodex
 git clone "https://github.com/$WEBCODEX_RELEASE_REPOSITORY.git" webcodex
 cd webcodex
 ./deploy/docker/bootstrap.sh https://webcodex.example.com --build-from-source
@@ -380,8 +380,9 @@ cd webcodex
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
 
-The source-build override passes `WEBCODEX_RELEASE_REPOSITORY` into the binaries
-at build time so their update checks retain the selected publisher. Keep the
+This fork defaults to `9holy/webcodex`. The source-build override passes an
+explicit `WEBCODEX_RELEASE_REPOSITORY` into the binaries at build time so their
+update checks retain the selected publisher. Keep the
 same value on later rebuilds. This does not select a prebuilt container: plain
 `compose.yaml` uses the upstream image unless `WEBCODEX_SERVER_IMAGE` names a
 verified image from your chosen publisher, preferably pinned by digest.

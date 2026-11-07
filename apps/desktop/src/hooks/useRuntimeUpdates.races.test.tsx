@@ -16,7 +16,7 @@ const download: UpdateDownloadStatus = {
 };
 function status(automaticDownload: boolean, version = "0.6.0"): UpdateStatus {
   return {
-    state: "update_available", latest: { version, runtime_version: version, release_url: `https://github.com/yyjeqhc/webcodex/releases/tag/v${version}`, compatibility: "runtime_compatible" },
+    release_repository: "9holy/webcodex", state: "update_available", latest: { version, runtime_version: version, release_url: `https://github.com/9holy/webcodex/releases/tag/v${version}`, compatibility: "runtime_compatible" },
     update_available: true, show_banner: true, cached: false, last_check_at_ms: 100,
     manual_error: null, automatic_download: automaticDownload, download: { ...download, version },
   };

@@ -95,6 +95,42 @@ fn trust_challenges_bind_endpoint_revision_generation_expiry_and_single_commit()
 }
 
 #[test]
+fn only_authentication_probe_disables_ssh_stdin() {
+    let (_temporary, store, endpoint, key) = fixture();
+    let candidate = ConnectionCandidate::create(
+        &store.private_root().unwrap(),
+        endpoint.clone(),
+        SshAuthentication::ExistingEnvironment,
+        key,
+    )
+    .unwrap();
+    let (probe, lease) = probe_command(&candidate.connection).unwrap();
+    assert!(lease.is_none());
+    let probe_args: Vec<_> = probe.get_args().collect();
+    assert_eq!(probe.get_args().filter(|arg| *arg == "-n").count(), 1);
+    assert_eq!(
+        probe_args[probe_args.len() - 2],
+        std::ffi::OsStr::new(&endpoint.host)
+    );
+    assert_eq!(
+        *probe_args.last().unwrap(),
+        std::ffi::OsStr::new("echo WEBCODEX_SSH_CONNECTION_OK")
+    );
+
+    // Applying the same authentication/host-key configuration to a normal
+    // execution must preserve stdin for the Windows program frame and user input.
+    let mut execution = Command::new(ssh_program("ssh"));
+    assert!(candidate
+        .connection
+        .configure(&mut execution, true)
+        .unwrap()
+        .is_none());
+    assert!(!execution
+        .get_args()
+        .any(|arg| arg == "-n" || arg == "StdinNull=yes"));
+}
+
+#[test]
 fn structured_registry_never_contains_credentials_and_activation_requires_restart() {
     let (temporary, first, endpoint, key) = fixture();
     let secret = "private-fixture-password";

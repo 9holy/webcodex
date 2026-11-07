@@ -121,6 +121,10 @@ pub struct WindowActivityEventRecord {
     pub managed_oauth_identity: Option<(String, String)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_expectation_result: Option<String>,
+    /// Existing content-free audit classifications. Internal only: the Console
+    /// applies a closed vocabulary before exposing an operator explanation.
+    #[serde(skip)]
+    pub failure_metadata: WindowActivityFailureMetadata,
     pub event_id: String,
     pub client_window_key: String,
     pub client_window_source: String,
@@ -162,6 +166,14 @@ pub struct WindowActivityEventRecord {
     pub window_continuity_eligible: Option<bool>,
     /// HTTP response status from the WebCodex handler, if recorded.
     pub http_status: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WindowActivityFailureMetadata {
+    pub error_kind: Option<String>,
+    pub failure_kind: Option<String>,
+    pub execution_state: Option<String>,
+    pub recovery_kind: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

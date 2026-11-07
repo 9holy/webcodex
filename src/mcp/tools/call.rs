@@ -278,9 +278,27 @@ impl ParsedCall {
         ) {
             Ok(invocation) => invocation,
             Err(message) => {
+                // This prefix is authored by the closed invocation parser, not
+                // a provider exception. Preserve the reason for a pre-dispatch
+                // refusal without recording the sidecar or changing the gate.
+                let kind = if message.starts_with("direct_host_review_required: ") {
+                    "direct_host_review_required"
+                } else {
+                    "invalid_arguments"
+                };
                 if let Some(lc) = lifecycle.as_deref() {
-                    lc.dispatch_failed("invalid_arguments");
-                    lc.dispatch_finished(false, Some(false), "invalid_arguments");
+                    lc.dispatch_failed(kind);
+                    lc.dispatch_finished(false, Some(false), kind);
+                }
+                if let (Some(slot), Some(timer)) = (
+                    diagnostics.model_ergonomics_out.as_deref_mut(),
+                    ModelErgonomicsTimer::start_with_arguments(&params.name, &raw_mcp_arguments),
+                ) {
+                    let mut record = timer.finish().record_for_pre_result_failure(kind);
+                    // This exact parser refusal precedes both sidecar and main
+                    // dispatch. Generic error kinds elsewhere cannot prove it.
+                    record.execution_state = Some("not_started".to_string());
+                    *slot = Some(record);
                 }
                 return Err(McpOutcome::BadRequest(rpc_error(id, -32602, message)));
             }

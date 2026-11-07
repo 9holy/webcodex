@@ -79,6 +79,32 @@ pub enum ResourceKind {
     ReportIssue,
     Contributing,
     DesktopDevelopment,
+    Releases,
+    ReleaseNotes,
+    UpstreamProject,
+}
+
+impl ResourceKind {
+    pub fn external_url(self) -> Option<String> {
+        let repository = webcodex_core::build_info::RELEASE_REPOSITORY;
+        let path = match self {
+            Self::Documentation => "/blob/main/docs/DESKTOP_RUNTIME_COMPATIBILITY.md",
+            Self::Github => "",
+            Self::ReportIssue => "/issues/new",
+            Self::Contributing => "/blob/main/CONTRIBUTING.md",
+            Self::DesktopDevelopment => "/blob/main/docs/DESKTOP_DEVELOPMENT.md",
+            Self::Releases => "/releases",
+            Self::ReleaseNotes => "/releases/latest",
+            Self::UpstreamProject => {
+                return Some(format!(
+                    "https://github.com/{}",
+                    webcodex_core::build_info::UPSTREAM_REPOSITORY
+                ));
+            }
+            _ => return None,
+        };
+        Some(format!("https://github.com/{repository}{path}"))
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -403,6 +429,26 @@ fn bounded_code(value: Option<&Value>) -> Option<String> {
     .then(|| value.into())
 }
 
+fn continuation_failure(value: Option<&Value>) -> Option<Value> {
+    let value = value?;
+    let outcome = value.get("outcome")?.as_str()?;
+    if !matches!(outcome, "rejected" | "execution_failed" | "outcome_unknown" | "call_failed") {
+        return None;
+    }
+    let reason = match value.get("reason").and_then(Value::as_str) {
+        Some(reason @ ("missing_scope" | "access_denied" | "host_review_required"
+            | "session_read_only" | "session_closed" | "session_missing" | "session_expired"
+            | "session_mismatch" | "session_unavailable" | "project_unavailable"
+            | "invalid_input" | "runner_unavailable" | "approval_changed" | "ssh_authentication"
+            | "ssh_host_key" | "ssh_unavailable" | "provider_unavailable" | "execution_error"
+            | "timeout" | "result_unconfirmed" | "stale_state" | "details_unavailable")) => reason,
+        _ => "details_unavailable",
+    };
+    // Support exports carry only these two closed classifications. In particular,
+    // never forward server extensions, provider messages, or arbitrary code text.
+    Some(json!({"outcome":outcome, "reason":reason}))
+}
+
 pub fn continuation(detail: &Value, now: u64) -> Option<Value> {
     let latest = detail
         .get("activity")?
@@ -423,7 +469,7 @@ pub fn continuation(detail: &Value, now: u64) -> Option<Value> {
     let streaming = latest.get("response_streaming").and_then(Value::as_bool) == Some(true);
     let execution = match latest.get("status").and_then(Value::as_str) {
         Some("succeeded" | "completed" | "success") => "completed",
-        Some("failed" | "error") => "failed",
+        Some("failed" | "failure" | "error" | "timeout" | "timed_out") => "failed",
         Some("cancelled") => "cancelled",
         _ => "unknown",
     };
@@ -447,8 +493,7 @@ pub fn continuation(detail: &Value, now: u64) -> Option<Value> {
                     .min()
             })
     });
-    Some(
-        json!({"tool_name":bounded_code(latest.get("tool_name")),"execution":execution,
+    let mut value = json!({"tool_name":bounded_code(latest.get("tool_name")),"execution":execution,
         "response_handoff":if handed.is_none(){"not_confirmed"}else if streaming{"stream_started"}else{"handler_returned"},
         "request_observed_at_ms":observed,"response_handed_at_ms":handed,
         "service_ms":latest.get("service_ms").and_then(Value::as_u64),
@@ -459,8 +504,13 @@ pub fn continuation(detail: &Value, now: u64) -> Option<Value> {
         "window_transition_kind":bounded_code(latest.get("window_transition_kind")),
         "active_request_count":detail.get("active_count").and_then(Value::as_u64),
         "history_partial":detail.get("activity_truncated").and_then(Value::as_bool).unwrap_or(true),
-        "interpretation":"WebCodex observations only. Gaps may include network, Host scheduling, model inference, user actions, or other unobservable time; handoff is not proof of model receipt."}),
-    )
+        "interpretation":"WebCodex observations only. Gaps may include network, Host scheduling, model inference, user actions, or other unobservable time; handoff is not proof of model receipt."});
+    if execution == "failed" {
+        if let Some(failure) = continuation_failure(latest.get("failure")) {
+            value["failure"] = failure;
+        }
+    }
+    Some(value)
 }
 
 pub fn report(

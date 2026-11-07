@@ -447,6 +447,16 @@ input[type="checkbox"].desktop-switch:hover:not(:disabled):not(:checked) { backg
 .readiness-banner h2 { font-size: var(--ui-font-title); margin: 0 0 8px; }
 .continuation-facts h3 { display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline; }
 .continuation-facts h3 code { font-size: 14px; }
+.call-result-label { font-weight: 600; }
+.call-failure-notice { margin-block: 12px; padding: 12px 14px; border-inline-start: 3px solid var(--ui-warning); border-radius: 4px; background: var(--ui-surface); color: var(--ui-text-primary); overflow-wrap: anywhere; }
+.call-failure-notice p { margin: 0 0 10px; font-size: 14px; line-height: 1.55; }
+.call-failure-notice p:last-child { margin-bottom: 0; }
+.call-failure-context { color: var(--ui-text-secondary); }
+.call-technical-details { margin-top: 12px; font-size: 13px; color: var(--ui-text-secondary); }
+.call-technical-details summary { cursor: pointer; }
+.call-failure-diagnostics { display: grid; gap: 8px; margin-block: 12px; }
+.call-failure-diagnostics > div { display: grid; grid-template-columns: minmax(100px, 1fr) minmax(0, 2fr); gap: 12px; }
+.call-failure-diagnostics dd { margin: 0; overflow-wrap: anywhere; }
 .diagnostics-panel, .runtime-settings-panel { margin-top: 22px; }
 @media (max-width: 600px) { .runtime-candidate { padding: 14px; } .runtime-facts { gap: 12px 20px; } }
 

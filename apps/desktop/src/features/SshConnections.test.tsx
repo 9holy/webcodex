@@ -29,6 +29,10 @@ function fillHost(username = endpoint.user) {
   fireEvent.change(screen.getByLabelText("SSH Username"), { target: { value: username } });
 }
 async function choose(label: string, value: string) {
+  if (label === "Connection Type") {
+    const advanced = screen.getByText("Advanced settings").closest("details");
+    if (!advanced?.open) fireEvent.click(screen.getByText("Advanced settings"));
+  }
   fireEvent.click(screen.getByRole("combobox", { name: label }));
   fireEvent.click(await screen.findByRole("option", { name: value }));
 }
@@ -55,6 +59,47 @@ describe("SSH connection setup", () => {
     expect(screen.queryByLabelText("Target")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
     expect(api.inspectSshConnection).not.toHaveBeenCalled(); expect(api.probeSshConnection).not.toHaveBeenCalled();
+  });
+
+  it("suggests a bounded connection name from the address without overwriting an edited name", () => {
+    show();
+    const field = screen.getByLabelText("Resource Name");
+    fireEvent.change(screen.getByLabelText("Host or IP Address"), { target: { value: endpoint.host } });
+    expect(field).toHaveValue("ssh-192-0-2-10");
+    fireEvent.change(screen.getByLabelText("Host or IP Address"), { target: { value: "[2001:db8::1]" } });
+    expect(field).toHaveValue("ssh-2001-db8-1");
+    fireEvent.change(screen.getByLabelText("Host or IP Address"), { target: { value: "服务器" } });
+    expect(field).toHaveValue("ssh-server");
+    fireEvent.change(screen.getByLabelText("Host or IP Address"), { target: { value: "a".repeat(120) + ".example" } });
+    expect((field as HTMLInputElement).value).toHaveLength(80);
+    fireEvent.change(field, { target: { value: "my-server" } });
+    fireEvent.change(screen.getByLabelText("Host or IP Address"), { target: { value: "another.example" } });
+    expect(field).toHaveValue("my-server");
+    expect(api.inspectSshConnection).not.toHaveBeenCalled();
+  });
+
+  it("explains an invalid edited connection name without saving or contacting a server", () => {
+    show();
+    fireEvent.change(screen.getByLabelText("Resource Name"), { target: { value: "production..server" } });
+    expect(screen.getByText(/avoid consecutive dots/)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Save" })).toBeDisabled();
+    expect(api.inspectSshConnection).not.toHaveBeenCalled();
+    expect(api.probeSshConnection).not.toHaveBeenCalled();
+  });
+
+  it("keeps optional settings collapsed and preserves a directory when they are reopened", () => {
+    show();
+    expect(screen.getByLabelText("Default Working Directory")).not.toBeVisible();
+    expect(screen.getByRole("combobox", { name: "Connection Type" })).not.toBeVisible();
+    fireEvent.click(screen.getByText("Advanced settings"));
+    const directory = screen.getByLabelText("Default Working Directory");
+    expect(directory).toBeVisible();
+    fireEvent.change(directory, { target: { value: "/srv/project" } });
+    fireEvent.click(screen.getByText("Advanced settings"));
+    fireEvent.click(screen.getByText("Advanced settings"));
+    expect(directory).toHaveValue("/srv/project");
+    expect(api.inspectSshConnection).not.toHaveBeenCalled();
+    expect(api.probeSshConnection).not.toHaveBeenCalled();
   });
 
   it("requires an explicitly chosen fingerprint and a successful test before a write-only save", async () => {

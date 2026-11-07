@@ -92,7 +92,7 @@ fn write_candidate(root: &Path) -> UpgradeCandidate {
     let manifest = json!({
         "schema_version": 1, "version": "1.2.3", "source_sha": "a".repeat(40),
         "source_workflow_run_id": 123,
-        "source_workflow_ref": "yyjeqhc/webcodex/.github/workflows/release-build.yml@refs/tags/v1.2.3",
+        "source_workflow_ref": format!("{}/.github/workflows/release-build.yml@refs/tags/v1.2.3", crate::unified_update::OFFICIAL_REPOSITORY),
         "platform": platform.as_str(), "target": platform.target(),
         "architecture": std::env::consts::ARCH,
         "desktop_runtime_contract": DESKTOP_RUNTIME_CONTRACT,
