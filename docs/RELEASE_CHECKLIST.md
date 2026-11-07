@@ -6,6 +6,15 @@ It governs release/publish rollouts and deployment of published releases. An exp
 
 Do not create tags, push commits, publish npm packages, create GitHub Releases, rewrite history, deploy, or touch secrets while running this checklist unless the operator explicitly requests that action.
 
+The authorized `9holy/webcodex` GitHub-only fork publication can also use the
+fixed reviewed request and Actions controller described in
+[GitHub-only fork distributions](agent/release-process.md#github-only-fork-distributions).
+That controller automates the same exact-source readiness, annotated-tag,
+candidate-build, draft-digest, and public-byte gates below. Its repository-scoped
+machine identity is explicit; it does not use the human operator's npm plan or
+grant publication authority to candidate builds. Changing the reviewed request
+is a publication action and requires authorization for its named destination.
+
 ## 1. Source Validation
 
 Choose the exact release source before release prep. The preferred path is to cut `release/v<VERSION>` from the reviewed `main` commit selected for the release; a hotfix may cut that branch from the previous immutable release tag instead. Put version bumps, release-facing metadata, and release-only fixes on that branch (normally through a PR targeting the release branch). Once the release branch exists, `main` may continue accepting unrelated development PRs. `main` remains a supported source ref for simple releases, but it no longer has to stay frozen while a release is validated or published. Final pre-tag validation is a reviewed GitHub Actions workflow, not a sequence of hand-run release-host commands:

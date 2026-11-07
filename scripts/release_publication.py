@@ -1046,28 +1046,8 @@ def _github_asset_digest(asset: dict) -> str:
     return digest
 
 
-def verify_draft_assets(*, repo: str, bundle_dir: Path, timeout: float, require_unified_installers: bool = False, require_runtime_installers: bool = False) -> dict:
-    bundle = bundle_dir.absolute()
-    summary = verify_bundle(bundle, repo, require_unified_installers=require_unified_installers, require_runtime_installers=require_runtime_installers)
-    if summary.get("build_kind") != "release":
-        raise PublicationError("draft verification requires a real release bundle")
-    tag = str(summary["tag"])
-    client = collector.GitHubClient(repo, collector.resolve_github_token(), timeout)
-    release = _find_authenticated_release_by_tag(client, tag)
-    expected_prerelease = "-" in str(summary["version"]).split("+", 1)[0]
-    if (release.get("tag_name") != tag or release.get("draft") is not True
-            or release.get("prerelease") is not expected_prerelease):
-        raise PublicationError("GitHub Release must be the expected draft with matching prerelease status")
-    release_id = release.get("id")
-    release_url = release.get("html_url")
-    if not isinstance(release_id, int) or release_id <= 0:
-        raise PublicationError("GitHub draft release id is invalid")
-    if not isinstance(release_url, str) or not release_url.startswith("https://github.com/"):
-        raise PublicationError("GitHub draft release URL is invalid")
-    assets = release.get("assets")
-    if not isinstance(assets, list) or len(assets) > 33:
-        raise PublicationError("GitHub draft asset listing is malformed or too large")
-
+def expected_draft_asset_names(summary: dict) -> set[str]:
+    """Canonical public asset allowlist shared by upload and draft verification."""
     expected_files = {"SHA256SUMS"}
     if summary.get("runtime_manifest") is not None:
         expected_files.add("webcodex-release-manifest.json")
@@ -1092,6 +1072,31 @@ def verify_draft_assets(*, repo: str, bundle_dir: Path, timeout: float, require_
         if not isinstance(item, dict) or not isinstance(item.get("filename"), str):
             raise PublicationError(f"retained bundle Desktop artifact is invalid: {platform}")
         expected_files.add(item["filename"])
+    return expected_files
+
+
+def verify_draft_assets(*, repo: str, bundle_dir: Path, timeout: float, require_unified_installers: bool = False, require_runtime_installers: bool = False) -> dict:
+    bundle = bundle_dir.absolute()
+    summary = verify_bundle(bundle, repo, require_unified_installers=require_unified_installers, require_runtime_installers=require_runtime_installers)
+    if summary.get("build_kind") != "release":
+        raise PublicationError("draft verification requires a real release bundle")
+    tag = str(summary["tag"])
+    client = collector.GitHubClient(repo, collector.resolve_github_token(), timeout)
+    release = _find_authenticated_release_by_tag(client, tag)
+    expected_prerelease = "-" in str(summary["version"]).split("+", 1)[0]
+    if (release.get("tag_name") != tag or release.get("draft") is not True
+            or release.get("prerelease") is not expected_prerelease):
+        raise PublicationError("GitHub Release must be the expected draft with matching prerelease status")
+    release_id = release.get("id")
+    release_url = release.get("html_url")
+    if not isinstance(release_id, int) or release_id <= 0:
+        raise PublicationError("GitHub draft release id is invalid")
+    if not isinstance(release_url, str) or not release_url.startswith("https://github.com/"):
+        raise PublicationError("GitHub draft release URL is invalid")
+    assets = release.get("assets")
+    if not isinstance(assets, list) or len(assets) > 33:
+        raise PublicationError("GitHub draft asset listing is malformed or too large")
+    expected_files = expected_draft_asset_names(summary)
     by_name: dict[str, dict] = {}
     for asset in assets:
         if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
