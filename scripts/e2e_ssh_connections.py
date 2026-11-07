@@ -27,6 +27,7 @@ import sys
 import tempfile
 import threading
 import time
+from urllib.error import URLError
 
 if __package__:
     from .e2e_session_continuity_ws import ROOT, Smoke, check, stop as stop_posix
@@ -812,29 +813,118 @@ class ConnectionAcceptance(Smoke):
     def observe(self):
         return self.operator("list", {"runner": "ssh-setup-runner"})
 
-    def wait_loaded_resource(self):
-        # list_projects may retain the previous Runner's Project inventory.
-        # Only a fresh operator response from the replacement Runner proves it
-        # loaded the saved SSH resource. Retry bounded reads, never the save.
-        deadline = time.monotonic() + 30
-        last_kind = None
+    def readiness_post(self, path, body, deadline):
+        remaining = deadline - time.monotonic()
+        check(remaining > 0, "replacement Runner readiness deadline exceeded")
+        try:
+            result = self.post(path, body, self.owner, timeout=min(20, remaining))
+        except (OSError, URLError, ValueError):
+            raise AssertionError("replacement Runner readiness observation unavailable") from None
+        # Never accept a late response as proof of readiness within the budget.
+        check(time.monotonic() < deadline, "replacement Runner readiness deadline exceeded")
+        check(isinstance(result, dict), "replacement Runner readiness response is invalid")
+        return result
+
+    def runner_catalog(self, deadline):
+        result = self.readiness_post("/api/tools/call", {"tool": "list_runners", "params": {
+            "client_id": "ssh-setup-runner", "include_projects": True, "summary_only": False,
+        }}, deadline)
+        output = result.get("output")
+        check(result.get("success") is True and isinstance(output, dict),
+              "replacement Runner catalog observation failed")
+        rows = output.get("runners")
+        check(isinstance(rows, list) and len(rows) <= 1,
+              "replacement Runner catalog is ambiguous")
+        if not rows:
+            return None
+        row = rows[0]
+        check(isinstance(row, dict) and row.get("client_id") == "ssh-setup-runner"
+              and isinstance(row.get("runner_instance_id"), str) and row["runner_instance_id"]
+              and isinstance(row.get("connected"), bool),
+              "replacement Runner catalog identity is invalid")
+        return row
+
+    def fixture_project_identity(self, row):
+        inventory = row.get("project_inventory")
+        check(isinstance(inventory, dict) and inventory.get("sync_state") in {
+            "pending", "in_progress", "complete",
+        }, "replacement Runner project inventory is unavailable or failed")
+        if not row["connected"] or inventory["sync_state"] != "complete":
+            return None
+        check(row.get("projects_truncated") is False and row.get("projects_next_offset") is None
+              and row.get("projects_offset") == 0, "fixture Project inventory must be complete")
+        projects = row.get("projects")
+        check(isinstance(projects, list) and all(isinstance(item, dict) for item in projects),
+              "fixture Project inventory is invalid")
+        matches = [item for item in projects if item.get("id") == "fixture"]
+        check(len(matches) == 1 and matches[0].get("disabled") is False,
+              "complete Runner catalog does not contain the enabled fixture Project")
+        path, fingerprint = matches[0].get("path"), matches[0].get("root_fingerprint")
+        check(isinstance(path, str) and path and isinstance(fingerprint, str) and fingerprint,
+              "fixture Project root identity is unavailable")
+        return path, fingerprint
+
+    def restart_runner(self):
+        before = self.runner_catalog(time.monotonic() + 20)
+        check(before is not None, "original Runner catalog is missing")
+        identity = self.fixture_project_identity(before)
+        check(identity is not None, "original Runner Project inventory is not ready")
+        try:
+            # Rust canonical paths can have a Windows extended-path prefix.
+            # Verify the filesystem identity once, then retain that exact
+            # canonical path and fingerprint across the process replacement.
+            same_root = Path(identity[0]).samefile(self.project_dir)
+        except (OSError, ValueError):
+            same_root = False
+        check(same_root, "original Runner reported a different fixture Project root")
+        stop(self.runner)
+        self.runner = self.launch("webcodex-runner", ["--config", str(self.config)], self.env)
+        deadline, replacement = time.monotonic() + 45, None
         while time.monotonic() < deadline:
-            check(self.runner.poll() is None, "replacement Runner exited")
-            result = self.post("/api/runtime-console/ssh-resources/list",
-                               {"runner": "ssh-setup-runner"}, self.owner)
-            if result.get("success") is True:
-                output = result.get("output", {})
-                resources = output.get("resources", [])
-                if resources == [{"name": "password-fixture", "source": "managed",
-                                  "active": True, "pending_restart": False}]:
-                    return output
-                last_kind = "saved_resource_not_loaded"
-            else:
-                last_kind = result.get("output", {}).get("error_kind")
-                check(last_kind in {"ssh_resource_registry_unavailable", "runner_unavailable"},
-                      f"replacement Runner SSH observation failed: {last_kind}")
-            time.sleep(0.1)
-        raise AssertionError(f"replacement Runner did not load the saved resource: {last_kind}")
+            check(self.server.poll() is None and self.runner.poll() is None,
+                  "temporary Server or replacement Runner exited")
+            row = self.runner_catalog(deadline)
+            if row is not None:
+                instance = row["runner_instance_id"]
+                if replacement is None and instance != before["runner_instance_id"]:
+                    replacement = instance
+                check(replacement is None or instance == replacement,
+                      "replacement Runner instance changed during readiness")
+                if instance == replacement:
+                    observed = self.fixture_project_identity(row)
+                    if observed is not None:
+                        check(observed == identity, "replacement Runner fixture Project identity changed")
+                        result = self.readiness_post("/api/runtime-console/ssh-resources/list",
+                                                     {"runner": "ssh-setup-runner"}, deadline)
+                        output = result.get("output")
+                        check(isinstance(output, dict), "replacement Runner SSH observation is invalid")
+                        if result.get("success") is True:
+                            loaded = output.get("resources") == [{"name": "password-fixture",
+                                "source": "managed", "active": True, "pending_restart": False}]
+                            if loaded:
+                                check(isinstance(output.get("binding"), str) and output["binding"],
+                                      "replacement Runner SSH observation has no binding")
+                                # SSH bindings are opaque. Bracket the fresh
+                                # Runner response with the same ready instance;
+                                # never infer Project readiness from SSH alone.
+                                after = self.runner_catalog(deadline)
+                                check(after is not None and after["runner_instance_id"] == replacement,
+                                      "replacement Runner instance changed during SSH observation")
+                                final_identity = self.fixture_project_identity(after)
+                                if final_identity is not None:
+                                    check(final_identity == identity,
+                                          "replacement Runner fixture Project identity changed")
+                                    check(time.monotonic() < deadline,
+                                          "replacement Runner readiness deadline exceeded")
+                                    return output
+                        else:
+                            check(operator_error_kind(result) in {
+                                "ssh_resource_registry_unavailable", "runner_unavailable",
+                            }, "replacement Runner SSH observation failed")
+            remaining = deadline - time.monotonic()
+            if remaining > 0:
+                time.sleep(min(0.1, remaining))
+        raise AssertionError("replacement Runner readiness deadline exceeded")
 
     def prepare(self):
         self.start_server()
@@ -931,10 +1021,7 @@ class ConnectionAcceptance(Smoke):
         print("PASS: scope, real host-key inspection, wrong password, changed key, password/plain/encrypted-key login, staged save")
 
         self.begin_stage("runner_restart")
-        stop(self.runner)
-        self.runner = self.launch("webcodex-runner", ["--config", str(self.config)], self.env)
-        self.wait_ready(self.project, self.owner)
-        listed = self.wait_loaded_resource()
+        listed = self.restart_runner()
         check(listed["resources"][0]["active"] and not listed["resources"][0]["pending_restart"],
               "saved connection was not loaded after Runner restart")
         session = self.tool("work_on_project", {"project": self.project,

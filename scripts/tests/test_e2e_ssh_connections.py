@@ -55,6 +55,270 @@ class Channel:
         self.closed = True
 
 
+class RunnerRestartReadinessTests(unittest.TestCase):
+    def fixture(self):
+        temporary = tempfile.TemporaryDirectory(prefix="wc-restart-catalog-")
+        self.addCleanup(temporary.cleanup)
+        acceptance = object.__new__(ConnectionAcceptance)
+        acceptance.project_dir = Path(temporary.name).resolve()
+        acceptance.owner = "fixture-owner-token"
+        acceptance.config, acceptance.env = Path("fixture.toml"), {}
+        acceptance.server = acceptance.runner = SimpleNamespace(poll=lambda: None)
+        acceptance.launch = mock.Mock(return_value=SimpleNamespace(poll=lambda: None))
+        acceptance.tool = mock.Mock(side_effect=AssertionError("readiness must not dispatch effects"))
+        row = {
+            "client_id": "ssh-setup-runner", "runner_instance_id": "old-instance", "connected": True,
+            "project_inventory": {"sync_state": "complete"},
+            "projects": [{"id": "fixture", "path": str(acceptance.project_dir),
+                          "root_fingerprint": "wc_projroot_" + "1" * 64, "disabled": False}],
+            "projects_truncated": False, "projects_next_offset": None, "projects_offset": 0,
+        }
+        return acceptance, row
+
+    def catalog(self, row):
+        return {"success": True, "output": {"runners": [] if row is None else [row]}}
+
+    def loaded_resource(self):
+        return {"success": True, "output": {"binding": "opaque-fixture-binding", "resources": [
+            {"name": "password-fixture", "source": "managed", "active": True, "pending_restart": False},
+        ]}}
+
+    def test_restart_does_not_accept_old_inventory_before_the_replacement_catalog(self):
+        with tempfile.TemporaryDirectory(prefix="wc-restart-catalog-") as directory:
+            acceptance = object.__new__(ConnectionAcceptance)
+            acceptance.project_dir = Path(directory).resolve()
+            acceptance.project = "agent:ssh-setup-runner:fixture"
+            acceptance.owner = "fixture-owner-token"
+            acceptance.config, acceptance.env = Path("fixture.toml"), {}
+            acceptance.server = acceptance.runner = SimpleNamespace(poll=lambda: None)
+            project = {"id": "fixture", "path": str(acceptance.project_dir),
+                       "root_fingerprint": "wc_projroot_" + "1" * 64, "disabled": False}
+            resources = [{"name": "password-fixture", "source": "managed",
+                          "active": True, "pending_restart": False}]
+            state = {"launched": False, "catalog_reads": 0, "complete": False,
+                     "ssh_reads": 0, "legacy_reads": 0}
+
+            def launch(*args):
+                state["launched"] = True
+                return SimpleNamespace(poll=lambda: None)
+
+            def post(path, body, token, **kwargs):
+                if path == "/api/tools/call":
+                    if body["tool"] == "list_projects":
+                        # The old wait_ready accepts this retained old-instance
+                        # snapshot even though registration has not completed.
+                        state["legacy_reads"] += 1
+                        return {"success": True, "output": {"projects": [{"id": acceptance.project}]}}
+                    self.assertEqual(body, {"tool": "list_runners", "params": {
+                        "client_id": "ssh-setup-runner", "include_projects": True,
+                        "summary_only": False}})
+                    instance, sync = "old-instance", "complete"
+                    if state["launched"]:
+                        state["catalog_reads"] += 1
+                        if state["catalog_reads"] >= 2:
+                            instance, sync = "replacement-instance", "pending"
+                        if state["catalog_reads"] >= 3:
+                            sync, state["complete"] = "complete", True
+                    return {"success": True, "output": {"runners": [{
+                        "client_id": "ssh-setup-runner", "runner_instance_id": instance,
+                        "connected": True, "project_inventory": {"sync_state": sync},
+                        "projects": [project] if sync == "complete" else [],
+                        "projects_truncated": False, "projects_next_offset": None,
+                        "projects_offset": 0,
+                    }]}}
+                self.assertEqual(path, "/api/runtime-console/ssh-resources/list")
+                self.assertEqual(body, {"runner": "ssh-setup-runner"})
+                state["ssh_reads"] += 1
+                return {"success": True, "output": {"binding": "opaque-fixture-binding",
+                                                     "resources": resources}}
+
+            acceptance.launch, acceptance.post = launch, post
+            with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                    mock.patch("scripts.e2e_ssh_connections.time.sleep"):
+                loaded = acceptance.restart_runner()
+            self.assertTrue(state["complete"],
+                            "restart returned before the replacement project catalog completed")
+            self.assertEqual(state["legacy_reads"], 0)
+            self.assertGreaterEqual(state["catalog_reads"], 4)
+            self.assertEqual(state["ssh_reads"], 1)
+            self.assertEqual(loaded["resources"], resources)
+
+    def test_completed_replacement_with_wrong_missing_disabled_or_truncated_project_fails(self):
+        canary = "private-project-path-canary"
+        for changed in ["missing", "path", "fingerprint", "disabled", "truncated", "offset", "next_page"]:
+            with self.subTest(changed=changed):
+                acceptance, old = self.fixture()
+                project = old["projects"][0].copy()
+                replacement = old | {"runner_instance_id": "replacement-instance", "projects": [project]}
+                if changed == "missing":
+                    replacement["projects"] = []
+                elif changed == "path":
+                    project["path"] = canary
+                elif changed == "fingerprint":
+                    project["root_fingerprint"] = canary
+                elif changed == "disabled":
+                    project["disabled"] = True
+                else:
+                    replacement[{"truncated": "projects_truncated", "offset": "projects_offset",
+                                 "next_page": "projects_next_offset"}[changed]] = 1
+                acceptance.post = mock.Mock(side_effect=[self.catalog(old), self.catalog(replacement)])
+                with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                        self.assertRaises(AssertionError) as error:
+                    acceptance.restart_runner()
+                self.assertNotIn(canary, str(error.exception))
+                self.assertEqual(acceptance.post.call_count, 2)
+                self.assertTrue(all(call.args[1]["tool"] == "list_runners"
+                                    for call in acceptance.post.call_args_list))
+                acceptance.tool.assert_not_called()
+
+    def test_replacement_is_fixed_before_and_after_the_loaded_ssh_observation(self):
+        for boundary in ["pending", "ssh_read"]:
+            with self.subTest(boundary=boundary):
+                acceptance, old = self.fixture()
+                replacement = old | {"runner_instance_id": "replacement-instance"}
+                other = old | {"runner_instance_id": "unexpected-third-instance"}
+                if boundary == "pending":
+                    responses = [self.catalog(old), self.catalog(replacement | {
+                        "project_inventory": {"sync_state": "pending"}, "projects": [],
+                    }), self.catalog(other)]
+                else:
+                    responses = [self.catalog(old), self.catalog(replacement), self.loaded_resource(),
+                                 self.catalog(other)]
+                acceptance.post = mock.Mock(side_effect=responses)
+                with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                        mock.patch("scripts.e2e_ssh_connections.time.sleep"), \
+                        self.assertRaisesRegex(AssertionError, "instance changed"):
+                    acceptance.restart_runner()
+                self.assertEqual(acceptance.post.call_count, len(responses))
+                acceptance.tool.assert_not_called()
+
+    def test_original_root_uses_filesystem_identity_and_retains_the_observed_canonical_path(self):
+        acceptance, old = self.fixture()
+        canonical = r"\\?\C:\fixture\canonical-root"
+        old["projects"][0]["path"] = canonical
+        replacement = old | {"runner_instance_id": "replacement-instance"}
+        acceptance.post = mock.Mock(side_effect=[self.catalog(old), self.catalog(replacement),
+                                                self.loaded_resource(), self.catalog(replacement)])
+        seen = []
+
+        def samefile(observed, expected):
+            seen.append((str(observed), expected))
+            return True
+
+        with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                mock.patch.object(Path, "samefile", samefile):
+            acceptance.restart_runner()
+        self.assertEqual(seen, [(canonical, acceptance.project_dir)])
+        acceptance.tool.assert_not_called()
+
+    def test_original_different_or_unavailable_root_fails_before_process_replacement(self):
+        for samefile in [mock.Mock(return_value=False), mock.Mock(side_effect=OSError("private-path-canary"))]:
+            acceptance, old = self.fixture()
+            acceptance.post = mock.Mock(return_value=self.catalog(old))
+            with mock.patch("scripts.e2e_ssh_connections.stop") as stop, \
+                    mock.patch.object(Path, "samefile", samefile), \
+                    self.assertRaisesRegex(AssertionError, "different fixture Project root") as error:
+                acceptance.restart_runner()
+            self.assertNotIn("private-path-canary", str(error.exception))
+            stop.assert_not_called()
+            acceptance.launch.assert_not_called()
+
+    def test_readiness_pending_or_unloaded_ssh_share_one_deadline_without_effect_retries(self):
+        for stalled in ["old_instance", "pending_catalog", "disconnected", "unloaded_resource"]:
+            with self.subTest(stalled=stalled):
+                acceptance, old = self.fixture()
+                replacement = old | {"runner_instance_id": "replacement-instance"}
+                clock = SimpleNamespace(now=100.0)
+                reads = []
+
+                def post(path, body, token, *, timeout):
+                    reads.append((path, body, timeout))
+                    if len(reads) == 1:
+                        return self.catalog(old)
+                    self.assertGreater(timeout, 0)
+                    self.assertLessEqual(timeout, min(20, 145 - clock.now))
+                    # A read uses a fraction of the shared budget, never a new
+                    # 45-second deadline for the SSH or catalog stage.
+                    clock.now += min(1, timeout)
+                    if path.endswith("ssh-resources/list"):
+                        return {"success": False, "output": {"error_kind": "runner_unavailable"}}
+                    self.assertEqual(body["tool"], "list_runners")
+                    if stalled == "old_instance":
+                        return self.catalog(old)
+                    if stalled == "pending_catalog":
+                        return self.catalog(replacement | {"project_inventory": {"sync_state": "pending"},
+                                                           "projects": []})
+                    if stalled == "disconnected":
+                        return self.catalog(replacement | {"connected": False})
+                    return self.catalog(replacement)
+
+                def sleep(seconds):
+                    self.assertLessEqual(seconds, 145 - clock.now)
+                    clock.now += seconds
+
+                acceptance.post = post
+                with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                        mock.patch("scripts.e2e_ssh_connections.time.monotonic", lambda: clock.now), \
+                        mock.patch("scripts.e2e_ssh_connections.time.sleep", sleep), \
+                        self.assertRaisesRegex(AssertionError, "readiness deadline exceeded"):
+                    acceptance.restart_runner()
+                self.assertAlmostEqual(clock.now, 145)
+                self.assertLess(len(reads), 100)
+                self.assertTrue(all(body == {"runner": "ssh-setup-runner"}
+                                    or body == {"tool": "list_runners", "params": {
+                                        "client_id": "ssh-setup-runner", "include_projects": True,
+                                        "summary_only": False}} for _, body, _ in reads))
+                acceptance.tool.assert_not_called()
+
+    def test_readiness_never_starts_after_deadline_or_accepts_a_late_success(self):
+        acceptance, _ = self.fixture()
+        clock = SimpleNamespace(now=100.0)
+        acceptance.post = mock.Mock(return_value={"success": True})
+        with mock.patch("scripts.e2e_ssh_connections.time.monotonic", lambda: clock.now), \
+                self.assertRaisesRegex(AssertionError, "readiness deadline exceeded"):
+            acceptance.readiness_post("/api/tools/call", {}, 100)
+        acceptance.post.assert_not_called()
+
+        def late_post(*args, timeout):
+            self.assertEqual(timeout, 0.25)
+            clock.now += 0.5
+            return {"success": True}
+
+        acceptance.post = late_post
+        with mock.patch("scripts.e2e_ssh_connections.time.monotonic", lambda: clock.now), \
+                self.assertRaisesRegex(AssertionError, "readiness deadline exceeded"):
+            acceptance.readiness_post("/api/tools/call", {}, 100.25)
+
+    def test_shared_http_timeout_default_and_remaining_budget_are_passed_to_opener(self):
+        acceptance, _ = self.fixture()
+        acceptance.url = "http://127.0.0.1:1"
+        acceptance.opener = mock.MagicMock()
+        acceptance.opener.open.return_value.__enter__.return_value.read.return_value = b'{"success":true}'
+        acceptance.post("/api/tools/call", {}, acceptance.owner)
+        self.assertEqual(acceptance.opener.open.call_args.kwargs["timeout"], 20)
+        acceptance.post("/api/tools/call", {}, acceptance.owner, timeout=0.25)
+        self.assertEqual(acceptance.opener.open.call_args.kwargs["timeout"], 0.25)
+
+    def test_readiness_errors_do_not_echo_server_payload_or_private_paths(self):
+        canary = "private-payload-token-or-path"
+        for failure in [OSError(canary), ValueError(canary)]:
+            acceptance, _ = self.fixture()
+            acceptance.post = mock.Mock(side_effect=failure)
+            with self.assertRaisesRegex(AssertionError, "observation unavailable") as error:
+                acceptance.restart_runner()
+            self.assertNotIn(canary, str(error.exception))
+            acceptance.launch.assert_not_called()
+        acceptance, old = self.fixture()
+        replacement = old | {"runner_instance_id": "replacement-instance"}
+        acceptance.post = mock.Mock(side_effect=[self.catalog(old), self.catalog(replacement),
+            {"success": False, "output": {"error_kind": canary, "error": canary}}])
+        with mock.patch("scripts.e2e_ssh_connections.stop"), \
+                self.assertRaisesRegex(AssertionError, "SSH observation failed") as error:
+            acceptance.restart_runner()
+        self.assertNotIn(canary, str(error.exception))
+        acceptance.tool.assert_not_called()
+
+
 class SshFixtureInputTests(unittest.TestCase):
     def empty_fixture(self):
         fixture = object.__new__(SshFixture)
