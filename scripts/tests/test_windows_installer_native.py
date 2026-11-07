@@ -128,6 +128,19 @@ class Coordinator {
             self.source = bootstrap.render(self.candidate, self.inner, self.outer, "win32-x64")
         self.source = self.source.replace(UNINSTALL_KEY, self.key)
         self.source = self.source.replace('HKCU "Environment"', f'HKCU "{self.key}\\Environment"')
+        # Silent installers have no console diagnostics. Keep this trace in the
+        # generated test executable only, after the failing branch is selected,
+        # without changing any production decisions or their exit codes.
+        traced = []
+        for number, line in enumerate(self.source.splitlines(), 1):
+            if line.strip() == "SetErrorLevel 1":
+                traced.extend([
+                    '  FileOpen $R9 "$EXEDIR\\fixture-failure.txt" a',
+                    f'  FileWriteUTF16LE $R9 "nsis_line={number} instdir=[$INSTDIR] registered=[$WebCodexRegisteredDir] api_result=[$0]$\\r$\\n"',
+                    '  FileClose $R9',
+                ])
+            traced.append(line)
+        self.source = "\n".join(traced) + "\n"
 
     def remove_registry(self):
         # Only keys created by this fixture; never recurse into a real product key.
@@ -157,10 +170,14 @@ class Coordinator {
         command = f'"{executable}" /S'
         if destination is not None:
             command += f" /D={destination}"
-        return subprocess.run(
+        result = subprocess.run(
             command, executable=str(executable), env=self.env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
         )
+        diagnostic = self.root / "fixture-failure.txt"
+        if result.returncode and diagnostic.exists():
+            print("NSIS fixture diagnostic: " + diagnostic.read_text(encoding="utf-16le").strip(), flush=True)
+        return result
 
     def compile_directory_probe(self):
         header = self.source.split('Section "-WebCodexUnifiedBootstrap"', 1)[0]

@@ -430,6 +430,7 @@ jobs:
         run: |
           python3 -m venv target/ssh-acceptance-venv
           target/ssh-acceptance-venv/bin/python -m pip install --disable-pip-version-check paramiko==4.0.0
+          target/ssh-acceptance-venv/bin/python -B -m unittest scripts.tests.test_e2e_ssh_connections -v
           cargo build --locked --profile dogfood -p webcodex -p webcodex-runner
           target/ssh-acceptance-venv/bin/python scripts/e2e_ssh_connections.py --bin-dir target/dogfood
       - name: Upload Linux production build evidence
@@ -978,6 +979,21 @@ jobs:
           "short=$short" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "built_at=$builtAt" >> $env:GITHUB_OUTPUT
+      - name: Verify native Windows OpenSSH password onboarding and remote execution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m venv target/ssh-acceptance-venv
+          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance virtual environment creation failed" }
+          $python = Join-Path "target\ssh-acceptance-venv\Scripts" "python.exe"
+          & $python -m pip install --disable-pip-version-check paramiko==4.0.0
+          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance dependencies failed" }
+          & $python -B -m unittest scripts.tests.test_e2e_ssh_connections -v
+          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance input/EOF regressions failed" }
+          # The script pins System32 OpenSSH and refuses Git's SSH client.
+          # Git Bash is only the Paramiko server's disposable remote shell.
+          & $python scripts/e2e_ssh_connections.py --bin-dir target/dogfood
+          if ($LASTEXITCODE -ne 0) { throw "Native Windows SSH authentication/remote execution failed" }
       - name: Stage exact runtime for Desktop bundle
         id: desktop_bundle
         shell: pwsh

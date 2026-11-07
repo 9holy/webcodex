@@ -306,6 +306,10 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
         self.assertIn("${AndIf} $INSTDIR != $WebCodexRegisteredDir", validate)
         self.assertIn("$(WebCodexDirectoryMismatch)", validate)
         self.assertIn("StrCpy $WebCodexInstallDir $INSTDIR", validate)
+        self.assertIn("kernel32::GetFullPathNameW", initial)
+        self.assertIn("kernel32::GetFullPathNameW", validate)
+        self.assertIn("${OrIf} $0 >= ${NSIS_MAX_STRLEN}", validate)
+        self.assertNotIn("GetFullPathName $", script)
         self.assertTrue(section.startswith("  Call WebCodexValidateInstallDir\n"))
         self.assertIn("/D=$WebCodexInstallDir", section)
 

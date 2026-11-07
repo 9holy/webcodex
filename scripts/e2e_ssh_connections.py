@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from dataclasses import dataclass
 import hashlib
 import io
 import json
@@ -26,14 +27,135 @@ import tempfile
 import threading
 import time
 
-from e2e_session_continuity_ws import ROOT, Smoke, check, stop
+if __package__:
+    from .e2e_session_continuity_ws import ROOT, Smoke, check, stop as stop_posix
+else:
+    from e2e_session_continuity_ws import ROOT, Smoke, check, stop as stop_posix
 
 try:
     import paramiko
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 except ImportError:
-    raise SystemExit("Install test-only dependency paramiko==4.0.0 before running this acceptance")
+    paramiko = None
+
+
+def git_posix_tools(git: Path) -> tuple[Path, Path]:
+    # cmd/git.exe is usual in PowerShell; Git Bash exposes mingw64/bin/git.exe.
+    for root in list(git.resolve().parents)[:3]:
+        shell = root / "usr/bin/sh.exe"
+        cygpath = shell.with_name("cygpath.exe")
+        if shell.is_file() and cygpath.is_file():
+            return shell, cygpath
+    raise AssertionError("Git for Windows POSIX fixture tools are missing")
+
+
+@dataclass(frozen=True)
+class HostTools:
+    shell: Path
+    runner_path: str
+    remote_env: dict[str, str]
+    cygpath: Path | None = None
+
+    @classmethod
+    def discover(cls):
+        if os.name == "posix":
+            for name in ["ssh", "ssh-keyscan", "sh"]:
+                check(shutil.which(name) is not None, f"Required acceptance tool is missing: {name}")
+            return cls(Path(shutil.which("sh")), os.environ.get("PATH", os.defpath),
+                       {"PATH": os.defpath, "LANG": "C"})
+        check(os.name == "nt", "This acceptance requires native Windows or a Unix host")
+        system = Path(os.environ["SystemRoot"]) / "System32"
+        native = system / "OpenSSH"
+        runner_path = os.pathsep.join([str(native), str(system), os.environ.get("PATH", "")])
+        for name in ["ssh.exe", "ssh-keyscan.exe"]:
+            expected = native / name
+            resolved = shutil.which(name, path=runner_path)
+            check(expected.is_file() and resolved is not None
+                  and Path(resolved).resolve() == expected.resolve(),
+                  f"Windows acceptance must use System32 OpenSSH {name}; Git SSH is not accepted")
+        version = subprocess.run([str(native / "ssh.exe"), "-V"], stdin=subprocess.DEVNULL,
+                                 capture_output=True, timeout=10, check=True)
+        check(b"OpenSSH_for_Windows" in version.stdout + version.stderr,
+              "Windows acceptance requires the native Microsoft OpenSSH client")
+        # Git Bash supplies only the disposable remote POSIX host. It never
+        # supplies the SSH client or the native Runner's ASKPASS helper.
+        git = shutil.which("git.exe")
+        check(git is not None, "Git for Windows is required for the remote POSIX fixture")
+        shell, cygpath = git_posix_tools(Path(git))
+        remote_env = {"PATH": os.pathsep.join([str(shell.parent), str(system)]), "LANG": "C",
+                      "SystemRoot": os.environ["SystemRoot"]}
+        for name in ["TEMP", "TMP"]:
+            if name in os.environ:
+                remote_env[name] = os.environ[name]
+        print("Using native System32 OpenSSH client/keyscan; Git Bash is the remote fixture only")
+        return cls(shell, runner_path, remote_env, cygpath)
+
+    def remote_path(self, path: Path) -> str:
+        if self.cygpath is None:
+            return str(path)
+        result = subprocess.run([str(self.cygpath), "-u", str(path)], stdin=subprocess.DEVNULL,
+                                env=self.remote_env, capture_output=True, timeout=10, check=True)
+        value = result.stdout.decode("utf-8").strip()
+        check(value.startswith("/") and "\n" not in value and "\r" not in value,
+              "Remote fixture cwd must be an unambiguous POSIX path")
+        return value
+
+
+def secure_fixture_path(path: Path) -> None:
+    """Protect only newly created, owned fixture paths; never repair user files."""
+    if os.name != "nt":
+        path.chmod(0o700 if path.is_dir() else 0o600)
+        return
+    # chmod on Windows does not establish an owner/private DACL. Match the
+    # native private store's current SID + SYSTEM + Administrators contract.
+    script = r"""
+$ErrorActionPreference = 'Stop'
+$path = $env:WEBCODEX_SSH_FIXTURE_PRIVATE_PATH
+$item = Get-Item -LiteralPath $path -Force
+if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Fixture link refused' }
+$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+if ($item.PSIsContainer) { $acl = New-Object Security.AccessControl.DirectorySecurity }
+else { $acl = New-Object Security.AccessControl.FileSecurity }
+$acl.SetSecurityDescriptorSddlForm("O:${sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;${sid})")
+Set-Acl -LiteralPath $path -AclObject $acl
+"""
+    program = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    result = subprocess.run([str(program), "-NoLogo", "-NoProfile", "-NonInteractive",
+                             "-EncodedCommand", base64.b64encode(script.encode("utf-16le")).decode("ascii")],
+                            env=os.environ | {"WEBCODEX_SSH_FIXTURE_PRIVATE_PATH": str(path)},
+                            stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+    check(result.returncode == 0, "Could not protect the newly created Windows fixture path")
+
+
+def stop(process: subprocess.Popen | None) -> None:
+    if os.name != "nt":
+        stop_posix(process)
+    elif process is not None and process.poll() is None:
+        # SIGINT is not a portable Popen signal on Windows. These are owned
+        # temporary services; terminating the Runner also exercises recovery
+        # from its already-committed credential/registry state.
+        process.terminate()
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def channel_input(channel, deadline: float, limit: int = 2 * 1024 * 1024) -> bytes:
+    data = bytearray()
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("fixture input deadline")
+        channel.settimeout(remaining)
+        part = channel.recv(min(65536, limit - len(data) + 1))
+        if not part:
+            return bytes(data)
+        data.extend(part)
+        if len(data) > limit:
+            raise ValueError("fixture input limit")
 
 
 def generated_key():
@@ -52,15 +174,17 @@ def fingerprint(key) -> str:
 class SshFixture:
     """Small real SSH server; rejects forwarding, PTY, and interactive shells."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, tools: HostTools):
+        check(paramiko is not None, "Install test-only dependency paramiko==4.0.0 before running this acceptance")
         self.root = root
+        self.tools = tools
         self.user = "webcodex-ssh-fixture"
         self.password = secrets.token_urlsafe(32)
         self.host_key, _ = generated_key()
         self.client_key, client_pem = generated_key()
         self.key_path = root / "client-key"
         self.key_path.write_bytes(client_pem)
-        self.key_path.chmod(0o600)
+        secure_fixture_path(self.key_path)
         self.passphrase = secrets.token_urlsafe(32)
         # OpenSSH abbreviates passphrase prompts at 100 bytes. Deliberately
         # cross that boundary inside a UTF-8 path to cover the native helper.
@@ -71,9 +195,10 @@ class SshFixture:
             serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH,
             serialization.BestAvailableEncryption(self.passphrase.encode()),
         ))
-        self.encrypted_key_path.chmod(0o600)
+        secure_fixture_path(self.encrypted_key_path)
         self.remote = root / "remote"
         self.remote.mkdir(mode=0o700)
+        self.remote_cwd = tools.remote_path(self.remote)
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(16)
@@ -85,6 +210,7 @@ class SshFixture:
         self.password_attempts = 0
         self.successful_passwords = 0
         self.executions = 0
+        self.framed_executions = 0
         self.thread = threading.Thread(target=self.accept, daemon=True)
         self.thread.start()
 
@@ -152,15 +278,22 @@ class SshFixture:
     def execute(self, channel, command):
         self.executions += 1
         try:
+            deadline = time.monotonic() + 15
+            # Native Windows OpenSSH carries the exact program on channel
+            # stdin. Preserve those bytes and EOF; DEVNULL would test only
+            # authentication and silently discard the real execution protocol.
+            data = channel_input(channel, deadline)
+            if command.startswith(b": WEBCODEX_SSH_PROGRAM_BYTES=") and data:
+                self.framed_executions += 1
             result = subprocess.run(
-                ["sh", "-c", command.decode("utf-8")], cwd=self.remote,
-                env={"PATH": os.defpath, "LANG": "C"}, stdin=subprocess.DEVNULL,
-                capture_output=True, timeout=15,
+                [str(self.tools.shell), "-c", command.decode("utf-8")], cwd=self.remote,
+                env=self.tools.remote_env, input=data,
+                capture_output=True, timeout=max(0.001, deadline - time.monotonic()),
             )
             channel.sendall(result.stdout[:2 * 1024 * 1024])
             channel.sendall_stderr(result.stderr[:2 * 1024 * 1024])
             channel.send_exit_status(result.returncode)
-        except (OSError, UnicodeError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.TimeoutExpired):
             try:
                 channel.send_exit_status(125)
             except OSError:
@@ -179,15 +312,33 @@ class SshFixture:
 
 
 class ConnectionAcceptance(Smoke):
-    def __init__(self, bin_dir: Path, root: Path):
+    def __init__(self, bin_dir: Path, root: Path, tools: HostTools):
         super().__init__(bin_dir, root)
-        self.ssh = SshFixture(root)
+        # Windows ignores XDG roots for several native state stores. Isolate
+        # both Windows locations too, without changing the actual OS identity,
+        # USERPROFILE or the native OpenSSH installation.
+        for variable, directory in [("APPDATA", "roaming"), ("LOCALAPPDATA", "local")]:
+            path = root / directory
+            path.mkdir(mode=0o700)
+            secure_fixture_path(path)
+            self.env[variable] = str(path)
+        self.ssh = SshFixture(root, tools)
+        self.remote_cwd = self.ssh.remote_cwd
         self.endpoint = {"host": "127.0.0.1", "port": self.ssh.port, "user": self.ssh.user}
         self.authentication = {"type": "password", "password": self.ssh.password}
-        self.env.update({"WEBCODEX_ENV_FILE": os.devnull,
+        self.env.update({"PATH": tools.runner_path, "WEBCODEX_ENV_FILE": os.devnull,
                          "WEBCODEX_MCP_HOST_PROFILE": "direct",
                          "WEBCODEX_TOOL_REQUEST_TRACE": "full",
                          "WEBCODEX_TOOL_REQUEST_TRACE_DIR": str(root / "traces")})
+
+    def launch(self, binary: str, args: list[str], env: dict) -> subprocess.Popen:
+        if os.name != "nt":
+            return super().launch(binary, args, env)
+        log = (self.root / f"{binary}-{len(self.logs)}.log").open("wb")
+        self.logs.append(log)
+        return subprocess.Popen([str(self.bin_dir / (binary + ".exe")), *args], env=env,
+                                stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
 
     def operator(self, action, body, token=None, success=True):
         result = self.post("/api/runtime-console/ssh-resources/" + action, body, token or self.owner)
@@ -245,6 +396,7 @@ class ConnectionAcceptance(Smoke):
         # its private path even when the operator config directory contains %.
         config_dir = self.root / "runner %q configuration"
         config_dir.mkdir(mode=0o700)
+        secure_fixture_path(config_dir)
         self.config = config_dir / "runner.toml"
         self.config.write_text("\n".join([
             f'server_url = "{self.url}"', f'token = {json.dumps(enrollment["token"])}',
@@ -252,7 +404,7 @@ class ConnectionAcceptance(Smoke):
             f'project_registry_dir = {json.dumps(str(registry))}', '[policy]', 'allow_raw_shell = true',
             f'allowed_roots = [{json.dumps(str(self.project_dir))}]',
         ]) + "\n")
-        self.config.chmod(0o600)
+        secure_fixture_path(self.config)
         self.runner = self.launch("webcodex-runner", ["--config", str(self.config)], self.env)
         self.project = "agent:ssh-setup-runner:fixture"
         self.wait_ready(self.project, self.owner)
@@ -294,7 +446,7 @@ class ConnectionAcceptance(Smoke):
             "path": str(self.ssh.encrypted_key_path), "passphrase": self.ssh.passphrase}}
         self.operator("probe", encrypted_key_probe)
         saved = self.operator("register", {
-            "binding": binding, "name": "password-fixture", "default_cwd": str(self.ssh.remote),
+            "binding": binding, "name": "password-fixture", "default_cwd": self.remote_cwd,
             "connection": {"kind": "direct", "endpoint": self.endpoint,
                            "authentication": self.authentication, "host_key": trust},
         })
@@ -324,7 +476,7 @@ class ConnectionAcceptance(Smoke):
         # Bootstrap and Session execution defaults are separate contracts.
         # MCP receives only the loaded logical resource name and remote cwd;
         # authentication and host-key trust remain in the operator flow.
-        execution_context = {"resource": "password-fixture", "default_cwd": str(self.ssh.remote)}
+        execution_context = {"resource": "password-fixture", "default_cwd": self.remote_cwd}
         updated = self.tool("update_session_context", {"project": self.project,
             "session_id": session_id, "execution_context": execution_context}, self.owner)
         check(updated.get("project") == self.project and updated.get("session_id") == session_id
@@ -337,6 +489,9 @@ class ConnectionAcceptance(Smoke):
         check((self.ssh.remote / "remote-proof.txt").read_text() == "SSH_PASSWORD_ROUTE_OK\n",
               "MCP shell did not execute in the SSH target")
         check(not (self.project_dir / "remote-proof.txt").exists(), "MCP shell fell back to local execution")
+        if os.name == "nt":
+            check(self.ssh.framed_executions > 0,
+                  "Native Windows SSH did not deliver the real program over channel stdin")
         check(self.ssh.password not in json.dumps(output), "MCP output disclosed the password")
         print("PASS: persisted password survives Runner restart; MCP run_shell executes on the selected SSH resource")
 
@@ -368,14 +523,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=ROOT / "target" / "dogfood")
     args = parser.parse_args()
-    if os.name != "posix" or not shutil.which("ssh") or not shutil.which("ssh-keyscan"):
-        raise SystemExit("This acceptance requires a Unix host with OpenSSH ssh and ssh-keyscan")
+    check(paramiko is not None, "Install test-only dependency paramiko==4.0.0 before running this acceptance")
+    tools = HostTools.discover()
     for binary in ["webcodex-server", "webcodex-runner"]:
-        check((args.bin_dir / binary).is_file(), f"Build {binary} with the dogfood profile first")
+        filename = binary + (".exe" if os.name == "nt" else "")
+        check((args.bin_dir / filename).is_file(), f"Build {binary} with the dogfood profile first")
     logging.getLogger("paramiko").addHandler(logging.NullHandler())
     logging.getLogger("paramiko").propagate = False
     with tempfile.TemporaryDirectory(prefix="webcodex-ssh-acceptance-") as temporary:
-        acceptance = ConnectionAcceptance(args.bin_dir.resolve(), Path(temporary).resolve())
+        root = Path(temporary).resolve()
+        secure_fixture_path(root)
+        acceptance = ConnectionAcceptance(args.bin_dir.resolve(), root, tools)
         try:
             acceptance.run()
         finally:

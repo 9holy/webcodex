@@ -133,6 +133,35 @@ class PathRiskFixtureTests(unittest.TestCase):
         self.assertEqual(result["needs_windows_runner"], "true")
         self.assertEqual(result["needs_macos"], "true")
 
+    def test_ssh_execution_and_fixture_require_native_windows_acceptance(self) -> None:
+        for path in (
+            "scripts/e2e_ssh_connections.py",
+            "scripts/e2e_session_continuity_ws.py",
+            "scripts/tests/test_e2e_ssh_connections.py",
+            "crates/webcodex-environment/src/private_files.rs",
+            "crates/webcodex-runner/src/webcodex_runner/ssh.rs",
+            "crates/webcodex-runner/src/webcodex_runner/ssh_credentials.rs",
+            "crates/webcodex-runner/src/webcodex_runner/ssh_credentials/tests.rs",
+            "crates/webcodex-runner/src/webcodex_runner/managed_ssh.rs",
+            "crates/webcodex-runner/src/webcodex_runner/managed_ssh/connection.rs",
+            "crates/webcodex-runner/src/webcodex_runner/job_manager/ssh.rs",
+        ):
+            for status in ("A", "M", "D"):
+                with self.subTest(path=path, status=status):
+                    result = classify(path, statuses=(status,))
+                    self.assertEqual(result["needs_windows_desktop"], "true")
+                    self.assertEqual(result["needs_full_native"], "false")
+                    self.assertIn("ssh-native-acceptance", result["categories"])
+                    if path.startswith("crates/webcodex-runner/"):
+                        self.assertEqual(result["needs_windows_runner"], "true")
+                        self.assertEqual(result["needs_macos"], "true")
+        for unrelated in (
+            "docs/ssh-guide.md", "scripts/e2e_other.py",
+            "crates/webcodex-runner/src/webcodex_runner/shell.rs",
+        ):
+            with self.subTest(unrelated=unrelated):
+                self.assertEqual(classify(unrelated)["needs_windows_desktop"], "false")
+
     def test_desktop_package_manifest_requires_frontend_and_native_desktop(self) -> None:
         result = classify("apps/desktop/package-lock.json")
         self.assertEqual(result["needs_desktop_frontend"], "true")
