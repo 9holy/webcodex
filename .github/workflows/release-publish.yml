@@ -36,12 +36,10 @@ jobs:
         shell: bash
         working-directory: control
     env:
-      GH_TOKEN: ${{ github.token }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       PYTHONDONTWRITEBYTECODE: '1'
       CONTROL_REQUEST: ${{ github.workspace }}/control/.github/release-requests/v0.5.2.json
       SOURCE_ROOT: ${{ github.workspace }}/release-source
-      STATE_DIR: ${{ runner.temp }}/webcodex-release-control
-      BUNDLE_DIR: ${{ runner.temp }}/webcodex-release-bundle
     steps:
       - name: Checkout reviewed publication controller
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -50,6 +48,10 @@ jobs:
           path: control
           fetch-depth: 1
           persist-credentials: false
+      - name: Initialize publication directories
+        run: |
+          printf 'STATE_DIR=%s/webcodex-release-control\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'BUNDLE_DIR=%s/webcodex-release-bundle\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - name: Checkout immutable release source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
