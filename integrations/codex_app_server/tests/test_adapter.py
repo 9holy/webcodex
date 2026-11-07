@@ -154,6 +154,28 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.profile["args"][1:3], ["serve", "--experimental"])
         self.assertTrue(all(key == value for key, value in self.profile["env_from_env"].items()))
 
+    def test_project_alias_uses_the_runner_owned_directory_before_native_start(self):
+        native_root = self.root.resolve()
+        if os.name == "nt":
+            self.root = Path("\\\\?\\" + str(native_root))
+        else:
+            (native_root / "nested").mkdir()
+            self.root = native_root / "nested" / ".."
+        self.start()
+        self.prompt()
+        self.assertEqual(self.terminal()[0]["result"]["stopReason"], "end_turn")
+        self.assertEqual(self.wait_log("thread/start")[0]["params"]["cwd"], str(native_root))
+        self.assertEqual(self.wait_log("turn/start")[0]["params"]["cwd"], str(native_root))
+        self.assertTrue((native_root / "native-result.txt").is_file())
+
+    def test_session_cannot_select_another_existing_directory(self):
+        other = self.root / "unadmitted"
+        other.mkdir()
+        self.start(handshake=False)
+        self.send(2, "session/new", {"cwd": str(other), "mcpServers": []})
+        self.assertEqual(self.get()["error"]["data"]["kind"], "invalid_session")
+        self.assertFalse(any(frame.get("method") == "thread/start" for frame in self.log()))
+
     def test_native_command_approval_never_executes_before_selection(self):
         self.start("approval")
         self.prompt()

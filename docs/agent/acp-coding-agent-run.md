@@ -755,6 +755,10 @@ Runs. Up to 8 waiting Runs receive fresh typed observations, with at most 4 in
 parallel and a 3-second internal response deadline per observation. Timed-out
 dispatches are cleaned up. `truncated: true` also indicates missing or failed live
 observations, so absence of pending details is not proof that no approval exists.
+The encoded response also stays within 768 KiB, below Desktop's 1 MiB transport
+limit. JSON escaping counts toward this bound. If complete request cards exceed
+it, lower-priority cards are omitted and `truncated` is set; no approvable request
+body is shortened to fit.
 
 Listing has no execution or approval side effect. `can_approve` reflects the
 current credential's independent approval policy; each submitted response still

@@ -67,7 +67,7 @@ fn preparation_uses_bundled_resources_and_unique_receipts_without_enabling() {
         config_dir: directory.path().join("private"),
         python_bin: Some(python.clone()),
         codex_bin: Some(python),
-        codex_args: vec![fixture.to_string_lossy().into_owned()],
+        codex_args: vec!["-u".into(), fixture.to_string_lossy().into_owned()],
         expected_version: Some("0.167.0-fixture.1".into()),
     };
     let first = prepare_codex(&options).unwrap();

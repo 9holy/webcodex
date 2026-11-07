@@ -68,6 +68,7 @@ fn canonical_operation_names_are_unique_verb_first_and_route_independent() {
         "stop_",
         "start_",
         "cancel_",
+        "respond_",
         "delete_",
         "remove_",
         "register_",

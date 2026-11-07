@@ -107,10 +107,16 @@ fn explicit_permission_selection_reaches_provider_once_and_recovers_without_repl
     ] {
         let (temp, manager, projects, root, run, config) = waiting_fixture_scenario(scenario);
         let pending = wait_pending(&manager, &run);
-        assert!(pending.details.contains("command: inspect"));
-        assert!(pending
-            .details
-            .contains(&root.to_string_lossy().to_string()));
+        // The executable fixture root may retain `../..` components, while
+        // the provider's getcwd() returns the canonical path. Verify the
+        // complete displayed action, including that exact resolved cwd.
+        assert_eq!(
+            pending.details,
+            format!(
+                "command: inspect\ncwd: {}\n",
+                root.canonicalize().unwrap().display()
+            )
+        );
         assert_eq!(pending.options.len(), 2);
         assert!(!serde_json::to_string(&pending)
             .unwrap()

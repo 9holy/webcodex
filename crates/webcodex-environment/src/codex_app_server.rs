@@ -314,7 +314,7 @@ pub fn prepare_codex(options: &PrepareCodexOptions) -> SetupResultValue<Prepared
                 .unwrap_or_else(|| Path::new("codex")),
         );
     for arg in &options.codex_args {
-        command.arg("--codex-arg").arg(arg);
+        command.arg(format!("--codex-arg={arg}"));
     }
     if let Some(version) = &options.expected_version {
         command.arg("--expected-version").arg(version);

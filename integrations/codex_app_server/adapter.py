@@ -45,6 +45,17 @@ def text(value, limit=MAX_FRAME):
     return value
 
 
+def same_directory(path, expected):
+    # Windows verbatim paths, case aliases, and harmless dot segments can name
+    # the same admitted directory. Compare its filesystem identity, not text.
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return False
+    try:
+        return os.path.samefile(path, expected)
+    except (OSError, ValueError):
+        return False
+
+
 class Output:
     """A bounded stdout writer; a stopped consumer cannot block cancellation.
 
@@ -216,8 +227,7 @@ class Adapter:
         if not isinstance(thread, dict) or not valid_id(thread.get("id")) or not isinstance(thread["id"], str):
             raise Failure("codex_thread_invalid")
         if (result.get("approvalPolicy") != "on-request" or result.get("approvalsReviewer") != "user"
-                or not isinstance(result.get("cwd"), str)
-                or Path(result["cwd"]).resolve() != Path(self.cwd).resolve()):
+                or not same_directory(result.get("cwd"), self.cwd)):
             raise Failure("codex_effective_policy_mismatch")
         actual = result.get("sandbox")
         expected = self.sandbox()
@@ -229,8 +239,7 @@ class Adapter:
         if expected["type"] == "workspaceWrite":
             roots = actual.get("writableRoots", [])
             if (not isinstance(roots, list) or len(roots) > 16
-                    or any(not isinstance(root, str) or not os.path.isabs(root)
-                           or Path(root).resolve() != Path(self.cwd).resolve() for root in roots)
+                    or any(not same_directory(root, self.cwd) for root in roots)
                     or actual.get("excludeTmpdirEnvVar") is not True
                     or actual.get("excludeSlashTmp") is not True):
                 raise Failure("codex_effective_policy_mismatch")
@@ -279,9 +288,12 @@ class Adapter:
                     or any(entry[0] == "thread/start" for entry in self.pending.values())
                     or not isinstance(cwd, str) or not os.path.isabs(cwd)
                     or len(cwd.encode("utf-8")) > 4096 or not Path(cwd).is_dir()
-                    or Path(cwd).resolve() != Path.cwd().resolve() or params.get("mcpServers") != []):
+                    or not same_directory(cwd, Path.cwd()) or params.get("mcpServers") != []):
                 await self.error(rid, "invalid_session", -32602)
                 return
+            # Pass one native OS spelling after the Runner-owned working
+            # directory has been checked; never forward a caller's path alias.
+            cwd = str(Path.cwd())
             self.cwd = cwd
             values = {"cwd": cwd, "sandbox": self.config.sandbox, "approvalPolicy": "on-request",
                       "approvalsReviewer": "user", "ephemeral": True,

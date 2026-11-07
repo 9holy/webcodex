@@ -11,6 +11,9 @@ const MAX_RUNS: usize = 32;
 const MAX_LIVE_OBSERVATIONS: usize = 8;
 const OBSERVATION_PARALLELISM: usize = 4;
 const OBSERVATION_RESPONSE_SECS: u64 = 3;
+// Desktop bounds one HTTP response to 1 MiB. JSON escaping can expand an
+// otherwise valid 64 KiB request, so count encoded bytes across the inventory.
+const MAX_RESPONSE_BYTES: usize = 768 * 1024;
 
 #[derive(Serialize)]
 pub(crate) struct CodingAgentOperatorInventory {
@@ -48,6 +51,25 @@ fn priority(run: &CodingAgentRunSnapshot) -> (u8, i64) {
         },
         run.updated_at,
     )
+}
+
+fn bound_response(inventory: &mut CodingAgentOperatorInventory) -> Result<(), ()> {
+    while serde_json::to_vec(inventory).map_err(|_| ())?.len() > MAX_RESPONSE_BYTES {
+        inventory.truncated = true;
+        // Preserve every displayed request in full. Remove lower-priority
+        // request cards before removing the compact Run summaries themselves.
+        if let Some(run) = inventory
+            .runs
+            .iter_mut()
+            .rev()
+            .find(|run| run.pending_permission.is_some())
+        {
+            run.pending_permission = None;
+        } else if inventory.runs.pop().is_none() {
+            return Err(());
+        }
+    }
+    Ok(())
 }
 
 impl ToolRuntime {
@@ -171,7 +193,7 @@ impl ToolRuntime {
                 Err(_) => truncated = true,
             }
         }
-        Ok(CodingAgentOperatorInventory {
+        let mut inventory = CodingAgentOperatorInventory {
             runs,
             authorization: CodingAgentOperatorAuthorization {
                 can_run: true,
@@ -182,6 +204,71 @@ impl ToolRuntime {
                 .is_ok(),
             },
             truncated,
-        })
+        };
+        bound_response(&mut inventory)?;
+        Ok(inventory)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use webcodex_core::coding_agent::{
+        CodingAgentPermissionOption, CodingAgentPermissionOptionKind,
+    };
+
+    #[test]
+    fn escaped_complete_requests_fit_the_desktop_response_limit() {
+        let details = format!("Review this request\n{}", "\t".repeat(64 * 1024 - 32));
+        let mut inventory = CodingAgentOperatorInventory {
+            runs: (0..8)
+                .map(|index| CodingAgentOperatorRun {
+                    run_id: format!("wc_agent_run_budget_{index}"),
+                    client_id: "client".into(),
+                    runtime_project_id: "agent:client:project".into(),
+                    provider_id: "codex".into(),
+                    state: CodingAgentRunState::WaitingPermission,
+                    observation_revision: 1,
+                    pending_permission: Some(CodingAgentPendingPermission {
+                        request_id: format!("wc_agent_permission_budget_{index}"),
+                        label: "Review request".into(),
+                        details: details.clone(),
+                        expires_at: Utc::now().timestamp() + 60,
+                        options: vec![CodingAgentPermissionOption {
+                            option_id: "once".into(),
+                            name: "Allow once".into(),
+                            kind: CodingAgentPermissionOptionKind::AllowOnce,
+                        }],
+                    }),
+                })
+                .collect(),
+            authorization: CodingAgentOperatorAuthorization {
+                can_run: true,
+                can_approve: false,
+            },
+            truncated: false,
+        };
+        for run in &inventory.runs {
+            webcodex_core::coding_agent::validate_pending_permission(
+                run.pending_permission.as_ref().unwrap(),
+            )
+            .unwrap();
+        }
+        assert!(serde_json::to_vec(&inventory).unwrap().len() > 1024 * 1024);
+        bound_response(&mut inventory).unwrap();
+        assert!(serde_json::to_vec(&inventory).unwrap().len() <= MAX_RESPONSE_BYTES);
+        assert!(inventory.truncated);
+        assert_eq!(inventory.runs.len(), 8);
+        assert!(!inventory.authorization.can_approve);
+        let displayed = inventory
+            .runs
+            .iter()
+            .filter_map(|run| run.pending_permission.as_ref())
+            .collect::<Vec<_>>();
+        assert!(!displayed.is_empty() && displayed.len() < 8);
+        for pending in displayed {
+            assert_eq!(pending.details, details);
+            assert_eq!(pending.options.len(), 1);
+        }
     }
 }

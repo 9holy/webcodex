@@ -220,7 +220,6 @@ for line in sys.stdin:
     )
 }
 
-#[cfg(unix)]
 fn project_fixture(temp: &TempDir) -> PathBuf {
     let root = temp.path().join("repo");
     fs::create_dir_all(&root).unwrap();
@@ -234,7 +233,6 @@ fn project_fixture(temp: &TempDir) -> PathBuf {
     projects
 }
 
-#[cfg(unix)]
 fn start_request(
     manager: &CodingAgentManager,
     root: &Path,
@@ -318,7 +316,6 @@ fn wait_for_prompt_handoff(manager: &CodingAgentManager, run: &str) {
     }
 }
 
-#[cfg(unix)]
 fn wait_for_terminal_observation(
     manager: &CodingAgentManager,
     run: &str,

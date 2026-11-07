@@ -5,23 +5,11 @@ use super::*;
 
 #[test]
 fn codex_app_server_adapter_completes_real_runner_roundtrip() {
-    let Ok(python) = Command::new("python3")
-        .args([
-            "-I",
-            "-c",
-            "import sys; assert sys.version_info >= (3,10); print(sys.executable)",
-        ])
-        .stdin(Stdio::null())
-        .output()
-    else {
+    let Ok(python) = webcodex_environment::codex_app_server::probe_python(None) else {
         eprintln!("skipping Codex app-server roundtrip: Python 3.10+ is unavailable");
         return;
     };
-    if !python.status.success() {
-        eprintln!("skipping Codex app-server roundtrip: Python 3.10+ is unavailable");
-        return;
-    }
-    let executable = String::from_utf8(python.stdout).unwrap().trim().to_string();
+    let executable = python.to_string_lossy().into_owned();
     let temp = crate::tests::executable_tempdir();
     let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../integrations/codex_app_server")
@@ -58,6 +46,12 @@ fn codex_app_server_adapter_completes_real_runner_roundtrip() {
         ],
     );
     config.agents[0].allowed_config_options.clear();
+    #[cfg(windows)]
+    // Match the prepared profile's explicit Windows OS environment without
+    // inheriting unrelated configuration or credentials into the fixture.
+    config.agents[0]
+        .env_from_env
+        .insert("SystemRoot".into(), "SystemRoot".into());
     let projects = project_fixture(&temp);
     let root = temp.path().join("repo");
     let manager = CodingAgentManager::with_store(&config, temp.path().join("store")).unwrap();
@@ -66,7 +60,16 @@ fn codex_app_server_adapter_completes_real_runner_roundtrip() {
     let response = manager.handle(request, &projects);
     assert!(response.error.is_none(), "{:?}", response.error);
     let observation = wait_for_terminal_observation(&manager, run);
-    assert_eq!(observation.run.state, CodingAgentRunState::Completed);
+    assert_eq!(
+        observation.run.state,
+        CodingAgentRunState::Completed,
+        "run error code: {:?}",
+        observation
+            .run
+            .terminal
+            .as_ref()
+            .and_then(|terminal| terminal.error_code.as_deref())
+    );
     assert!(observation.events.iter().any(|event| {
         event.kind == CodingAgentEventKind::AgentMessage && event.text.as_deref() == Some("完成 🌎")
     }));

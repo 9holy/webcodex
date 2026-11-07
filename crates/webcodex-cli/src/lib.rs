@@ -2874,7 +2874,10 @@ pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
                     ))
                 });
             match result {
-                Ok(output) => println!("{output}"),
+                Ok(output) => {
+                    println!("{output}");
+                    Ok(())
+                }
                 Err(error) => {
                     if json {
                         println!(
