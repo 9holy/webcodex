@@ -1,5 +1,59 @@
 use super::*;
 
+#[test]
+fn continuation_failure_retains_only_closed_categories_and_not_remote_error_text() {
+    let mut detail = json!({"activity":[{"meaningful":true, "tool_name":"finish_coding_task", "status":"failed", "started_at_ms":1, "ended_at_ms":2,
+        "failure":{"outcome":"call_failed", "reason":"session_mismatch", "error_kind":"PRIVATE_CODE", "message":"PRIVATE_EXCEPTION", "password":"PRIVATE_PASSWORD"}}]});
+    let summary = continuation(&detail, 10).unwrap();
+    assert_eq!(summary["failure"], json!({"outcome":"call_failed", "reason":"session_mismatch"}));
+    assert!(!summary.to_string().contains("PRIVATE"));
+    detail["activity"][0]["failure"]["reason"] = json!("PRIVATE_REASON");
+    assert_eq!(continuation(&detail, 10).unwrap()["failure"]["reason"], "details_unavailable");
+    detail["activity"][0]["failure"]["outcome"] = json!("PRIVATE_OUTCOME");
+    assert!(continuation(&detail, 10).unwrap().get("failure").is_none());
+    detail["activity"][0]["failure"] = json!({"outcome":"rejected", "reason":"missing_scope"});
+    detail["activity"][0]["status"] = json!("success");
+    assert!(continuation(&detail, 10).unwrap().get("failure").is_none());
+}
+
+#[test]
+fn continuation_timeout_retains_uncertain_outcome_without_claiming_execution_failed() {
+    for status in ["timeout", "timed_out", "failure"] {
+        let detail = json!({"activity":[{"meaningful":true, "tool_name":"run_process", "status":status,
+            "started_at_ms":1, "ended_at_ms":2, "http_status":408,
+            "failure":{"outcome":"outcome_unknown", "reason":"timeout", "execution_state":"outcome_unknown"}}]});
+        let summary = continuation(&detail, 10).unwrap();
+        assert_eq!(summary["execution"], "failed");
+        assert_eq!(summary["failure"], json!({"outcome":"outcome_unknown", "reason":"timeout"}));
+        assert_ne!(summary["failure"]["outcome"], "execution_failed");
+    }
+}
+
+#[test]
+fn public_project_resources_follow_the_compiled_publisher_and_keep_upstream_credit() {
+    let publisher = webcodex_core::build_info::RELEASE_REPOSITORY;
+    for (resource, suffix) in [
+        (ResourceKind::Github, ""),
+        (ResourceKind::Documentation, "/blob/main/docs/DESKTOP_RUNTIME_COMPATIBILITY.md"),
+        (ResourceKind::ReportIssue, "/issues/new"),
+        (ResourceKind::Contributing, "/blob/main/CONTRIBUTING.md"),
+        (ResourceKind::DesktopDevelopment, "/blob/main/docs/DESKTOP_DEVELOPMENT.md"),
+        (ResourceKind::Releases, "/releases"),
+        (ResourceKind::ReleaseNotes, "/releases/latest"),
+    ] {
+        let url = resource.external_url().unwrap();
+        assert_eq!(url, format!("https://github.com/{publisher}{suffix}"));
+        assert!(crate::platform::opener::validate_url(&url).is_ok());
+    }
+    assert_eq!(
+        ResourceKind::UpstreamProject.external_url().as_deref(),
+        Some("https://github.com/yyjeqhc/webcodex")
+    );
+    for resource in [ResourceKind::AppData, ResourceKind::RuntimeDirectory, ResourceKind::RuntimeConsole] {
+        assert!(resource.external_url().is_none());
+    }
+}
+
 fn env_fixture(text: &str) -> PathBuf {
     let directory = std::env::temp_dir().join(format!(
         "webcodex-safe-diagnostics-{}",

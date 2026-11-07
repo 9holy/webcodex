@@ -38,6 +38,8 @@ pub(crate) struct RuntimeConsoleWindowActivity {
     pub(crate) project: Option<String>,
     pub(crate) status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) failure: Option<super::window_activity_failure::CallFailure>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failure_expectation_result: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) http_status: Option<i64>,
@@ -251,6 +253,10 @@ pub(crate) async fn project_visible_window_activity(
         activity_kind: activity_semantics
             .and_then(|semantics| semantics.kind.as_str().map(str::to_string)),
         project: event.project,
+        failure: super::window_activity_failure::project_call_failure(
+            &event.status,
+            &event.failure_metadata,
+        ),
         status: event.status,
         failure_expectation_result: event.failure_expectation_result,
         http_status: event.http_status,

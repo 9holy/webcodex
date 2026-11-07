@@ -258,6 +258,44 @@ jobs:
           cargo test --locked -p webcodex-tool-contracts --no-default-features --features workspace-checkpoints --lib registration_consistency
           cargo test --locked -p webcodex-tool-contracts --no-default-features --features experimental-code-mode --lib registration_consistency
 
+  test-desktop-ui:
+    needs: changes
+    if: needs.changes.outputs.needs_desktop_frontend == 'true' || needs.changes.outputs.needs_frontend == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            frontend/package-lock.json
+            apps/desktop/package-lock.json
+            scripts/ui-smoke/package-lock.json
+      - name: Build the production Desktop renderer
+        run: |
+          npm ci --prefix frontend
+          npm ci --prefix apps/desktop
+          npm ci --prefix scripts/ui-smoke
+          npm --prefix apps/desktop run build
+      - name: Install the isolated renderer browser
+        working-directory: scripts/ui-smoke
+        run: npx playwright install --with-deps chromium
+      - name: Check SSH setup, activity failures and publisher navigation
+        # Synthetic loopback fixtures; no credentials, SSH hosts or native effects.
+        run: node scripts/ui-smoke/desktop-fork-workflows.mjs
+      - name: Retain renderer checks and synthetic screenshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-fork-workflows
+          path: artifacts/desktop-fork-workflows/
+          if-no-files-found: ignore
+          retention-days: 14
+
   mcp-conformance:
     # Dated MCP wire evidence is independent from ordinary unit/integration tests.
     # The script pins the external referee and rejects missing or silently skipped
@@ -1113,7 +1151,7 @@ jobs:
           require_lane desktop "$NEEDS_DESKTOP" "$DESKTOP_RESULT"
 
   test-native:
-    needs: [contract, changes, mcp-conformance, test-docker-server, test-macos, test-windows]
+    needs: [contract, changes, mcp-conformance, test-docker-server, test-desktop-ui, test-macos, test-windows]
     # Stable branch-protection context: daily native aggregates and the path-aware
     # Server image smoke must resolve according to classifier policy.
     # Workflow cancellation is distinct from needs.<lane>.result. Superseded
@@ -1127,8 +1165,10 @@ jobs:
           CONTRACT_RESULT: ${{ needs.contract.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
           NEEDS_DOCKER: ${{ needs.changes.outputs.needs_docker }}
+          NEEDS_DESKTOP_UI: ${{ needs.changes.outputs.needs_desktop_frontend == 'true' || needs.changes.outputs.needs_frontend == 'true' }}
           MCP_CONFORMANCE_RESULT: ${{ needs.mcp-conformance.result }}
           DOCKER_RESULT: ${{ needs.test-docker-server.result }}
+          DESKTOP_UI_RESULT: ${{ needs.test-desktop-ui.result }}
           MACOS_RESULT: ${{ needs.test-macos.result }}
           WINDOWS_RESULT: ${{ needs.test-windows.result }}
         run: |
@@ -1146,5 +1186,11 @@ jobs:
           if [ "$NEEDS_DOCKER" = true ]; then expected_docker=success; fi
           if [ "$DOCKER_RESULT" != "$expected_docker" ]; then
             echo "Server image lane expected $expected_docker, got $DOCKER_RESULT" >&2
+            exit 1
+          fi
+          expected_desktop_ui=skipped
+          if [ "$NEEDS_DESKTOP_UI" = true ]; then expected_desktop_ui=success; fi
+          if [ "$DESKTOP_UI_RESULT" != "$expected_desktop_ui" ]; then
+            echo "Desktop renderer lane expected $expected_desktop_ui, got $DESKTOP_UI_RESULT" >&2
             exit 1
           fi

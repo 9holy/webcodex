@@ -328,7 +328,7 @@ check 失败就重新生成 token。`rollback` 在 secret 已提交后会回到 
 
 ```bash
 # 使用 fork 时，先选择该 fork 的 owner/repository，再 clone 和构建。
-export WEBCODEX_RELEASE_REPOSITORY=yyjeqhc/webcodex
+export WEBCODEX_RELEASE_REPOSITORY=9holy/webcodex
 git clone "https://github.com/$WEBCODEX_RELEASE_REPOSITORY.git" webcodex
 cd webcodex
 ./deploy/docker/bootstrap.sh https://webcodex.example.com --build-from-source
@@ -336,7 +336,8 @@ cd webcodex
 docker compose -f compose.yaml -f compose.build.yaml up -d --build
 ```
 
-source-build override 会在构建时把 `WEBCODEX_RELEASE_REPOSITORY` 传入二进制，使其更新
+本 fork 默认使用 `9holy/webcodex`。source-build override 会在构建时把显式设置的
+`WEBCODEX_RELEASE_REPOSITORY` 传入二进制，使其更新
 检查保持使用所选发布者；后续重建时也要保留同一个值。此变量不会选择预构建容器：单独使用
 `compose.yaml` 时仍默认拉取上游镜像；使用 fork 镜像需把 `WEBCODEX_SERVER_IMAGE` 设为
 该发布者已经验证的镜像，建议固定到 digest。

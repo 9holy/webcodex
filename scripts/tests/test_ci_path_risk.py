@@ -169,6 +169,22 @@ class PathRiskFixtureTests(unittest.TestCase):
         self.assertEqual(result["needs_windows_desktop"], "true")
         self.assertEqual(result["needs_macos_desktop"], "true")
 
+    def test_desktop_ui_smoke_changes_keep_the_browser_gate_active(self) -> None:
+        for path in (
+            "scripts/ui-smoke/desktop-fork-workflows.mjs",
+            "scripts/ui-smoke/desktop-shim.js",
+            "scripts/ui-smoke/desktop-dialog-fixtures.mjs",
+            "scripts/ui-smoke/server.mjs",
+            "scripts/ui-smoke/package-lock.json",
+        ):
+            for status in ("A", "M", "D"):
+                with self.subTest(path=path, status=status):
+                    result = classify(path, statuses=(status,))
+                    self.assertEqual(result["needs_desktop_frontend"], "true")
+                    self.assertEqual(result["needs_full_native"], "false")
+                    self.assertIn("desktop-ui-smoke", result["categories"])
+        self.assertEqual(classify("scripts/ui-smoke/README.md")["needs_desktop_frontend"], "false")
+
     def test_plugin_sdk_isolated_from_native_frontend_desktop_and_docker(self) -> None:
         for path in (
             "npm/plugin-sdk/src/runtime.ts",

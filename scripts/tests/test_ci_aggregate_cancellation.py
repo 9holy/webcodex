@@ -66,7 +66,7 @@ class AggregateCancellationTests(unittest.TestCase):
     def test_only_policy_optional_lanes_may_be_skipped(self) -> None:
         optional = {"test-macos": ("CORE", "DESKTOP"),
                     "test-windows": ("CORE", "RUNNER", "PACKAGE", "DESKTOP"),
-                    "test-native": ("DOCKER",)}
+                    "test-native": ("DOCKER", "DESKTOP_UI")}
         for name, lanes in optional.items():
             for lane in lanes:
                 with self.subTest(aggregate=name, lane=lane):

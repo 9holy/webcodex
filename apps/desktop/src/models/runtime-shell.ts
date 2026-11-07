@@ -33,8 +33,9 @@ export interface TraceSettings {
   can_restart: boolean; error_code: string | null;
 }
 export interface TraceUpdate { mode: TraceMode; expected_revision: string; confirm_full: boolean; restart: boolean; confirm_interrupt: boolean }
-export type DiagnosticResource = "app_data" | "server_configuration" | "trace_directory" | "runtime_directory" | "runtime_console" | "documentation" | "github" | "report_issue" | "contributing" | "desktop_development";
+export type DiagnosticResource = "app_data" | "server_configuration" | "trace_directory" | "runtime_directory" | "runtime_console" | "documentation" | "github" | "report_issue" | "contributing" | "desktop_development" | "releases" | "release_notes" | "upstream_project";
 export interface ContinuationSummary {
+  failure?: import("../../../../frontend/src/ui/callFailure").CallFailure;
   tool_name: string | null; execution: string; response_handoff: "not_confirmed" | "stream_started" | "handler_returned";
   request_observed_at_ms: number | null; response_handed_at_ms: number | null; service_ms: number | null;
   previous_response_gap_ms?: number | null;
@@ -64,6 +65,7 @@ export interface UpdateDownloadStatus {
   legacy_release: boolean; cancelled: boolean;
 }
 export interface UpdateStatus {
+  release_repository: string;
   state: string; latest: ReleaseNotice | null; update_available: boolean; show_banner: boolean;
   cached: boolean; last_check_at_ms: number | null; manual_error: string | null;
   automatic_download: boolean; download: UpdateDownloadStatus;

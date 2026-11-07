@@ -37,6 +37,10 @@
   line-height: 1.5;
 }
 .ssh-endpoint-fields { display: grid; grid-template-columns: minmax(0, 1fr) 120px; gap: var(--ui-space-4); }
+.ssh-setup-help { margin: 0; }
+.ssh-advanced-options { min-width: 0; padding-top: var(--ui-space-3); border-top: 1px solid var(--ui-border-subtle); }
+.ssh-advanced-options > summary { width: fit-content; max-width: 100%; min-height: 40px; align-content: center; color: var(--ui-text-secondary); cursor: pointer; }
+.ssh-advanced-options > div { display: grid; gap: var(--ui-space-4); padding-top: var(--ui-space-3); }
 .ssh-host-verification { display: grid; gap: var(--ui-space-3); min-width: 0; }
 .ssh-host-verification > button { justify-self: start; }
 .ssh-host-keys { min-width: 0; margin: 0; padding: var(--ui-space-3); border: 1px solid var(--ui-border); border-radius: var(--ui-radius-sm); }

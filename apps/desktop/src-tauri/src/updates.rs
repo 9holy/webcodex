@@ -41,6 +41,7 @@ impl Default for UpdateCache {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateStatus {
+    pub release_repository: &'static str,
     pub state: String,
     pub latest: Option<ReleaseNotice>,
     pub update_available: bool,
@@ -74,6 +75,7 @@ impl UpdateCache {
             .as_ref()
             .is_some_and(|notice| is_newer_stable(&notice.version, installed));
         UpdateStatus {
+            release_repository: webcodex_core::build_info::RELEASE_REPOSITORY,
             state: if manual_error.is_some() {
                 "check_failed"
             } else if update_available {
@@ -154,6 +156,35 @@ mod tests {
         };
         assert!(!cache.status("0.4.1", 1000, true, None).update_available);
     }
+
+    #[test]
+    fn publisher_display_and_update_admission_share_the_compiled_authority() {
+        let publisher = webcodex_core::build_info::RELEASE_REPOSITORY;
+        let notice = project_release(&release("v0.5.0"), None).unwrap();
+        let mut cache = UpdateCache {
+            latest: Some(notice),
+            ..UpdateCache::default()
+        };
+        let status = cache.status("0.4.9", 1000, true, None);
+        assert_eq!(status.release_repository, publisher);
+        assert!(status.update_available);
+        assert_eq!(
+            status.latest.unwrap().release_url,
+            format!("https://github.com/{publisher}/releases/tag/v0.5.0")
+        );
+        // An upstream attribution link never authorizes a different update source.
+        let foreign = if publisher == webcodex_core::build_info::UPSTREAM_REPOSITORY {
+            "untrusted/webcodex"
+        } else {
+            webcodex_core::build_info::UPSTREAM_REPOSITORY
+        };
+        cache.latest.as_mut().unwrap().release_url =
+            format!("https://github.com/{foreign}/releases/tag/v0.5.0");
+        let status = cache.status("0.4.9", 1000, true, None);
+        assert_eq!(status.release_repository, publisher);
+        assert!(status.latest.is_none());
+        assert!(!status.update_available);
+    }
     #[test]
     fn old_preferences_default_enabled_and_runtime_version_cannot_hide_desktop_release() {
         let cache: UpdateCache = serde_json::from_str(r#"{"last_check_at_ms":null,"last_success_at_ms":null,"latest":null,"remind_after_ms":null}"#).unwrap();
@@ -162,7 +193,10 @@ mod tests {
             latest: Some(ReleaseNotice {
                 version: "0.5.0".into(),
                 runtime_version: "0.4.9".into(),
-                release_url: "https://github.com/yyjeqhc/webcodex/releases/tag/v0.5.0".into(),
+                release_url: format!(
+                    "https://github.com/{}/releases/tag/v0.5.0",
+                    webcodex_core::build_info::RELEASE_REPOSITORY
+                ),
                 compatibility: UpdateCompatibility::RuntimeCompatible,
             }),
             ..UpdateCache::default()

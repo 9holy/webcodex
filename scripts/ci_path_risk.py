@@ -152,7 +152,7 @@ def _mark_platform_context_bounded(risk: Risk) -> None:
 
 
 def _is_docs_or_text(path: str) -> bool:
-    return path.startswith("docs/") or path in {"README.md", "CHANGELOG.md", "LICENSE"}
+    return path.startswith("docs/") or path in {"README.md", "CHANGELOG.md", "LICENSE", "scripts/ui-smoke/README.md"}
 
 
 def _is_main_frontend(path: str) -> bool:
@@ -291,6 +291,12 @@ def _classify_path(risk: Risk, path: str) -> None:
         return
     if _is_docs_or_text(path):
         risk.categories.add("docs")
+        return
+    if path.startswith("scripts/ui-smoke/"):
+        # Fixture and browser dependency changes must exercise the renderer
+        # harness, even when no product TS/CSS changed in the same commit.
+        risk.needs_desktop_frontend = True
+        risk.categories.add("desktop-ui-smoke")
         return
     if _is_main_frontend(path):
         risk.needs_frontend = True

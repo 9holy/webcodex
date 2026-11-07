@@ -51,6 +51,13 @@ def git_posix_tools(git: Path) -> tuple[Path, Path]:
     raise AssertionError("Git for Windows POSIX fixture tools are missing")
 
 
+def native_ssh_version(output: bytes) -> str:
+    match = re.search(rb"(?:^|[\r\n])(OpenSSH_for_Windows_[0-9][0-9A-Za-z._-]{0,63})(?=$|[\s,])",
+                      output[:4096])
+    check(match is not None, "Windows acceptance requires the native Microsoft OpenSSH client")
+    return match.group(1).decode("ascii")
+
+
 @dataclass(frozen=True)
 class HostTools:
     shell: Path
@@ -77,8 +84,7 @@ class HostTools:
                   f"Windows acceptance must use System32 OpenSSH {name}; Git SSH is not accepted")
         version = subprocess.run([str(native / "ssh.exe"), "-V"], stdin=subprocess.DEVNULL,
                                  capture_output=True, timeout=10, check=True)
-        check(b"OpenSSH_for_Windows" in version.stdout + version.stderr,
-              "Windows acceptance requires the native Microsoft OpenSSH client")
+        client_version = native_ssh_version(version.stdout + version.stderr)
         # Git Bash supplies only the disposable remote POSIX host. It never
         # supplies the SSH client or the native Runner's ASKPASS helper.
         git = shutil.which("git.exe")
@@ -89,7 +95,8 @@ class HostTools:
         for name in ["TEMP", "TMP"]:
             if name in os.environ:
                 remote_env[name] = os.environ[name]
-        print("Using native System32 OpenSSH client/keyscan; Git Bash is the remote fixture only")
+        print(f"Using native System32 {client_version} client/keyscan; Git Bash is the remote fixture only",
+              flush=True)
         return cls(shell, runner_path, remote_env, cygpath)
 
     def remote_path(self, path: Path) -> str:
@@ -280,6 +287,11 @@ class SshFixture:
         self.successful_passwords = 0
         self.executions = 0
         self.framed_executions = 0
+        self.input_eofs = 0
+        self.commands_started = 0
+        self.commands_finished = 0
+        self.execution_failures = 0
+        self.input_timeouts = 0
         self.thread = threading.Thread(target=self.accept, daemon=True)
         self.thread.start()
 
@@ -346,29 +358,46 @@ class SshFixture:
 
     def execute(self, channel, command):
         self.executions += 1
+        input_complete = False
         try:
             deadline = time.monotonic() + 15
             # Native Windows OpenSSH carries the exact program on channel
             # stdin. Preserve those bytes and EOF; DEVNULL would test only
             # authentication and silently discard the real execution protocol.
             data = channel_input(channel, deadline)
+            self.input_eofs += 1
+            input_complete = True
             if command.startswith(b": WEBCODEX_SSH_PROGRAM_BYTES=") and data:
                 self.framed_executions += 1
+            self.commands_started += 1
             result = subprocess.run(
                 [str(self.tools.shell), "-c", command.decode("utf-8")], cwd=self.remote,
                 env=self.tools.remote_env, input=data,
                 capture_output=True, timeout=max(0.001, deadline - time.monotonic()),
             )
+            self.commands_finished += 1
             channel.sendall(result.stdout[:2 * 1024 * 1024])
             channel.sendall_stderr(result.stderr[:2 * 1024 * 1024])
             channel.send_exit_status(result.returncode)
-        except (OSError, ValueError, subprocess.TimeoutExpired):
+        except (OSError, ValueError, subprocess.TimeoutExpired) as error:
+            self.execution_failures += 1
+            if not input_complete and isinstance(error, TimeoutError):
+                self.input_timeouts += 1
             try:
                 channel.send_exit_status(125)
             except OSError:
                 pass
         finally:
             channel.close()
+
+    def diagnostic_counts(self):
+        # Only fixture-owned counters leave the test. Never print credentials,
+        # paths, SSH command/prompt bodies, or captured process output on failure.
+        return {name: getattr(self, name) for name in [
+            "password_attempts", "successful_passwords", "executions", "input_eofs",
+            "commands_started", "commands_finished", "framed_executions",
+            "execution_failures", "input_timeouts",
+        ]}
 
     def close(self):
         self.closed.set()
@@ -383,6 +412,7 @@ class SshFixture:
 class ConnectionAcceptance(Smoke):
     def __init__(self, bin_dir: Path, root: Path, tools: HostTools):
         super().__init__(bin_dir, root)
+        self.stage = "prepare"
         # Windows ignores XDG roots for several native state stores. Isolate
         # both Windows locations too, without changing the actual OS identity,
         # USERPROFILE or the native OpenSSH installation.
@@ -481,9 +511,11 @@ class ConnectionAcceptance(Smoke):
     def run(self):
         self.prepare()
         self.initialize(self.owner)
+        self.stage = "scope"
         denied = self.post("/api/runtime-console/ssh-resources/list", {"runner": "ssh-setup-runner"}, self.restricted)
         check(denied.get("success") is not True, "missing ssh:local scope was accepted")
         binding = self.observe()["binding"]
+        self.stage = "host_key_inspection"
         inspected = self.operator("inspect", {"binding": binding, "endpoint": self.endpoint})
         keys = inspected["host_keys"]
         check(any(key["fingerprint"] == fingerprint(self.ssh.host_key) for key in keys),
@@ -492,6 +524,7 @@ class ConnectionAcceptance(Smoke):
         probe = {"binding": binding, "endpoint": self.endpoint,
                  "authentication": self.authentication, "host_key": trust}
         before = self.ssh.successful_passwords
+        self.stage = "wrong_password"
         wrong = self.operator("probe", probe | {"authentication": {"type": "password", "password": "wrong-fixture-password"}}, success=False)
         check(wrong.get("error_kind") == "ssh_authentication_failed", "wrong password was not classified")
         check(self.ssh.successful_passwords == before, "wrong password authenticated")
@@ -499,21 +532,26 @@ class ConnectionAcceptance(Smoke):
         original_key = self.ssh.host_key
         attempts_before_changed_key = self.ssh.password_attempts
         self.ssh.host_key, _ = generated_key()
+        self.stage = "changed_host_key"
         changed = self.operator("probe", probe, success=False)
         check(changed.get("error_kind") == "ssh_host_key_changed", "changed host key was not rejected")
         check(self.ssh.successful_passwords == before, "password sent before host-key verification")
         check(self.ssh.password_attempts == attempts_before_changed_key,
               "changed host key reached password authentication")
         self.ssh.host_key = original_key
+        self.stage = "password_probe"
         valid = self.operator("probe", probe)
         check(valid["host_key_fingerprint"] == trust["fingerprint"], "probe acknowledged another key")
         check(self.ssh.successful_passwords > before, "successful probe did not perform password authentication")
 
         key_probe = probe | {"authentication": {"type": "identity_file", "path": str(self.ssh.key_path)}}
+        self.stage = "plain_key_probe"
         self.operator("probe", key_probe)
         encrypted_key_probe = probe | {"authentication": {"type": "identity_file",
             "path": str(self.ssh.encrypted_key_path), "passphrase": self.ssh.passphrase}}
+        self.stage = "encrypted_key_probe"
         self.operator("probe", encrypted_key_probe)
+        self.stage = "register"
         saved = self.operator("register", {
             "binding": binding, "name": "password-fixture", "default_cwd": self.remote_cwd,
             "connection": {"kind": "direct", "endpoint": self.endpoint,
@@ -529,6 +567,7 @@ class ConnectionAcceptance(Smoke):
               "inventory disclosed authentication data")
         print("PASS: scope, real host-key inspection, wrong password, changed key, password/plain/encrypted-key login, staged save")
 
+        self.stage = "runner_restart"
         stop(self.runner)
         self.runner = self.launch("webcodex-runner", ["--config", str(self.config)], self.env)
         self.wait_ready(self.project, self.owner)
@@ -551,6 +590,7 @@ class ConnectionAcceptance(Smoke):
         check(updated.get("project") == self.project and updated.get("session_id") == session_id
               and updated.get("execution_context") == execution_context,
               "MCP context update did not bind the exact Session and SSH resource")
+        self.stage = "remote_shell"
         output = self.tool("run_shell", {"project": self.project,
             "session_id": session_id,
             "command": "printf 'SSH_PASSWORD_ROUTE_OK\\n' > remote-proof.txt; cat remote-proof.txt",
@@ -564,6 +604,7 @@ class ConnectionAcceptance(Smoke):
         check(self.ssh.password not in json.dumps(output), "MCP output disclosed the password")
         print("PASS: persisted password survives Runner restart; MCP run_shell executes on the selected SSH resource")
 
+        self.stage = "privacy"
         stop(self.runner)
         stop(self.server)
         for directory in [self.root / "data", self.root / "traces"]:
@@ -605,6 +646,11 @@ def main():
         acceptance = ConnectionAcceptance(args.bin_dir.resolve(), root, tools)
         try:
             acceptance.run()
+        except Exception:
+            print("SSH acceptance diagnostic: " + json.dumps({
+                "stage": acceptance.stage, "counts": acceptance.ssh.diagnostic_counts(),
+            }, sort_keys=True), flush=True)
+            raise
         finally:
             acceptance.close()
 

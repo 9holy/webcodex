@@ -1,7 +1,6 @@
 {
   "Saved Runner settings could not be read or verified. Refresh before changing concurrency.": "無法讀取或驗證已儲存的 Runner 設定。請重新整理後再修改並行設定。",
   "Refresh reloads the saved limit and discards unsaved edits.": "重新整理會載入已儲存的上限，並捨棄未儲存的修改。",
-
   "Runner job capacity": "Runner 任務容量",
   "Runner jobs": "Runner 任務明細",
   "Read-only job inventory. Stop controls require a separately authorized action.": "此處僅提供任務唯讀明細。停止任務需要獨立授權的操作。",
@@ -26,7 +25,6 @@
   "Restart Runner now": "立即重新啟動 Runner",
   "Restarting applies the saved Runner configuration and may interrupt running or queued jobs, browser sessions and handoffs. Save your work before continuing.": "重新啟動會套用已儲存的 Runner 設定，並可能中斷執行中或排隊中的任務、瀏覽器工作階段及使用者接管。繼續前請先儲存工作。",
   "Runner settings changed. Review them before restarting.": "Runner 設定已變更。請重新檢查後再重新啟動。",
-
   "Stable updates can download automatically. Installation and closing Desktop always require your confirmation.": "穩定版更新可以自動下載；安裝和退出 Desktop 始終需要你的明確確認。",
   "Automatically download stable updates": "自動下載穩定版更新",
   "Stable update": "穩定版更新",
@@ -215,5 +213,10 @@
   "ChatGPT connection": "ChatGPT 連線",
   "Restart Runner": "重啟 Runner",
   "Check connection": "檢查連線",
-  "Runtime unavailable": "Runtime 不可用"
+  "Runtime unavailable": "Runtime 不可用",
+  "Release source": "發布來源",
+  "Release notes": "更新日誌",
+  "Releases": "發布與下載",
+  "Upstream project": "上游專案",
+  "Based on yyjeqhc/webcodex. Thanks to the upstream author and contributors.": "本專案衍生自 yyjeqhc/webcodex，感謝上游作者與貢獻者。"
 }

@@ -1,7 +1,13 @@
 import { useLocale } from "./locale";
 import zhTW from "./messages/shell-zh-TW.json";
+import { translateCallFailureText } from "../../../../frontend/src/ui/callFailureMessages";
 
 const zh: Record<string, string> = {
+  "Release source": "发布来源",
+  "Release notes": "更新日志",
+  "Releases": "发布与下载",
+  "Upstream project": "上游项目",
+  "Based on yyjeqhc/webcodex. Thanks to the upstream author and contributors.": "本项目派生自 yyjeqhc/webcodex，感谢上游作者及贡献者。",
   "Saved Runner settings could not be read or verified. Refresh before changing concurrency.": "无法读取或核验已保存的 Runner 配置。请刷新后再修改并发设置。",
   "Refresh reloads the saved limit and discards unsaved edits.": "刷新会重新加载已保存的上限，并放弃未保存的修改。",
 
@@ -114,21 +120,41 @@ const zh: Record<string, string> = {
 };
 const serviceText: Record<string, Record<string, string>> = {
   "de-DE": {
+    "Release source": "Veröffentlichungsquelle",
+    "Release notes": "Versionshinweise",
+    "Releases": "Versionen und Downloads",
+    "Upstream project": "Ursprungsprojekt",
+    "Based on yyjeqhc/webcodex. Thanks to the upstream author and contributors.": "Basiert auf yyjeqhc/webcodex. Vielen Dank an den ursprünglichen Autor und alle Mitwirkenden.",
     "Local Server": "Lokaler Server", "Local Runner": "Lokaler Runner", "Start": "Starten", "Stop": "Stoppen", "Restart": "Neu starten", "Repair Runner credential": "Runner-Zugangsdaten reparieren", "Credential repair uses the native operating system prompt.": "Die Reparatur verwendet den nativen Dialog des Betriebssystems.",
     "Restore Server user credential": "Server-Benutzerzugangsdaten wiederherstellen", "Existing Server user API token": "Vorhandenes Server-Benutzer-API-Token", "Save credential": "Zugangsdaten speichern",
     stopped: "Gestoppt", starting: "Wird gestartet", ready: "Bereit", error: "Fehler", unknown: "Unbekannt", connecting: "Verbindet",
   },
   "fr-FR": {
+    "Release source": "Source des versions",
+    "Release notes": "Notes de version",
+    "Releases": "Versions et téléchargements",
+    "Upstream project": "Projet d’origine",
+    "Based on yyjeqhc/webcodex. Thanks to the upstream author and contributors.": "Basé sur yyjeqhc/webcodex. Merci à l’auteur et aux contributeurs du projet d’origine.",
     "Local Server": "Serveur local", "Local Runner": "Runner local", "Start": "Démarrer", "Stop": "Arrêter", "Restart": "Redémarrer", "Repair Runner credential": "Réparer les identifiants du Runner", "Credential repair uses the native operating system prompt.": "La réparation utilise la fenêtre native du système d’exploitation.",
     "Restore Server user credential": "Restaurer les identifiants de l’utilisateur du serveur", "Existing Server user API token": "Jeton API existant de l’utilisateur du serveur", "Save credential": "Enregistrer les identifiants",
     stopped: "Arrêté", starting: "Démarrage", ready: "Prêt", error: "Erreur", unknown: "Inconnu", connecting: "Connexion",
   },
   "ja-JP": {
+    "Release source": "リリース元",
+    "Release notes": "リリースノート",
+    "Releases": "リリースとダウンロード",
+    "Upstream project": "上流プロジェクト",
+    "Based on yyjeqhc/webcodex. Thanks to the upstream author and contributors.": "yyjeqhc/webcodex を基にしています。上流の作者と貢献者の皆さまに感謝します。",
     "Local Server": "ローカル Server", "Local Runner": "ローカル Runner", "Start": "開始", "Stop": "停止", "Restart": "再起動", "Repair Runner credential": "Runner の認証情報を修復", "Credential repair uses the native operating system prompt.": "認証情報の修復には OS 標準のダイアログを使用します。",
     "Restore Server user credential": "Server ユーザー認証情報を復元", "Existing Server user API token": "既存の Server ユーザー API トークン", "Save credential": "認証情報を保存",
     stopped: "停止", starting: "起動中", ready: "準備完了", error: "エラー", unknown: "不明", connecting: "接続中",
   },
   "ko-KR": {
+    "Release source": "릴리스 출처",
+    "Release notes": "릴리스 노트",
+    "Releases": "릴리스 및 다운로드",
+    "Upstream project": "업스트림 프로젝트",
+    "Based on yyjeqhc/webcodex. Thanks to the upstream author and contributors.": "yyjeqhc/webcodex를 기반으로 합니다. 업스트림 작성자와 기여자 여러분께 감사드립니다.",
     "Local Server": "로컬 Server", "Local Runner": "로컬 Runner", "Start": "시작", "Stop": "중지", "Restart": "다시 시작", "Repair Runner credential": "Runner 자격 증명 복구", "Credential repair uses the native operating system prompt.": "자격 증명 복구에는 운영 체제 기본 대화상자를 사용합니다.",
     "Restore Server user credential": "Server 사용자 자격 증명 복원", "Existing Server user API token": "기존 Server 사용자 API 토큰", "Save credential": "자격 증명 저장",
     stopped: "중지됨", starting: "시작 중", ready: "준비됨", error: "오류", unknown: "알 수 없음", connecting: "연결 중",
@@ -138,5 +164,5 @@ export type ShellText = (text: string) => string;
 export function useShellText(): ShellText {
   const { locale } = useLocale();
   const catalog: Record<string, string> | undefined = locale === "zh-CN" ? zh : locale === "zh-TW" ? zhTW : serviceText[locale];
-  return (text) => catalog?.[text] ?? text;
+  return (text) => translateCallFailureText(text, locale) ?? catalog?.[text] ?? text;
 }

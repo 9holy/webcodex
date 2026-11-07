@@ -20,6 +20,11 @@ function clearAuthentication(authentication: SshAuthentication) {
 }
 const bytes = (value: string) => new TextEncoder().encode(value).length;
 const hasControl = (value: string) => /[\u0000-\u001f\u007f]/.test(value);
+function suggestedResourceName(address: string) {
+  const label = address.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-").replace(/^[-_]+|[-_]+$/g, "").slice(0, 76).replace(/[-_]+$/g, "");
+  return label ? `ssh-${label}` : address.trim() ? "ssh-server" : "";
+}
 
 export function SshConnectionEditor({ observed, busy, setupSupported, canChooseKey, onClose, onSubmit }: {
   observed: ObservedSshTarget; busy: boolean; setupSupported: boolean; canChooseKey: boolean; onClose: () => void;
@@ -27,6 +32,7 @@ export function SshConnectionEditor({ observed, busy, setupSupported, canChooseK
 }) {
   const p = useProduct(); const r = useRunnerCapabilitiesText(); const s = useSshConnectionText();
   const [name, setName] = useState(""); const [mode, setMode] = useState<"direct" | "alias">("direct");
+  const [nameEdited, setNameEdited] = useState(false);
   const [host, setHost] = useState(""); const [port, setPort] = useState<string | number>(22); const [user, setUser] = useState("");
   const [authType, setAuthType] = useState<SshAuthentication["type"]>("password");
   const [password, setPassword] = useState(""); const [keyPath, setKeyPath] = useState(""); const [passphrase, setPassphrase] = useState("");
@@ -36,6 +42,8 @@ export function SshConnectionEditor({ observed, busy, setupSupported, canChooseK
   const [working, setWorking] = useState(false); const [error, setError] = useState<SshResourceError | null>(null);
   const inFlight = useRef(false); const mounted = useRef(true);
   const disabled = busy || working;
+  const resourceName = nameEdited ? name : suggestedResourceName(mode === "direct" ? host : target);
+  const nameValid = /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$/.test(resourceName.trim()) && !resourceName.includes("..");
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => {
     if (!inspection) return;
@@ -104,8 +112,8 @@ export function SshConnectionEditor({ observed, busy, setupSupported, canChooseK
   };
   const submit = async (event: FormEvent) => {
     event.preventDefault(); if (disabled || inFlight.current) return;
-    const resourceName = name.trim(); const defaultCwd = cwd.trim();
-    if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$/.test(resourceName) || resourceName.includes("..") || bytes(defaultCwd) > 4096 || hasControl(defaultCwd)) { setError("ssh_resource_invalid"); return; }
+    const savedName = resourceName.trim(); const defaultCwd = cwd.trim();
+    if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]{0,79}$/.test(savedName) || savedName.includes("..") || bytes(defaultCwd) > 4096 || hasControl(defaultCwd)) { setError("ssh_resource_invalid"); return; }
     let connection: SshRegisterRequest["connection"];
     if (mode === "alias") {
       const alias = target.trim();
@@ -118,7 +126,7 @@ export function SshConnectionEditor({ observed, busy, setupSupported, canChooseK
       connection = { kind: "direct", endpoint: destination, authentication: credentials, host_key: { challenge_id: inspection.challenge_id, fingerprint } };
     }
     inFlight.current = true; setWorking(true); setPassword(""); setPassphrase(""); setError(null); setVerified(false);
-    try { await onSubmit({ ...requestBase(), name: resourceName, connection, default_cwd: defaultCwd || null }); }
+    try { await onSubmit({ ...requestBase(), name: savedName, connection, default_cwd: defaultCwd || null }); }
     finally {
       if (connection.kind === "direct") clearAuthentication(connection.authentication);
       inFlight.current = false; if (mounted.current) setWorking(false);
@@ -126,13 +134,11 @@ export function SshConnectionEditor({ observed, busy, setupSupported, canChooseK
   };
   return <WorkspaceDialog title={r("addSshResource")} onClose={onClose} busy={disabled}>
     <form className="profile-editor" onSubmit={event => void submit(event)} aria-busy={disabled} autoComplete="off">
-      <TextInput id="ssh-resource-name" label={r("resourceName")} aria-label="Resource Name" value={name} onChange={event => setName(event.currentTarget.value)} required maxLength={80} disabled={disabled} autoFocus spellCheck={false} />
-      <Select label={s("connectionType")} aria-label="Connection Type" value={mode} allowDeselect={false} disabled={disabled} data={[{ value: "direct", label: s("direct") }, { value: "alias", label: s("alias") }]}
-        onChange={value => { if (value === "direct" || value === "alias") { setMode(value); invalidateHost(); setPassword(""); setPassphrase(""); } }} />
-      {mode === "alias" ? <TextInput id="ssh-resource-target" label={r("target")} aria-label="Target" value={target} onChange={event => setTarget(event.currentTarget.value)} required maxLength={512} disabled={disabled} spellCheck={false} description={r("targetHelp")} /> : <>
+      <p className="field-help ssh-setup-help">{s(mode === "direct" ? "setupHelp" : "aliasSetupHelp")}</p>
+      {mode === "alias" ? <TextInput id="ssh-resource-target" label={r("target")} aria-label="Target" value={target} onChange={event => setTarget(event.currentTarget.value)} required maxLength={512} disabled={disabled} autoFocus spellCheck={false} description={r("targetHelp")} /> : <>
         {!setupSupported && <p role="alert" className="workspace-notice">{s("operatorUnavailable")}</p>}
         <div className="ssh-endpoint-fields">
-          <TextInput label={s("host")} aria-label="Host or IP Address" value={host} onChange={event => { setHost(event.currentTarget.value); invalidateHost(); }} required maxLength={253} disabled={disabled} spellCheck={false} />
+          <TextInput label={s("host")} aria-label="Host or IP Address" value={host} onChange={event => { setHost(event.currentTarget.value); invalidateHost(); }} required maxLength={253} disabled={disabled} autoFocus spellCheck={false} placeholder="192.0.2.10" />
           <NumberInput size="md" classNames={{ input: "ui-mantine-input", label: "ui-mantine-label" }} label={s("port")} aria-label="SSH Port" value={port} onChange={value => { setPort(value); invalidateHost(); }} required min={1} max={65535} allowDecimal={false} allowNegative={false} disabled={disabled} />
         </div>
         <TextInput label={s("username")} aria-label="SSH Username" value={user} onChange={event => { setUser(event.currentTarget.value); invalidateHost(); }} required maxLength={128} disabled={disabled} autoComplete="off" spellCheck={false} />
@@ -159,9 +165,17 @@ export function SshConnectionEditor({ observed, busy, setupSupported, canChooseK
           {verified && !expired && <p role="status">{s("verified")}</p>}
         </div>
       </>}
-      <TextInput id="ssh-resource-cwd" label={r("defaultCwd")} aria-label="Default Working Directory" value={cwd} onChange={event => setCwd(event.currentTarget.value)} maxLength={4096} disabled={disabled} spellCheck={false} />
+      <TextInput id="ssh-resource-name" label={s("connectionName")} aria-label="Resource Name" value={resourceName} onChange={event => { setName(event.currentTarget.value); setNameEdited(true); }} required maxLength={80} disabled={disabled} spellCheck={false} description={s("connectionNameHelp")} error={nameEdited && !nameValid ? s("invalidName") : undefined} />
+      <details className="ssh-advanced-options">
+        <summary>{s("advancedSettings")}</summary>
+        <div>
+          <Select label={s("connectionType")} aria-label="Connection Type" value={mode} allowDeselect={false} disabled={disabled} data={[{ value: "direct", label: s("direct") }, { value: "alias", label: s("alias") }]}
+            onChange={value => { if (value === "direct" || value === "alias") { setMode(value); invalidateHost(); setPassword(""); setPassphrase(""); } }} />
+          <TextInput id="ssh-resource-cwd" label={r("defaultCwd")} aria-label="Default Working Directory" value={cwd} onChange={event => setCwd(event.currentTarget.value)} maxLength={4096} disabled={disabled} spellCheck={false} description={s("defaultDirectoryHelp")} />
+        </div>
+      </details>
       {error && <p role="alert" className="workspace-notice">{sshErrorText(error, r, s)}</p>}
-      <div className="connection-actions"><button type="submit" className="primary-button" aria-label="Save" disabled={disabled || (mode === "direct" && (!verified || expired))}>{p("save")}</button><button type="button" className="secondary-button" disabled={disabled} onClick={onClose}>{p("cancel")}</button></div>
+      <div className="connection-actions"><button type="submit" className="primary-button" aria-label="Save" disabled={disabled || !nameValid || (mode === "direct" && (!verified || expired))}>{p("save")}</button><button type="button" className="secondary-button" disabled={disabled} onClick={onClose}>{p("cancel")}</button></div>
     </form>
   </WorkspaceDialog>;
 }

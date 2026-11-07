@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from scripts.e2e_ssh_connections import ConnectionAcceptance, HostTools, SshFixture, acl_failure_details, channel_input, git_posix_tools, secure_fixture_path
+from scripts.e2e_ssh_connections import ConnectionAcceptance, HostTools, SshFixture, acl_failure_details, channel_input, git_posix_tools, native_ssh_version, secure_fixture_path
 
 
 class Channel:
@@ -48,6 +48,22 @@ class Channel:
 
 
 class SshFixtureInputTests(unittest.TestCase):
+    def empty_fixture(self):
+        fixture = object.__new__(SshFixture)
+        for name in ["password_attempts", "successful_passwords", "executions", "input_eofs",
+                     "commands_started", "commands_finished", "framed_executions",
+                     "execution_failures", "input_timeouts"]:
+            setattr(fixture, name, 0)
+        return fixture
+
+    def test_native_client_diagnostic_contains_only_a_bounded_version(self):
+        secret = b"fixture-password-or-private-path"
+        self.assertEqual(native_ssh_version(b"OpenSSH_for_Windows_9.5p1, LibreSSL 3.8.2\r\n" + secret),
+                         "OpenSSH_for_Windows_9.5p1")
+        for value in [secret, b"OpenSSH_9.5p1\r\n", b"OpenSSH_for_Windows_" + b"1" * 65]:
+            with self.assertRaisesRegex(AssertionError, "native Microsoft OpenSSH"):
+                native_ssh_version(value)
+
     def test_fixture_native_state_never_uses_the_invoking_users_appdata(self):
         with tempfile.TemporaryDirectory(prefix="webcodex-ssh-state-") as directory:
             root = Path(directory)
@@ -131,10 +147,9 @@ class SshFixtureInputTests(unittest.TestCase):
             env = {"PATH": os.defpath}
         self.assertTrue(shell.is_file())
         with tempfile.TemporaryDirectory(prefix="webcodex-ssh-pipe-") as directory:
-            fixture = object.__new__(SshFixture)
+            fixture = self.empty_fixture()
             fixture.remote = Path(directory)
             fixture.tools = HostTools(shell, "", env)
-            fixture.executions = fixture.framed_executions = 0
             # The actual shell must consume bytes through EOF. The old fixture's
             # DEVNULL input fails this assertion even though authentication works.
             channel = Channel([b"exact stdin\x00", b"with newline\n"])
@@ -143,16 +158,42 @@ class SshFixtureInputTests(unittest.TestCase):
             self.assertEqual(channel.stdout, b"exact stdin\x00with newline\n")
             self.assertTrue(channel.closed)
             self.assertEqual(fixture.executions, 1)
+            self.assertEqual(fixture.input_eofs, 1)
+            self.assertEqual(fixture.commands_started, 1)
+            self.assertEqual(fixture.commands_finished, 1)
+
+    def test_withheld_stdin_eof_is_distinguished_from_failed_authentication(self):
+        class WithoutEof(Channel):
+            def recv(self, size):
+                raise TimeoutError("private fixture detail must not be reported")
+
+        fixture = self.empty_fixture()
+        fixture.password_attempts = fixture.successful_passwords = 1
+        fixture.password = fixture.passphrase = "synthetic-secret-must-stay-private"
+        channel = WithoutEof([])
+        with mock.patch("scripts.e2e_ssh_connections.subprocess.run") as run:
+            fixture.execute(channel, b"echo WEBCODEX_SSH_CONNECTION_OK")
+        run.assert_not_called()
+        self.assertEqual(channel.status, 125)
+        self.assertTrue(channel.closed)
+        counts = fixture.diagnostic_counts()
+        self.assertEqual(counts, {
+            "password_attempts": 1, "successful_passwords": 1, "executions": 1, "input_eofs": 0,
+            "commands_started": 0, "commands_finished": 0, "framed_executions": 0,
+            "execution_failures": 1, "input_timeouts": 1,
+        })
+        self.assertNotIn(fixture.password, json.dumps(counts))
 
     def test_oversize_stdin_never_starts_a_fixture_command(self):
-        fixture = object.__new__(SshFixture)
-        fixture.executions = fixture.framed_executions = 0
+        fixture = self.empty_fixture()
         channel = Channel([b"x" * (2 * 1024 * 1024 + 1)])
         with mock.patch("scripts.e2e_ssh_connections.subprocess.run") as run:
             fixture.execute(channel, b"echo must-not-run")
         run.assert_not_called()
         self.assertEqual(channel.status, 125)
         self.assertTrue(channel.closed)
+        self.assertEqual(fixture.commands_started, 0)
+        self.assertEqual(fixture.execution_failures, 1)
 
 
 if __name__ == "__main__":

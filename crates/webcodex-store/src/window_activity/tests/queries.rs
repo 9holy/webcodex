@@ -1,6 +1,77 @@
 use super::*;
 
 #[test]
+fn window_failure_metadata_is_bounded_content_free_and_principal_scoped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = Database::open(&tmp.path().join("failure-projection.db")).unwrap();
+    seed_session(&db);
+    let mut item = event("failure", "w", "alice", "p", 10);
+    item.status = "failed".into();
+    item.error_summary = Some("PRIVATE_PROVIDER_EXCEPTION".into());
+    item.summary_json = serde_json::json!({
+        "model_ergonomics": {"error_kind":"permission_denied", "failure_kind":"not_started",
+            "execution_state":"not_started", "recovery_kind":"user_action", "private":"PRIVATE_METADATA"},
+        "output": {"stderr":"PRIVATE_STDERR", "password":"PRIVATE_PASSWORD"}
+    }).to_string();
+    append(&db, item, &[]);
+    let rows = db
+        .list_window_activity_events("w", Some(("username", "alice")), 20)
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].failure_metadata,
+        WindowActivityFailureMetadata {
+            error_kind: Some("permission_denied".into()),
+            failure_kind: Some("not_started".into()),
+            execution_state: Some("not_started".into()),
+            recovery_kind: Some("user_action".into()),
+        }
+    );
+    let serialized = serde_json::to_string(&rows[0]).unwrap();
+    assert!(!serialized.contains("PRIVATE"));
+    assert!(
+        !serialized.contains("failure_metadata"),
+        "raw metadata stays behind the Console allowlist"
+    );
+    assert!(db
+        .list_window_activity_events("w", Some(("username", "bob")), 20)
+        .unwrap()
+        .is_empty());
+
+    for (index, summary) in [
+        serde_json::json!({"model_ergonomics": {
+            "error_kind":"x".repeat(97), "failure_kind":{"private":"PRIVATE"},
+            "execution_state":true, "recovery_kind":["retry_same"]
+        }})
+        .to_string(),
+        "not-json".into(),
+        "{}".into(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut item = event(
+            &format!("invalid-{index}"),
+            "bounded",
+            "alice",
+            "p",
+            20 + index as i64,
+        );
+        item.summary_json = summary;
+        append(&db, item, &[]);
+    }
+    for row in db
+        .list_window_activity_events("bounded", Some(("username", "alice")), 20)
+        .unwrap()
+    {
+        assert_eq!(
+            row.failure_metadata,
+            WindowActivityFailureMetadata::default()
+        );
+    }
+}
+
+#[test]
 fn window_queries_preserve_projection_and_principal_scope() {
     let tmp = tempfile::tempdir().unwrap();
     let db = Database::open(&tmp.path().join("projections.db")).unwrap();

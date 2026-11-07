@@ -292,32 +292,6 @@ impl AppState {
                 drop(slot);
                 return crate::platform::opener::url(&url);
             }
-            ResourceKind::Documentation => {
-                drop(slot);
-                return crate::platform::opener::url("https://github.com/yyjeqhc/webcodex/blob/main/docs/DESKTOP_RUNTIME_COMPATIBILITY.md");
-            }
-            ResourceKind::Github => {
-                drop(slot);
-                return crate::platform::opener::url("https://github.com/yyjeqhc/webcodex");
-            }
-            ResourceKind::ReportIssue => {
-                drop(slot);
-                return crate::platform::opener::url(
-                    "https://github.com/yyjeqhc/webcodex/issues/new",
-                );
-            }
-            ResourceKind::Contributing => {
-                drop(slot);
-                return crate::platform::opener::url(
-                    "https://github.com/yyjeqhc/webcodex/blob/main/CONTRIBUTING.md",
-                );
-            }
-            ResourceKind::DesktopDevelopment => {
-                drop(slot);
-                return crate::platform::opener::url(
-                    "https://github.com/yyjeqhc/webcodex/blob/main/docs/DESKTOP_DEVELOPMENT.md",
-                );
-            }
             ResourceKind::AppData => core.data_dir.clone(),
             ResourceKind::ServerConfiguration => core.server_configuration_location()?,
             ResourceKind::TraceDirectory => {
@@ -325,6 +299,13 @@ impl AppState {
                     .ok_or_else(|| diagnostics::diagnostic_error("trace_directory_unavailable"))?
             }
             ResourceKind::RuntimeDirectory => core.adapter.binaries()?.directory.clone(),
+            resource => {
+                let url = resource.external_url().ok_or_else(|| {
+                    diagnostics::diagnostic_error("diagnostic_location_unavailable")
+                })?;
+                drop(slot);
+                return crate::platform::opener::url(&url);
+            }
         };
         drop(slot);
         crate::platform::opener::directory(&location)

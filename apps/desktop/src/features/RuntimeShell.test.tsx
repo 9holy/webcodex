@@ -593,29 +593,36 @@ it("preserves network and tracing drafts while categories change without applyin
 });
 
 it("opens requested recovery categories and supports keyboard category navigation", async () => {
-  const view = render(wrap(<SettingsPanel state={state} onState={vi.fn()} initialSection="diagnostics" />));
-  const categories = within(screen.getByRole("tablist"));
-  const diagnosticsTab = categories.getByRole("tab", { name: "Troubleshooting" });
+  let view!: ReturnType<typeof render>;
+  // Flush the fixture's resolved observations instead of polling retained views
+  // while keyboard navigation mounts another Settings category.
+  await act(async () => {
+    view = render(wrap(<SettingsPanel state={state} onState={vi.fn()} initialSection="diagnostics" />));
+  });
+  const categories = within(view.getByRole("tablist"));
+  const tabs = categories.getAllByRole("tab");
+  const labels = ["General", "Files & permissions", "Network", "Runtime & services", "Configuration & data", "Troubleshooting", "About & updates"];
+  expect(tabs).toHaveLength(labels.length);
+  tabs.forEach((tab, index) => expect(tab).toHaveAccessibleName(labels[index]));
+  const [generalTab, accessTab, , runtimeTab, configurationTab, diagnosticsTab, aboutTab] = tabs;
   expect(diagnosticsTab).toHaveAttribute("aria-selected", "true");
-  await within(document.getElementById("desktop-settings-diagnostics")!).findByRole("combobox", { name: "Tool request tracing" });
-  view.rerender(wrap(<SettingsPanel state={state} onState={vi.fn()} initialSection="runtime" />));
-  const runtimeTab = categories.getByRole("tab", { name: "Runtime & services" });
+  expect(within(document.getElementById("desktop-settings-diagnostics")!).getByRole("combobox", { name: "Tool request tracing" })).toBeInTheDocument();
+  await act(async () => {
+    view.rerender(wrap(<SettingsPanel state={state} onState={vi.fn()} initialSection="runtime" />));
+  });
   expect(runtimeTab).toHaveAttribute("aria-selected", "true");
-  fireEvent.keyDown(runtimeTab, { key: "ArrowDown" });
-  const configurationTab = categories.getByRole("tab", { name: "Configuration & data" });
+  await act(async () => { fireEvent.keyDown(runtimeTab, { key: "ArrowDown" }); });
   expect(configurationTab).toHaveFocus();
-  await within(document.getElementById("desktop-settings-configuration")!).findByRole("button", { name: "Export path inventory" });
+  expect(within(document.getElementById("desktop-settings-configuration")!).getByRole("button", { name: "Export path inventory" })).toBeInTheDocument();
   fireEvent.keyDown(configurationTab, { key: "ArrowDown" });
   expect(diagnosticsTab).toHaveFocus();
   fireEvent.keyDown(runtimeTab, { key: "Home" });
-  const generalTab = categories.getByRole("tab", { name: "General" });
   expect(generalTab).toHaveFocus();
-  fireEvent.keyDown(generalTab, { key: "ArrowDown" });
-  const accessTab = categories.getByRole("tab", { name: "Files & permissions" });
+  await act(async () => { fireEvent.keyDown(generalTab, { key: "ArrowDown" }); });
   expect(accessTab).toHaveFocus();
   expect(within(document.getElementById("desktop-settings-access")!).getByRole("button", { name: "Authorize folder" })).toBeInTheDocument();
   fireEvent.keyDown(accessTab, { key: "End" });
-  expect(categories.getByRole("tab", { name: "About & updates" })).toHaveFocus();
+  expect(aboutTab).toHaveFocus();
 });
 
 it("explains configured Tunnel mode, detected proxy, and effective Auto connection path", async () => {
@@ -656,7 +663,8 @@ it("renders factual handoff uncertainty rather than Host failure", () => {
   const detail = { active_count: 0, activity_truncated: false, activity: [{ meaningful: true, tool_name: "read_files", status: "succeeded", started_at_ms: 100, ended_at_ms: 200 }] } as WindowDetail;
   const value = continuationFromWindow(detail, 400);
   render(wrap(<ContinuationFacts value={value} observedAt={Date.now()} />));
-  expect(screen.getByText("Completed")).toBeInTheDocument();
+  expect(screen.getByText("Call succeeded")).toBeInTheDocument();
+  fireEvent.click(screen.getByText("Technical details"));
   expect(screen.getByText("Response handoff not confirmed")).toBeInTheDocument();
   expect(screen.getByText("Not observed")).toBeInTheDocument();
   expect(screen.queryByText(/ChatGPT.*stuck/i)).not.toBeInTheDocument();

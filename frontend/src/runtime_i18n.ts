@@ -1,4 +1,5 @@
 import { normalizeRuntimeLanguage, translateWorkText, type RuntimeLanguage } from "./runtime_locales.js";
+import { translateCallFailureText } from "./ui/callFailureMessages.js";
 export { RUNTIME_LANGUAGES, type RuntimeLanguage } from "./runtime_locales.js";
 
 export const LANGUAGE_STORAGE_KEY = "webcodex.runtime.language.v1";
@@ -1343,7 +1344,8 @@ Object.assign(RUNTIME_ZH_TEXT, {
 });
 
 export function translate(source: string, language: RuntimeLanguage = "en"): string {
-  return language === "zh-CN" ? (RUNTIME_ZH_TEXT[source] || source) : (translateWorkText(source, language) || source);
+  return translateCallFailureText(source, language)
+    ?? (language === "zh-CN" ? (RUNTIME_ZH_TEXT[source] || source) : (translateWorkText(source, language) || source));
 }
 
 export function translateStaticNodeValue(source: string, language: RuntimeLanguage = "en"): string {

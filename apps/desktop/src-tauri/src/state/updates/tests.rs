@@ -17,7 +17,10 @@ fn release(version: &str) -> ReleaseNotice {
     ReleaseNotice {
         version: version.into(),
         runtime_version: DESKTOP_VERSION.into(),
-        release_url: format!("https://github.com/yyjeqhc/webcodex/releases/tag/v{version}"),
+        release_url: format!(
+            "https://github.com/{}/releases/tag/v{version}",
+            webcodex_core::build_info::RELEASE_REPOSITORY
+        ),
         compatibility: UpdateCompatibility::RuntimeCompatible,
     }
 }

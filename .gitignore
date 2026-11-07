@@ -58,6 +58,7 @@ __pycache__/
 /artifacts/liquid-glass-ui/
 /artifacts/docx-viewer/
 /artifacts/desktop-workflow/
+/artifacts/desktop-fork-workflows/
 /artifacts/desktop-runtime-probe/
 /artifacts/desktop-runtime-simple/
 /artifacts/desktop-clarity/

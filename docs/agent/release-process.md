@@ -174,8 +174,9 @@ and [workflow dispatch API](https://docs.github.com/en/rest/actions/workflows#cr
 After GitHub publication, use `verify_public_release.py <VERSION> --repo
 <OWNER/REPO> --github-only --require-unified-installers` for the selected bundle.
 No upstream npm publication is implied. Formal build workflows embed the
-selected publisher through compile-time `WEBCODEX_RELEASE_REPOSITORY`; manual
-fork builds must set that value too. Downloaded metadata and runtime environment
+selected publisher through compile-time `WEBCODEX_RELEASE_REPOSITORY`. This fork
+defaults to `9holy/webcodex`; other publishers must set that value explicitly.
+Downloaded metadata and runtime environment
 variables cannot select a different publisher.
 
 ### Failed pre-publication tag reclaim

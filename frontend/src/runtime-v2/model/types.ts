@@ -280,6 +280,7 @@ export type WindowActivitySession = {
 };
 
 export type WindowActivity = {
+  failure?: import("../../ui/callFailure.js").CallFailure;
   failure_expectation_result?: string;
   started_at_ms: number;
   ended_at_ms: number;

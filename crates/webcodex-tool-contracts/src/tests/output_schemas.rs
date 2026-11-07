@@ -1,6 +1,118 @@
 use super::*;
 
 #[test]
+fn current_window_activity_failure_schema_is_optional_bounded_and_content_free() {
+    let schema = output_schema_for_tool("read_current_window_activity");
+    let legacy = json!({
+        "success": true,
+        "output": {
+            "status": "available",
+            "events": [{
+                "started_at_ms": 1,
+                "ended_at_ms": 2,
+                "duration_ms": 1,
+                "method": "tools/call",
+                "tool_name": "finish_coding_task",
+                "status": "failed",
+                "meaningful": true,
+                "workflow_sessions": []
+            }],
+            "active_requests": [],
+            "truncated": false
+        },
+        "error": null
+    });
+    test_support::validate_schema_instance(&legacy, &schema)
+        .expect("retained activity without failure metadata remains valid");
+
+    for (outcome, reason, state, kind, recovery) in [
+        (
+            "rejected",
+            "missing_scope",
+            "not_started",
+            "insufficient_scope",
+            "user_action",
+        ),
+        (
+            "execution_failed",
+            "execution_error",
+            "completed",
+            "command_exit_nonzero",
+            "none",
+        ),
+        (
+            "outcome_unknown",
+            "result_unconfirmed",
+            "outcome_unknown",
+            "outcome_unknown",
+            "reobserve",
+        ),
+        (
+            "call_failed",
+            "access_denied",
+            "completed",
+            "permission_denied",
+            "reconcile",
+        ),
+    ] {
+        let mut result = legacy.clone();
+        result["output"]["events"][0]["failure"] = json!({
+            "outcome": outcome,
+            "reason": reason,
+            "error_kind": kind,
+            "failure_kind": kind,
+            "execution_state": state,
+            "recovery_kind": recovery
+        });
+        test_support::validate_schema_instance(&result, &schema).unwrap_or_else(|error| {
+            panic!("recorded {outcome} must fit the activity contract: {error}")
+        });
+    }
+
+    let mut minimal = legacy;
+    minimal["output"]["events"][0]["failure"] =
+        json!({"outcome": "call_failed", "reason": "details_unavailable"});
+    test_support::validate_schema_instance(&minimal, &schema)
+        .expect("specific kinds and execution lifecycle remain optional");
+    for field in ["error", "message", "error_summary", "output", "stderr"] {
+        let mut leaked = minimal.clone();
+        leaked["output"]["events"][0]["failure"][field] = json!("private diagnostic text");
+        assert!(
+            test_support::validate_schema_instance(&leaked, &schema).is_err(),
+            "failure must not carry raw {field}"
+        );
+    }
+    for field in ["error_kind", "failure_kind"] {
+        let mut bounded = minimal.clone();
+        bounded["output"]["events"][0]["failure"][field] = json!("x".repeat(96));
+        test_support::validate_schema_instance(&bounded, &schema).unwrap();
+        for invalid in [json!("x".repeat(97)), json!(""), Value::Null] {
+            bounded["output"]["events"][0]["failure"][field] = invalid;
+            assert!(
+                test_support::validate_schema_instance(&bounded, &schema).is_err(),
+                "{field} must remain a nonempty bounded code"
+            );
+        }
+    }
+    for field in ["outcome", "reason", "execution_state", "recovery_kind"] {
+        let mut unknown = minimal.clone();
+        unknown["output"]["events"][0]["failure"][field] = json!("unrecognized");
+        assert!(
+            test_support::validate_schema_instance(&unknown, &schema).is_err(),
+            "{field} must use its closed vocabulary"
+        );
+    }
+    for field in ["outcome", "reason"] {
+        let mut missing = minimal.clone();
+        missing["output"]["events"][0]["failure"]
+            .as_object_mut()
+            .unwrap()
+            .remove(field);
+        assert!(test_support::validate_schema_instance(&missing, &schema).is_err());
+    }
+}
+
+#[test]
 fn typed_job_activity_schema_preserves_closed_nullable_wire_shape() {
     use webcodex_core::runner_protocol::ShellJobActivity;
     let output = output_schema_for_tool("list_jobs");

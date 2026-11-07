@@ -6,7 +6,7 @@
 
 <p align="center"><strong>Give cloud AI agents a real development environment on your own machines.</strong></p>
 <p align="center">Connect ChatGPT, Claude, and other MCP clients to the repositories, Git checkout, and tools you already use.</p>
-<p align="center"><a href="docs/unified-installation.md">One computer</a> · <a href="docs/unified-installation.md#several-computers">Several computers</a> · <a href="#documentation">Documentation</a> · <a href="https://github.com/yyjeqhc/webcodex/issues">Issues</a> · <a href="CONTRIBUTING.md">Contribute</a> · <a href="SECURITY.md">Security</a></p>
+<p align="center"><a href="docs/unified-installation.md">One computer</a> · <a href="docs/unified-installation.md#several-computers">Several computers</a> · <a href="#what-this-fork-adds">Fork differences</a> · <a href="#documentation">Documentation</a> · <a href="https://github.com/9holy/webcodex/issues">Issues</a> · <a href="CONTRIBUTING.md">Contribute</a> · <a href="SECURITY.md">Security</a></p>
 
 <p align="center">
   <a href="docs/MCP.md"><img src="https://img.shields.io/badge/protocol-MCP-2563EB?labelColor=1E40AF&amp;style=flat-square" alt="MCP protocol"></a>
@@ -16,9 +16,29 @@
 
 WebCodex is a self-hosted tool runtime: a Server authenticates requests and routes them to a Runner on the machine that owns the repository. Ask your assistant to inspect a repository, modify code, run tests, use Git, or investigate a failure. You do not need to move the project into a hosted workspace; requested file content and other tool results can still be returned to the AI client.
 
+**This repository is [9holy/webcodex](https://github.com/9holy/webcodex), a fork of [yyjeqhc/webcodex](https://github.com/yyjeqhc/webcodex).** The upstream author and contributors created WebCodex's core architecture, tools, Desktop application, and documentation. This fork builds on that work under the same [Apache 2.0 license](LICENSE), with additional work on coding-agent integration, connection setup, permissions, and Windows upgrades.
+
+## What this fork adds
+
+The following describes changes in this fork's source. Published availability and platform acceptance are recorded in the corresponding [fork release](https://github.com/9holy/webcodex/releases); source implementation alone does not establish that every installer or real account has passed validation.
+
+| Area | Changes in this fork |
+| --- | --- |
+| **Native Codex integration — experimental** | Prepare an installed Codex CLI as a coding-agent provider and run its actual app-server through WebCodex. It uses that installation's native tools, configured MCP servers, and Skills within the supported Run lifecycle. See the [provider guide and limits](integrations/codex_app_server/README.md). |
+| **Approvals and network access** | Review coding-agent permission requests in Desktop or Runtime Console and send an explicit decision for the exact request. Approval access is a separate grant. Codex preparation also exposes an optional network-access setting, off by default, while retaining Project boundaries and operation approvals. See [Codex setup and approvals](docs/desktop-guide.md#configure-codex-and-review-coding-approvals). |
+| **SSH connection setup** | Enter a host/IP, port, username, and password or private-key file, with a passphrase for encrypted keys. Inspect and trust the host fingerprint, test authentication, then save the resource. Existing OpenSSH aliases remain available. Credentials stay in protected Runner storage; Chat uses the resource name. See [Add an SSH server](docs/desktop-guide.md#add-an-ssh-server). |
+| **Explicit background-process authorization** | Grant `job:detach` separately for long-running local processes. OAuth setup exposes capability choices and the replacement/reauthorization flow for an existing client; authorizing Desktop does not silently expand another Chat connection's access. See [Desktop permissions](docs/desktop-guide.md#configure-codex-and-review-coding-approvals) and [MCP authorization](docs/MCP.md). |
+| **Windows installation and upstream upgrades** | Choose a folder for a new installation, preserve an existing installation's folder and user data on supported upgrades, and use guarded Runtime replacement and recovery. The full installer also coordinates installed Server/Runner services. See [Windows installation and upgrades](docs/desktop-install.md#1-install-webcodex-desktop). |
+| **Recovery from silent Runner connections** | Detect an unresponsive registered connection, close it, and reconnect with the same Runner instance and retained Job inventory. Recovery preserves existing authority and does not replay commands or recreate persistent Shells. See [Runner connection and Job recovery](docs/RUNNER.md). |
+| **Clearer activity failures** | Show available error categories and next steps, with expandable technical details. A failed task-finalization call is distinguished from the execution result. Older records without a retained reason say so instead of inventing a diagnosis. See [Desktop activity](docs/desktop-guide.md#activity-settings-and-background-operation). |
+
+The Codex provider is an experimental integration with the installed Codex, with [explicit lifecycle and interaction limits](integrations/codex_app_server/README.md#supported-lifecycle-and-explicit-limits). It does not promise full parity with every Codex interface or recreate ChatGPT's private connectors, hosted browser, search, or image-generation services. External services and operating-system actions still require their own credentials and permissions.
+
+The upstream project's community recognition is retained below:
+
 <p align="center">
   <a href="https://trendshift.io/repositories/121867">
-    <img src="https://trendshift.io/api/badge/repositories/121867" alt="WebCodex | GitHub Trending" width="250" height="55" />
+    <img src="https://trendshift.io/api/badge/repositories/121867" alt="Upstream yyjeqhc/webcodex | GitHub Trending" width="250" height="55" />
   </a>
 </p>
 
@@ -29,9 +49,11 @@ For a temporary one-repository trial, start with [Quick Trial](docs/QUICK_START.
 - **One computer:** install WebCodex on your personal workstation, open Desktop, and follow [Unified installation](docs/unified-installation.md). This setup includes Desktop, CLI, Server, and Runner in one platform package.
 - **Several computers:** install the same package on the machine that will host the WebCodex Server and on each machine that owns repositories. Follow [Unified installation](docs/unified-installation.md#several-computers) and [Deployment validation](docs/unified-deployment-validation.md).
 
-The build pipeline defines unified Windows NSIS, macOS package, and Debian 12 / Ubuntu 22.04+ `.deb` installer targets for x64 and arm64. The six installer variants still require native build and installation acceptance before release. Real-machine installation, reboot persistence, GUI behavior, and upgrade have not been accepted across all three platforms; this documentation makes no claim of identical cross-platform behavior. Published files are listed in [GitHub Releases](https://github.com/yyjeqhc/webcodex/releases). The [`download/`](download/README.md) directory contains static page source only; the [download-page workflow](https://github.com/yyjeqhc/webcodex/actions/workflows/download-page.yml) builds a Release-manifest-based GitHub Actions artifact after publication, but does not host or deploy a page. For a source preview, check out the exact feature or release revision you intend to evaluate and follow [Desktop development](docs/DESKTOP_DEVELOPMENT.md#linux-source-preview-against-an-existing-server).
+The build pipeline defines unified Windows NSIS, macOS package, and Debian 12 / Ubuntu 22.04+ `.deb` installer targets for x64 and arm64. The six installer variants still require native build and installation acceptance before release. Real-machine installation, reboot persistence, GUI behavior, and upgrade have not been accepted across all three platforms; this documentation makes no claim of identical cross-platform behavior. Published files for this fork are listed in [GitHub Releases](https://github.com/9holy/webcodex/releases). The [`download/`](download/README.md) directory contains static page source only; the [download-page workflow](https://github.com/9holy/webcodex/actions/workflows/download-page.yml) builds a Release-manifest-based GitHub Actions artifact after publication, but does not host or deploy a page. For a source preview, check out the exact feature or release revision you intend to evaluate and follow [Desktop development](docs/DESKTOP_DEVELOPMENT.md#linux-source-preview-against-an-existing-server).
 
 For Linux machines that join an existing Server without Desktop, see [Runtime installation and CLI join](docs/runtime-installation.md). For advanced self-hosting, npm/runtime archives, Docker, or historical release artifacts, see [Deployment](docs/DEPLOYMENT.md).
+
+The `@yyjeqhc/webcodex` npm package referenced in the inherited guides is an upstream distribution. To use this fork's changes, select an asset from this fork's Releases or build this repository's chosen revision; installing the upstream npm package does not select this fork.
 
 ## What can it do?
 
@@ -88,11 +110,12 @@ The unified installer targets Windows NSIS, macOS, and Debian 12 / Ubuntu 22.04+
 - [Unified installation](docs/unified-installation.md) — personal and multi-computer setup for the unified package
 - [Deployment validation](docs/unified-deployment-validation.md) — platform acceptance status and required native checks
 - [Runtime installation and CLI join](docs/runtime-installation.md) — headless Linux Runner setup and package update/recovery
-- [Legacy Desktop installation](docs/desktop-install.md) — existing release-specific detailed guide
+- [Desktop installation and upgrades](docs/desktop-install.md) — installation, upstream migration, and ChatGPT connection
 - [Using Desktop](docs/desktop-guide.md) — projects, connections, activity, and background operation
 - [Desktop Runtime compatibility](docs/DESKTOP_RUNTIME_COMPATIBILITY.md) — compatible Runtime selection, diagnostics, and rollback
 - [Runtime Console](docs/runtime-console.md) — browser-based activity, projects, Sessions, and Agent communication
 - [Session continuity](docs/SESSION_CONTINUITY.md) — explicitly save and resume authorized work across conversations
+- [Experimental Codex app-server provider](integrations/codex_app_server/README.md) — prepare native Codex, review approvals, and understand supported interactions
 - [Optional Windows Codex chat bridge](integrations/codex/live-chat-bridge/README.md) — exchange messages between live WebCodex Codex tasks and Codex Desktop chats
 - [Desktop development](docs/DESKTOP_DEVELOPMENT.md) — run from source on Linux, Windows, and macOS; build local packages
 - [Full Setup](docs/PERSONAL_SETUP.md) — CLI, existing Server, Linux, and advanced regular Server + Runner setup
@@ -149,30 +172,23 @@ These are development/dogfood builds, not public release artifacts.
 
 ## Contributing
 
-Issues and focused pull requests are welcome. Maintainer response time may vary, so
+Issues and focused pull requests for this distribution are welcome in
+[9holy/webcodex](https://github.com/9holy/webcodex). Maintainer response time may vary, so
 users who can reproduce a problem on current `main` are especially encouraged to
 investigate it, build and test a fix locally, and submit a PR rather than waiting for
-the fix to be implemented upstream. WebCodex itself, Codex, ChatGPT, Claude, or other
+the fix to be implemented by a maintainer. WebCodex itself, Codex, ChatGPT, Claude, or other
 coding agents may be used to help inspect, edit, and validate the repository.
 
 For what to include in a bug report, the self-service fix workflow, validation
 expectations, and pull request guidance, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Support WebCodex ☕
-
-If WebCodex has been useful to you, you can optionally buy the maintainer a coffee by scanning a QR code below. Stars, feedback, and contributions are equally appreciated. [Sponsorship details](docs/SPONSORSHIP.md).
-
-| WeChat appreciation | Alipay |
-| :---: | :---: |
-| <a href="docs/assets/sponsor/vx.png"><img src="docs/assets/sponsor/vx.png" alt="WeChat appreciation QR code" width="260"></a> | <a href="docs/assets/sponsor/zfb.png"><img src="docs/assets/sponsor/zfb.png" alt="Alipay personal payment card with QR code" width="320"></a> |
-
-Tap either image to open or save the full-resolution QR code. Please verify the recipient in your payment app before sending a tip; these are direct, voluntary contributions, not payments processed by GitHub.
-
 ## Acknowledgements
+
+Thank you to **[yyjeqhc](https://github.com/yyjeqhc)** and the **[upstream WebCodex contributors](https://github.com/yyjeqhc/webcodex/graphs/contributors)** for creating and maintaining [WebCodex](https://github.com/yyjeqhc/webcodex). This fork inherits substantial implementation and documentation from their work. The original attribution and [Apache 2.0 license](LICENSE) remain in place.
 
 Thanks to the [LINUX DO](https://linux.do/) community for its welcoming space for technical discussion and support for open-source sharing.
 
-Thanks to [AtomGit](https://atomgit.com/yyjeqhc/webcodex) for hosting a mirror of WebCodex in China, making it easier for users in mainland China to access the project and find its releases.
+Thanks to [AtomGit](https://atomgit.com/yyjeqhc/webcodex) for hosting the upstream WebCodex mirror in China. This fork's releases are published separately on [9holy/webcodex](https://github.com/9holy/webcodex/releases).
 
 ## License
 
