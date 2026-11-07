@@ -57,9 +57,14 @@ FIXTURE_COUNTERS = (
 )
 ACCEPTANCE_STAGES = frozenset({
     "prepare", "scope", "host_key_inspection", "wrong_password", "changed_host_key",
-    "password_probe", "plain_key_probe", "encrypted_key_probe", "register",
-    "runner_restart", "remote_shell", "privacy",
+    "password_probe", "plain_key_probe", "wrong_key_probe", "encrypted_key_probe",
+    "user_known_hosts_correct_pin", "user_known_hosts_wrong_pin",
+    "register", "runner_restart", "remote_shell", "privacy",
 })
+LITERAL_DOLLAR_ENV = "WEBCODEX_SSH_LITERAL_DOLLAR"
+PIN_PROBE_ALIAS = "webcodex-user-known-hosts-fixture"
+PIN_PROBE_OUTPUT = b"WEBCODEX_USER_PIN_OK\n"
+NONEXECUTABLE_DECOY = b"Fixture sentinel; deliberately not a Windows executable.\r\n"
 OPERATOR_ERROR_KINDS = frozenset({
     "permission_denied", "insufficient_scope", "runner_unavailable", "invalid_runner_response",
     "ssh_resource_invalid", "ssh_resource_registry_unavailable", "ssh_resource_binding_stale",
@@ -122,6 +127,102 @@ def encrypted_key_control_copy(source: Path, root: Path) -> Path:
     shutil.copyfile(source, target)
     secure_fixture_path(target)
     return target
+
+
+def special_key_path(root: Path) -> Path:
+    # Keep the special characters after the Unicode section so they cannot
+    # displace the original OpenSSH 100-byte prompt truncation coverage.
+    for padding in range(3):
+        path = root / ("k" * padding + "长" * 40
+                       + " key %q ${WEBCODEX_FIXTURE_UNSET}") / "client-key"
+        encoded = str(path).encode("utf-8")
+        try:
+            encoded[:100].decode("utf-8")
+        except UnicodeDecodeError as error:
+            if len(encoded) > 100 and error.end == 100 and error.reason == "unexpected end of data":
+                return path
+    raise AssertionError("fixture root must allow a partial UTF-8 character at the 100-byte key boundary")
+
+
+def literal_ssh_option_path(path: Path) -> str:
+    # The Windows production contract puts Unicode on argv, not in a path
+    # environment variable read through the client's narrow CRT getenv.
+    # The one ASCII environment value is forced below and is not recursive.
+    value = str(path).replace("%", "%%").replace("$", "${" + LITERAL_DOLLAR_ENV + "}")
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def file_sha256(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        raise AssertionError("fixture executable integrity could not be checked") from None
+    return digest.digest()
+
+
+@dataclass(frozen=True)
+class NativeRunnerFixture:
+    source: Path
+    executable: Path
+    caller_cwd: Path
+    decoy: Path
+    digest: bytes
+
+    def verify(self):
+        check(self.source.is_absolute() and self.executable.is_absolute()
+              and self.caller_cwd.is_absolute()
+              and self.executable.parent != self.caller_cwd,
+              "fixture Runner must use an absolute executable and a different caller cwd")
+        check(file_sha256(self.source) == self.digest == file_sha256(self.executable),
+              "fixture Runner bytes must match the exact candidate")
+        check(file_sha256(self.decoy) == hashlib.sha256(NONEXECUTABLE_DECOY).digest(),
+              "fixture caller-cwd decoy was changed")
+
+
+def prepare_windows_runner(source: Path, root: Path) -> NativeRunnerFixture:
+    parent = root / "Runner 安装 directory"
+    caller_cwd = root / "different-caller-cwd"
+    for directory in [parent, caller_cwd]:
+        directory.mkdir(mode=0o700)
+        secure_fixture_path(directory)
+    # A different, valid ASCII leaf also rejects hardcoded helper basenames.
+    executable = parent / "webcodex-ssh-fixture.exe"
+    decoy = caller_cwd / executable.name
+    digest = file_sha256(source)
+    try:
+        shutil.copyfile(source, executable)
+        decoy.write_bytes(NONEXECUTABLE_DECOY)
+    except OSError:
+        raise AssertionError("fixture Runner copy could not be prepared") from None
+    secure_fixture_path(executable)
+    secure_fixture_path(decoy)
+    fixture = NativeRunnerFixture(source, executable, caller_cwd, decoy, digest)
+    fixture.verify()
+    return fixture
+
+
+def user_known_hosts_command(program: Path, endpoint: dict, hosts: Path, identity: Path) -> list[str]:
+    # This native-client baseline isolates UserKnownHostsFile from the product
+    # path, which deliberately pins both the user and global host-key files.
+    options = [
+        "StrictHostKeyChecking=yes", "GlobalKnownHostsFile=none",
+        "UserKnownHostsFile=" + literal_ssh_option_path(hosts),
+        "HostKeyAlias=" + PIN_PROBE_ALIAS, "CheckHostIP=no", "UpdateHostKeys=no",
+        "VerifyHostKeyDNS=no", "PermitLocalCommand=no", "ClearAllForwardings=yes",
+        "ForwardAgent=no", "ForwardX11=no", "IdentityAgent=none", "IdentitiesOnly=yes",
+        "IdentityFile=" + literal_ssh_option_path(identity), "HostKeyAlgorithms=ssh-ed25519",
+        "PreferredAuthentications=publickey", "PasswordAuthentication=no",
+        "KbdInteractiveAuthentication=no", "BatchMode=yes", "ConnectTimeout=10",
+        "ServerAliveInterval=5", "ServerAliveCountMax=1",
+    ]
+    arguments = [str(program), "-F", "none", "-n", "-T",
+                 "-p", str(endpoint["port"]), "-l", endpoint["user"]]
+    for option in options:
+        arguments.extend(["-o", option])
+    return arguments + ["--", endpoint["host"], "printf 'WEBCODEX_USER_PIN_OK\\n'"]
 
 
 def git_posix_tools(git: Path) -> tuple[Path, Path]:
@@ -345,17 +446,28 @@ class SshFixture:
         self.key_path.write_bytes(client_pem)
         secure_fixture_path(self.key_path)
         self.passphrase = secrets.token_urlsafe(32)
-        # OpenSSH abbreviates passphrase prompts at 100 bytes. Deliberately
-        # cross that boundary inside a UTF-8 path to cover the native helper.
-        encrypted_dir = root / ("encrypted-key-" + "长" * 40)
+        # Exercise literal %, environment syntax, spaces and a guaranteed
+        # partial UTF-8 character in the 100-byte native passphrase prompt.
+        self.encrypted_key_path = special_key_path(root)
+        encrypted_dir = self.encrypted_key_path.parent
         encrypted_dir.mkdir(mode=0o700)
-        self.encrypted_key_path = encrypted_dir / "client-key"
+        secure_fixture_path(encrypted_dir)
         self.encrypted_key_path.write_bytes(serialization.load_ssh_private_key(client_pem, password=None).private_bytes(
             serialization.Encoding.PEM, serialization.PrivateFormat.OpenSSH,
             serialization.BestAvailableEncryption(self.passphrase.encode()),
         ))
         secure_fixture_path(self.encrypted_key_path)
         self.ascii_encrypted_key_path = encrypted_key_control_copy(self.encrypted_key_path, root)
+        _, wrong_key_pem = generated_key()
+        self.wrong_key_path = encrypted_dir / "wrong-key"
+        self.wrong_key_path.write_bytes(wrong_key_pem)
+        secure_fixture_path(self.wrong_key_path)
+        wrong_host_key, _ = generated_key()
+        self.correct_hosts_path = encrypted_dir / "correct-known-hosts"
+        self.wrong_hosts_path = encrypted_dir / "wrong-known-hosts"
+        for path, key in [(self.correct_hosts_path, self.host_key), (self.wrong_hosts_path, wrong_host_key)]:
+            path.write_text(f"{PIN_PROBE_ALIAS} {key.get_name()} {key.get_base64()}\n", encoding="ascii")
+            secure_fixture_path(path)
         self.remote = root / "remote"
         self.remote.mkdir(mode=0o700)
         self.remote_cwd = tools.remote_path(self.remote)
@@ -502,6 +614,8 @@ class ConnectionAcceptance(Smoke):
             path.mkdir(mode=0o700)
             secure_fixture_path(path)
             self.env[variable] = str(path)
+        self.native_runner = (prepare_windows_runner(bin_dir / "webcodex-runner.exe", root)
+                              if os.name == "nt" else None)
         self.ssh = SshFixture(root, tools)
         self.stage_counts = self.ssh.diagnostic_counts()
         self.stage_log_offsets = {}
@@ -513,14 +627,22 @@ class ConnectionAcceptance(Smoke):
         self.env.update({"PATH": tools.runner_path, "WEBCODEX_ENV_FILE": os.devnull,
                          "WEBCODEX_MCP_HOST_PROFILE": "direct",
                          "WEBCODEX_TOOL_REQUEST_TRACE": "full",
-                         "WEBCODEX_TOOL_REQUEST_TRACE_DIR": str(root / "traces")})
+                         "WEBCODEX_TOOL_REQUEST_TRACE_DIR": str(root / "traces"),
+                         # The child must force its one literal-dollar value,
+                         # never trust an inherited value from the launcher.
+                         LITERAL_DOLLAR_ENV: "fixture-inherited-value-must-not-be-used"})
 
     def launch(self, binary: str, args: list[str], env: dict) -> subprocess.Popen:
         if os.name != "nt":
             return super().launch(binary, args, env)
         log = (self.root / f"{binary}-{len(self.logs)}.log").open("wb")
         self.logs.append(log)
-        return subprocess.Popen([str(self.bin_dir / (binary + ".exe")), *args], env=env,
+        program, caller_cwd = self.bin_dir / (binary + ".exe"), None
+        if binary == "webcodex-runner":
+            check(self.native_runner is not None, "native Runner fixture is missing")
+            self.native_runner.verify()
+            program, caller_cwd = self.native_runner.executable, self.native_runner.caller_cwd
+        return subprocess.Popen([str(program), *args], env=env, cwd=caller_cwd,
                                 stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
 
@@ -607,6 +729,86 @@ class ConnectionAcceptance(Smoke):
             summary["ascii_key_control"] = self.ascii_key_control
         return summary
 
+    def reject_wrong_key(self, probe):
+        self.begin_stage("wrong_key_probe")
+        before = self.ssh.diagnostic_counts()
+        denied = self.operator("probe", probe | {"authentication": {
+            "type": "identity_file", "path": str(self.ssh.wrong_key_path),
+        }}, success=False)
+        after = self.ssh.diagnostic_counts()
+        check(denied.get("error_kind") == "ssh_authentication_failed",
+              "the actual untrusted private key was not rejected as an authentication failure")
+        check(after["publickey_requests"] > before["publickey_requests"]
+              and after["accepted_key_offers"] == before["accepted_key_offers"],
+              "wrong-key negative must offer the actual untrusted key without accepting it")
+        check(after["executions"] == before["executions"]
+              and after["password_attempts"] == before["password_attempts"],
+              "the untrusted key must not execute or fall back to password authentication")
+
+    def check_user_known_hosts_only(self):
+        if os.name == "nt":
+            program = Path(os.environ["SystemRoot"]) / "System32/OpenSSH/ssh.exe"
+        else:
+            resolved = shutil.which("ssh", path=self.ssh.tools.runner_path)
+            check(resolved is not None, "the native SSH pin probe client is missing")
+            program = Path(resolved)
+        check(str(self.ssh.key_path).isascii(),
+              "UserKnownHostsFile isolation requires an ASCII plain-key fixture path")
+        selected_hosts = self.ssh.correct_hosts_path
+        try:
+            correct_pin = selected_hosts.read_bytes()
+            wrong_pin = self.ssh.wrong_hosts_path.read_bytes()
+        except OSError:
+            raise AssertionError("fixture host-key pin bytes could not be read") from None
+        check(correct_pin and wrong_pin and correct_pin != wrong_pin,
+              "the native pin probe must use two different actual host keys")
+        # Ignore ambient helpers and agents. Only the fixture's ordinary key
+        # authenticates here; password/passphrase handling stays in product E2E.
+        env = {name: value for name, value in self.env.items()
+               if not name.startswith(("SSH_ASKPASS", "WEBCODEX_SSH_"))
+               and name not in {"SSH_AUTH_SOCK", "SSH_AGENT_PID"}}
+        env.update({LITERAL_DOLLAR_ENV: "$", "LC_ALL": "C"})
+        for stage, expected in [
+            ("user_known_hosts_correct_pin", True),
+            ("user_known_hosts_wrong_pin", False),
+        ]:
+            self.begin_stage(stage)
+            before = self.ssh.diagnostic_counts()
+            if not expected:
+                # Change only the bytes in the same selected file. A missing
+                # or misaddressed second path cannot satisfy the negative case.
+                # Truncating the owned existing file preserves its private ACL.
+                try:
+                    selected_hosts.write_bytes(wrong_pin)
+                    installed_pin = selected_hosts.read_bytes()
+                except OSError:
+                    raise AssertionError("fixture wrong host-key pin could not be installed") from None
+                check(installed_pin == wrong_pin, "fixture wrong host-key pin bytes were not installed")
+            arguments = user_known_hosts_command(program, self.endpoint, selected_hosts, self.ssh.key_path)
+            try:
+                result = subprocess.run(arguments, env=env, stdin=subprocess.DEVNULL,
+                                        capture_output=True, timeout=15)
+            except subprocess.TimeoutExpired:
+                raise AssertionError("UserKnownHostsFile-only native probe timed out") from None
+            except OSError:
+                raise AssertionError("UserKnownHostsFile-only native client could not start") from None
+            check(all(secret.encode() not in result.stdout + result.stderr
+                      for secret in [self.ssh.password, self.ssh.passphrase]),
+                  "credential appeared in the native pin probe output")
+            after = self.ssh.diagnostic_counts()
+            if expected:
+                check(result.returncode == 0 and result.stdout == PIN_PROBE_OUTPUT,
+                      "UserKnownHostsFile-only correct pin did not produce the exact remote response")
+                check(after["executions"] > before["executions"]
+                      and after["accepted_key_offers"] > before["accepted_key_offers"],
+                      "UserKnownHostsFile-only correct pin did not authenticate and execute")
+            else:
+                check(result.returncode != 0, "UserKnownHostsFile-only wrong pin was accepted")
+                check(all(after[name] == before[name] for name in [
+                    "password_attempts", "publickey_requests", "accepted_key_offers", "executions",
+                ]), "wrong user host-key pin must fail before authentication or execution")
+        print("PASS: special-path UserKnownHostsFile alone accepts only the exact host key")
+
     def observe(self):
         return self.operator("list", {"runner": "ssh-setup-runner"})
 
@@ -652,7 +854,7 @@ class ConnectionAcceptance(Smoke):
         (registry / "fixture.toml").write_text(f'id = "fixture"\npath = {json.dumps(str(self.project_dir))}\n')
         # OpenSSH expands % tokens in UserKnownHostsFile. The Runner must quote
         # its private path even when the operator config directory contains %.
-        config_dir = self.root / "runner %q configuration"
+        config_dir = self.root / "runner 中文 %q ${WEBCODEX_FIXTURE_UNSET} configuration"
         config_dir.mkdir(mode=0o700)
         secure_fixture_path(config_dir)
         self.config = config_dir / "runner.toml"
@@ -706,10 +908,12 @@ class ConnectionAcceptance(Smoke):
         key_probe = probe | {"authentication": {"type": "identity_file", "path": str(self.ssh.key_path)}}
         self.begin_stage("plain_key_probe")
         self.operator("probe", key_probe)
+        self.reject_wrong_key(probe)
         encrypted_key_probe = probe | {"authentication": {"type": "identity_file",
             "path": str(self.ssh.encrypted_key_path), "passphrase": self.ssh.passphrase}}
         self.begin_stage("encrypted_key_probe")
         self.probe_encrypted_key(encrypted_key_probe)
+        self.check_user_known_hosts_only()
         self.begin_stage("register")
         saved = self.operator("register", {
             "binding": binding, "name": "password-fixture", "default_cwd": self.remote_cwd,
@@ -758,6 +962,10 @@ class ConnectionAcceptance(Smoke):
               "MCP shell did not execute in the SSH target")
         check(not (self.project_dir / "remote-proof.txt").exists(), "MCP shell fell back to local execution")
         if os.name == "nt":
+            self.native_runner.verify()
+            check(not (self.native_runner.caller_cwd / "remote-proof.txt").exists()
+                  and not (self.native_runner.executable.parent / "remote-proof.txt").exists(),
+                  "MCP shell executed in a local Runner or helper directory")
             check(self.ssh.framed_executions > 0,
                   "Native Windows SSH did not deliver the real program over channel stdin")
         check(self.ssh.password not in json.dumps(output), "MCP output disclosed the password")

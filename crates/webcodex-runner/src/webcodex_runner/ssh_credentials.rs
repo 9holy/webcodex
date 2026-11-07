@@ -22,6 +22,10 @@ const ASKPASS_REQUEST_ENV: &str = "WEBCODEX_SSH_ASKPASS_REQUEST";
 const ASKPASS_NONCE_ENV: &str = "WEBCODEX_SSH_ASKPASS_NONCE";
 const KNOWN_HOSTS_PATH_ENV: &str = "WEBCODEX_SSH_KNOWN_HOSTS_FILE";
 const IDENTITY_PATH_ENV: &str = "WEBCODEX_SSH_IDENTITY_FILE";
+const LITERAL_DOLLAR_ENV: &str = "WEBCODEX_SSH_LITERAL_DOLLAR";
+const WINDOWS_PATH_OPTION_MAX_BYTES: usize = 16 * 1024;
+#[cfg(any(windows, test))]
+const WINDOWS_COMMAND_LINE_MAX_UNITS: usize = 32 * 1024 - 1;
 const SECRET_MAX_BYTES: usize = 4096;
 const SECRET_FILE_MAX_BYTES: usize = 32 * 1024;
 const ASKPASS_LIFETIME_SECS: u64 = 30;
@@ -341,6 +345,164 @@ fn option_path(path: &Path) -> Result<String, &'static str> {
     ))
 }
 
+fn configure_path_arguments(
+    command: &mut Command,
+    hosts_path: &Path,
+    identity_path: Option<&str>,
+    windows: bool,
+) -> Result<(), &'static str> {
+    let global_hosts_path = option_path(hosts_path)?;
+    let user_hosts_path = if windows {
+        // Win32 OpenSSH expands ${variables} through the narrow CRT getenv,
+        // which can lose Unicode paths. Its argv is converted from UTF-16 to
+        // UTF-8 instead. Keep paths in argv; the only expansion value is the
+        // forced ASCII dollar below, never an inherited value or a full path.
+        command
+            .env_remove(KNOWN_HOSTS_PATH_ENV)
+            .env_remove(IDENTITY_PATH_ENV)
+            .env(LITERAL_DOLLAR_ENV, "$");
+        windows_expanding_option_path(hosts_path)?
+    } else {
+        // OpenSSH appends an environment expansion without recursively scanning
+        // its value. Preserve the existing Unix literal-path behavior.
+        command
+            .env(KNOWN_HOSTS_PATH_ENV, hosts_path)
+            .env_remove(IDENTITY_PATH_ENV)
+            .env_remove(LITERAL_DOLLAR_ENV);
+        format!("${{{KNOWN_HOSTS_PATH_ENV}}}")
+    };
+    command
+        .arg("-o")
+        .arg(format!("UserKnownHostsFile={user_hosts_path}"))
+        .arg("-o")
+        .arg(format!("GlobalKnownHostsFile={global_hosts_path}"));
+    if let Some(path) = identity_path {
+        let identity = if windows {
+            windows_expanding_option_path(Path::new(path))?
+        } else {
+            command.env(IDENTITY_PATH_ENV, path);
+            format!("${{{IDENTITY_PATH_ENV}}}")
+        };
+        // Do not use -i: it stats its argument before the later percent/dollar
+        // expansion, so an escaped literal path would name a different file.
+        command.arg("-o").arg(format!("IdentityFile={identity}"));
+    }
+    Ok(())
+}
+
+fn windows_expanding_option_path(path: &Path) -> Result<String, &'static str> {
+    let value = path.to_str().ok_or("ssh_credentials_unavailable")?;
+    let mut encoded = String::new();
+    for character in value.chars() {
+        match character {
+            '%' => encoded.push_str("%%"),
+            '$' => {
+                encoded.push_str("${");
+                encoded.push_str(LITERAL_DOLLAR_ENV);
+                encoded.push('}');
+            }
+            character if character.is_control() => return Err("ssh_credentials_unavailable"),
+            character => encoded.push(character),
+        }
+        // Bound expansion memory separately from the final UTF-16 command-line
+        // check. Never truncate or retarget a path that cannot be represented.
+        if encoded.len() > WINDOWS_PATH_OPTION_MAX_BYTES {
+            return Err("ssh_credentials_unavailable");
+        }
+    }
+    option_path(Path::new(&encoded))
+}
+
+#[cfg(any(windows, test))]
+fn windows_utf16_units(value: &std::ffi::OsStr) -> Result<usize, &'static str> {
+    #[cfg(windows)]
+    let units = {
+        use std::os::windows::ffi::OsStrExt;
+        value.encode_wide()
+    };
+    #[cfg(not(windows))]
+    let units = value
+        .to_str()
+        .ok_or("ssh_credentials_unavailable")?
+        .encode_utf16();
+    let mut length = 0usize;
+    for unit in units {
+        if unit == 0 || length >= WINDOWS_COMMAND_LINE_MAX_UNITS {
+            return Err("ssh_credentials_unavailable");
+        }
+        length += 1;
+    }
+    Ok(length)
+}
+
+/// Check only fully constructed Windows commands, immediately before handing
+/// them to their spawn owner. Rust quotes the original program and can at most
+/// double each normal argument unit while escaping quotes/backslashes. Include
+/// every argument, separator and the terminating NUL; no raw_arg is used here.
+#[cfg(any(windows, test))]
+pub(crate) fn validate_windows_command(command: &Command) -> Result<(), &'static str> {
+    let unavailable = "ssh_credentials_unavailable";
+    let mut length = windows_utf16_units(command.get_program())?
+        .checked_add(3)
+        .ok_or(unavailable)?;
+    for argument in command.get_args() {
+        let argument_length = windows_utf16_units(argument)?
+            .checked_mul(2)
+            .and_then(|length| length.checked_add(3))
+            .ok_or(unavailable)?;
+        length = length.checked_add(argument_length).ok_or(unavailable)?;
+        if length > WINDOWS_COMMAND_LINE_MAX_UNITS {
+            return Err(unavailable);
+        }
+    }
+    if length > WINDOWS_COMMAND_LINE_MAX_UNITS {
+        return Err(unavailable);
+    }
+    Ok(())
+}
+
+fn windows_askpass_leaf(name: &str) -> Result<String, &'static str> {
+    if name.len() <= 4
+        || !name
+            .get(name.len() - 4..)
+            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(".exe"))
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err("ssh_credentials_unavailable");
+    }
+    // The explicit relative path cannot search PATH. Do not allow whitespace,
+    // quotes or separators: Win32 OpenSSH can parse '.exe ' as exe + arguments.
+    Ok(format!(r".\{name}"))
+}
+
+fn configure_askpass_program(
+    command: &mut Command,
+    executable: &Path,
+    windows: bool,
+) -> Result<(), &'static str> {
+    if windows {
+        if !executable.is_absolute() {
+            return Err("ssh_credentials_unavailable");
+        }
+        let parent = executable.parent().ok_or("ssh_credentials_unavailable")?;
+        let name = executable
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or("ssh_credentials_unavailable")?;
+        // SSH_ASKPASS also passes through narrow getenv. The actual image's
+        // safe ASCII leaf avoids that conversion; CreateProcessW inherits this
+        // wide child-only cwd. Only authentication leases call this helper.
+        command
+            .env("SSH_ASKPASS", windows_askpass_leaf(name)?)
+            .current_dir(parent);
+    } else {
+        command.env("SSH_ASKPASS", executable);
+    }
+    Ok(())
+}
+
 impl ManagedSshConnection {
     pub(crate) fn load(
         stored: StoredSshConnection,
@@ -391,15 +553,6 @@ impl ManagedSshConnection {
         let hosts_path = store
             .path(&hosts_name)
             .map_err(|_| "ssh_credentials_unavailable")?;
-        let global_hosts_path = option_path(&hosts_path)?;
-        // UserKnownHostsFile and IdentityFile expand both percent tokens and
-        // ${variables}. OpenSSH does not recursively expand an environment
-        // value, so one child-local path value preserves literal %, $, quotes
-        // and spaces. GlobalKnownHostsFile does not use that expansion and
-        // therefore receives its separately quoted literal path.
-        command
-            .env(KNOWN_HOSTS_PATH_ENV, &hosts_path)
-            .env_remove(IDENTITY_PATH_ENV);
         command
             .arg("-F")
             .arg("none")
@@ -407,10 +560,14 @@ impl ManagedSshConnection {
             .arg(self.stored.endpoint.port.to_string())
             .arg("-l")
             .arg(&self.stored.endpoint.user);
+        configure_path_arguments(
+            command,
+            &hosts_path,
+            self.stored.identity_file.as_deref(),
+            cfg!(windows),
+        )?;
         for option in [
             "StrictHostKeyChecking=yes".to_string(),
-            format!("UserKnownHostsFile=${{{KNOWN_HOSTS_PATH_ENV}}}"),
-            format!("GlobalKnownHostsFile={global_hosts_path}"),
             format!("HostKeyAlias={}", self.stored.host_alias()),
             "CheckHostIP=no".to_string(),
             "UpdateHostKeys=no".to_string(),
@@ -439,6 +596,7 @@ impl ManagedSshConnection {
             .env("LC_ALL", "C")
             .env_remove("SSH_ASKPASS")
             .env_remove("SSH_ASKPASS_REQUIRE")
+            .env_remove("SSH_ASKPASS_PROMPT")
             .env_remove(ASKPASS_REQUEST_ENV)
             .env_remove(ASKPASS_NONCE_ENV)
             .env_remove(DIAGNOSTICS_ENV)
@@ -457,15 +615,7 @@ impl ManagedSshConnection {
                     .arg("PasswordAuthentication=yes");
             }
             StoredAuthentication::IdentityFile => {
-                let path = self
-                    .stored
-                    .identity_file
-                    .as_deref()
-                    .ok_or("ssh_resource_invalid")?;
                 command
-                    .env(IDENTITY_PATH_ENV, path)
-                    .arg("-o")
-                    .arg(format!("IdentityFile=${{{IDENTITY_PATH_ENV}}}"))
                     .arg("-o")
                     .arg("IdentitiesOnly=yes")
                     .arg("-o")
@@ -549,8 +699,8 @@ impl AskpassLease {
                 .ok_or("ssh_credentials_unavailable")?,
         };
         let executable = std::env::current_exe().map_err(|_| "ssh_credentials_unavailable")?;
+        configure_askpass_program(command, &executable, cfg!(windows))?;
         command
-            .env("SSH_ASKPASS", executable)
             .env("SSH_ASKPASS_REQUIRE", "force")
             .env(ASKPASS_REQUEST_ENV, path)
             .env(ASKPASS_NONCE_ENV, nonce);

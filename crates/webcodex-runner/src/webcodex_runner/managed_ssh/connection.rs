@@ -1,5 +1,7 @@
 use super::*;
 use crate::webcodex_runner::shutdown::lock_unpoison;
+#[cfg(windows)]
+use crate::webcodex_runner::ssh_credentials::validate_windows_command;
 use crate::webcodex_runner::ssh_credentials::{
     enable_probe_diagnostics, probe_failure_summary, AskpassLease, ConnectionCandidate, HostKey,
 };
@@ -371,6 +373,8 @@ fn probe_command(
         .arg("LogLevel=ERROR")
         .arg(&connection.stored.endpoint.host)
         .arg("echo WEBCODEX_SSH_CONNECTION_OK");
+    #[cfg(windows)]
+    validate_windows_command(&command)?;
     Ok((command, lease))
 }
 

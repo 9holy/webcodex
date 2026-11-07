@@ -4,6 +4,7 @@ import os
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import tempfile
 import time
 from types import SimpleNamespace
@@ -12,9 +13,11 @@ from unittest import mock
 
 from scripts.e2e_ssh_connections import (
     ConnectionAcceptance, FIXTURE_COUNTERS, HostTools, OperatorCallFailed,
+    LITERAL_DOLLAR_ENV, NONEXECUTABLE_DECOY, PIN_PROBE_OUTPUT,
     PROBE_DIAGNOSTIC_COUNTERS, PROBE_DIAGNOSTIC_STAGES, SshFixture,
     acl_failure_details, channel_input, encrypted_key_control_copy, git_posix_tools,
-    native_ssh_version, observed_probe_diagnostic, secure_fixture_path,
+    literal_ssh_option_path, native_ssh_version, observed_probe_diagnostic,
+    prepare_windows_runner, secure_fixture_path, special_key_path, user_known_hosts_command,
 )
 
 
@@ -74,6 +77,177 @@ class SshFixtureInputTests(unittest.TestCase):
         acceptance.ascii_key_control = None
         acceptance.begin_stage("encrypted_key_probe")
         return acceptance
+
+    def pin_acceptance(self):
+        acceptance = self.empty_acceptance()
+        temporary = tempfile.TemporaryDirectory(prefix="wc-native-pin-")
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name) / "中文 pin %q ${NAME}"
+        root.mkdir()
+        acceptance.ssh.key_path = Path("plain-ascii-fixture-key")
+        acceptance.ssh.correct_hosts_path = root / "selected"
+        acceptance.ssh.wrong_hosts_path = root / "different-key-source"
+        acceptance.ssh.correct_hosts_path.write_bytes(b"known fixture right public key")
+        acceptance.ssh.wrong_hosts_path.write_bytes(b"known fixture wrong public key")
+        acceptance.ssh.tools = HostTools(Path("unused"), "fixture-path", {})
+        acceptance.endpoint = {"host": "127.0.0.1", "port": 22122, "user": "fixture-user"}
+        acceptance.env = {LITERAL_DOLLAR_ENV: "inherited-poison",
+                          "SSH_ASKPASS": "private-helper-canary",
+                          "WEBCODEX_SSH_ASKPASS_REQUEST": "private-request-canary",
+                          "SSH_AUTH_SOCK": "private-agent-canary"}
+        return acceptance
+
+    def test_special_key_path_guarantees_partial_utf8_and_literal_special_characters(self):
+        for length in [1, 15, 31, 60, 90]:
+            with self.subTest(root_length=length):
+                path = special_key_path(Path("r" * length))
+                encoded = str(path).encode("utf-8")
+                self.assertGreater(len(encoded), 100)
+                with self.assertRaises(UnicodeDecodeError):
+                    encoded[:100].decode("utf-8")
+                self.assertIn(" key %q ${WEBCODEX_FIXTURE_UNSET}", str(path))
+                self.assertEqual(path.name, "client-key")
+        with self.assertRaisesRegex(AssertionError, "100-byte key boundary"):
+            special_key_path(Path("r" * 120))
+
+    def test_native_user_known_hosts_arguments_isolate_the_user_pin_and_literal_paths(self):
+        hosts = Path(r"C:\private path\中文 %q ${NAME}\known-hosts")
+        encoded = literal_ssh_option_path(hosts)
+        self.assertTrue(encoded.startswith('"') and encoded.endswith('"'))
+        self.assertIn("%%q", encoded)
+        self.assertIn("${WEBCODEX_SSH_LITERAL_DOLLAR}{NAME}", encoded)
+        self.assertNotIn("${NAME}", encoded)
+        self.assertIn("\\\\", encoded)
+        endpoint = {"host": "127.0.0.1", "port": 22122, "user": "fixture-user"}
+        command = user_known_hosts_command(Path("native-ssh"), endpoint, hosts, Path("plain-key"))
+        options = [command[index + 1] for index, argument in enumerate(command) if argument == "-o"]
+        self.assertEqual([option for option in options if option.startswith("GlobalKnownHostsFile=")],
+                         ["GlobalKnownHostsFile=none"])
+        self.assertEqual([option for option in options if option.startswith("UserKnownHostsFile=")],
+                         ["UserKnownHostsFile=" + encoded])
+        for option in ["StrictHostKeyChecking=yes", "IdentityAgent=none", "IdentitiesOnly=yes",
+                       "BatchMode=yes", "PasswordAuthentication=no", "KbdInteractiveAuthentication=no"]:
+            self.assertIn(option, options)
+        self.assertEqual(command[:8], ["native-ssh", "-F", "none", "-n", "-T", "-p", "22122", "-l"])
+        self.assertEqual(command[8], "fixture-user")
+        self.assertEqual(command[-3:], ["--", "127.0.0.1", "printf 'WEBCODEX_USER_PIN_OK\\n'"])
+
+    def test_native_runner_copy_preserves_exact_hash_and_rejects_tampered_copy_or_decoy(self):
+        with tempfile.TemporaryDirectory(prefix="wc-runner-copy-") as directory:
+            root = Path(directory).resolve()
+            secure_fixture_path(root)
+            source = root / "webcodex-runner.exe"
+            payload = b"exact candidate fixture bytes" * 1024
+            source.write_bytes(payload)
+            fixture = prepare_windows_runner(source, root)
+            self.assertEqual(fixture.executable.read_bytes(), payload)
+            self.assertTrue(fixture.executable.name.isascii())
+            self.assertNotEqual(fixture.executable.name, source.name)
+            self.assertIn("安装", str(fixture.executable.parent))
+            self.assertNotEqual(fixture.caller_cwd, fixture.executable.parent)
+            self.assertEqual(fixture.decoy.name, fixture.executable.name)
+            self.assertEqual(fixture.decoy.read_bytes(), NONEXECUTABLE_DECOY)
+            for target, original in [(source, payload), (fixture.executable, payload),
+                                     (fixture.decoy, NONEXECUTABLE_DECOY)]:
+                target.write_bytes(b"tampered fixture bytes")
+                with self.assertRaises(AssertionError):
+                    fixture.verify()
+                target.write_bytes(original)
+                fixture.verify()
+
+    def test_native_runner_launch_uses_verified_absolute_copy_and_different_cwd(self):
+        with tempfile.TemporaryDirectory(prefix="wc-runner-launch-") as directory:
+            root = Path(directory).resolve()
+            secure_fixture_path(root)
+            source = root / "webcodex-runner.exe"
+            source.write_bytes(b"exact native fixture bytes")
+            acceptance = self.empty_acceptance()
+            acceptance.root = acceptance.bin_dir = root
+            acceptance.native_runner = prepare_windows_runner(source, root)
+            arguments = ["--config", str(root / "runner.toml")]
+            try:
+                with mock.patch("scripts.e2e_ssh_connections.os", SimpleNamespace(name="nt")), \
+                        mock.patch("scripts.e2e_ssh_connections.subprocess.CREATE_NEW_PROCESS_GROUP", 512, create=True), \
+                        mock.patch("scripts.e2e_ssh_connections.subprocess.Popen") as launch:
+                    acceptance.launch("webcodex-runner", arguments, {})
+                    call = launch.call_args
+                    self.assertEqual(call.args[0], [str(acceptance.native_runner.executable), *arguments])
+                    self.assertEqual(call.kwargs["cwd"], acceptance.native_runner.caller_cwd)
+                    self.assertEqual(call.kwargs["stdin"], subprocess.DEVNULL)
+                    acceptance.native_runner.executable.write_bytes(b"changed")
+                    with self.assertRaisesRegex(AssertionError, "exact candidate"):
+                        acceptance.launch("webcodex-runner", arguments, {})
+                    self.assertEqual(launch.call_count, 1)
+            finally:
+                for log in acceptance.logs:
+                    log.close()
+
+    def test_wrong_actual_key_requires_an_offer_without_authentication_fallback_or_execution(self):
+        probe = {"binding": {"revision": "fenced"}, "endpoint": {"host": "127.0.0.1"},
+                 "host_key": {"challenge_id": "fenced", "fingerprint": "pinned"},
+                 "authentication": {"type": "password", "password": "private"}}
+        for rejected_case in [None, "no_offer", "accepted_key", "executed", "password_fallback"]:
+            with self.subTest(rejected_case=rejected_case):
+                acceptance = self.empty_acceptance()
+                acceptance.ssh.wrong_key_path = Path("wrong-中文-%q-key")
+                def operator(action, body, *, success=True):
+                    self.assertEqual(action, "probe")
+                    self.assertFalse(success)
+                    self.assertEqual(body, probe | {"authentication": {
+                        "type": "identity_file", "path": str(acceptance.ssh.wrong_key_path)}})
+                    if rejected_case != "no_offer":
+                        acceptance.ssh.publickey_requests += 1
+                    if rejected_case == "accepted_key":
+                        acceptance.ssh.accepted_key_offers += 1
+                    if rejected_case == "executed":
+                        acceptance.ssh.executions += 1
+                    if rejected_case == "password_fallback":
+                        acceptance.ssh.password_attempts += 1
+                    return {"error_kind": "ssh_authentication_failed"}
+                acceptance.operator = operator
+                if rejected_case is None:
+                    acceptance.reject_wrong_key(probe)
+                else:
+                    with self.assertRaises(AssertionError):
+                        acceptance.reject_wrong_key(probe)
+
+    def test_user_only_pin_checks_real_execution_and_rejects_authentication_after_wrong_pin(self):
+        for invalid in [None, "success", "authentication", "no_execution", "wrong_output"]:
+            with self.subTest(invalid=invalid):
+                acceptance = self.pin_acceptance()
+                calls = []
+                def native_probe(arguments, **kwargs):
+                    calls.append(arguments)
+                    self.assertEqual(kwargs["env"][LITERAL_DOLLAR_ENV], "$")
+                    self.assertFalse(any("private-" in value for value in kwargs["env"].values()))
+                    self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+                    if len(calls) == 1:
+                        self.assertEqual(acceptance.ssh.correct_hosts_path.read_bytes(),
+                                         b"known fixture right public key")
+                        acceptance.ssh.publickey_requests += 2
+                        acceptance.ssh.accepted_key_offers += 2
+                        if invalid != "no_execution":
+                            acceptance.ssh.executions += 1
+                        return SimpleNamespace(returncode=0,
+                            stdout=b"incorrect" if invalid == "wrong_output" else PIN_PROBE_OUTPUT,
+                            stderr=b"private-native-path-canary")
+                    self.assertEqual(arguments, calls[0])
+                    self.assertEqual(acceptance.ssh.correct_hosts_path.read_bytes(),
+                                     b"known fixture wrong public key")
+                    if invalid == "authentication":
+                        acceptance.ssh.publickey_requests += 1
+                    return SimpleNamespace(returncode=0 if invalid == "success" else 255,
+                                           stdout=b"", stderr=b"private-native-path-canary")
+                with mock.patch("scripts.e2e_ssh_connections.shutil.which", return_value="native-ssh"), \
+                        mock.patch("scripts.e2e_ssh_connections.subprocess.run", side_effect=native_probe), \
+                        mock.patch("builtins.print") as output:
+                    if invalid is None:
+                        acceptance.check_user_known_hosts_only()
+                        self.assertEqual(len(calls), 2)
+                    else:
+                        with self.assertRaises(AssertionError):
+                            acceptance.check_user_known_hosts_only()
+                    self.assertNotIn("private-native-path-canary", str(output.call_args_list))
 
     def test_probe_diagnostic_projects_only_complete_closed_bounded_messages(self):
         canary = b"private-path-prompt-and-credential"
@@ -238,7 +412,8 @@ class SshFixtureInputTests(unittest.TestCase):
             for path in ambient.values():
                 path.mkdir()
             with mock.patch.dict(os.environ, {name: str(path) for name, path in ambient.items()}), \
-                    mock.patch("scripts.e2e_ssh_connections.SshFixture", return_value=fixture):
+                    mock.patch("scripts.e2e_ssh_connections.SshFixture", return_value=fixture), \
+                    mock.patch("scripts.e2e_ssh_connections.prepare_windows_runner", return_value=None):
                 acceptance = ConnectionAcceptance(root, root, tools)
             for variable, name in [("APPDATA", "roaming"), ("LOCALAPPDATA", "local")]:
                 self.assertEqual(acceptance.env[variable], str(root / name))
