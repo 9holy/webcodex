@@ -19,7 +19,7 @@ FIXTURE = ROOT / "tests" / "fake_codex.py"
 class AdapterTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="webcodex-codex-provider-")
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.receipt = self.root / "receipt.json"
         self.trace = self.root / "trace.jsonl"
         self.process = None
@@ -57,10 +57,10 @@ class AdapterTests(unittest.TestCase):
             "--receipt", str(self.receipt), *extra], env=environment or self.environment,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
 
-    def start(self, scenario="complete", *extra, handshake=True, environment=None, entry=ADAPTER):
+    def start(self, scenario="complete", *extra, handshake=True, environment=None, entry=ADAPTER, runner_cwd=None):
         env = dict(environment or self.environment, FAKE_CODEX_SCENARIO=scenario)
         self.process = subprocess.Popen([sys.executable, str(entry), "serve", "--experimental",
-            "--receipt", str(self.receipt), *extra], cwd=self.root, env=env,
+            "--receipt", str(self.receipt), *extra], cwd=runner_cwd or self.root, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.messages = queue.Queue()
         def read():
@@ -161,7 +161,7 @@ class AdapterTests(unittest.TestCase):
         else:
             (native_root / "nested").mkdir()
             self.root = native_root / "nested" / ".."
-        self.start()
+        self.start(runner_cwd=native_root)
         self.prompt()
         self.assertEqual(self.terminal()[0]["result"]["stopReason"], "end_turn")
         self.assertEqual(self.wait_log("thread/start")[0]["params"]["cwd"], str(native_root))

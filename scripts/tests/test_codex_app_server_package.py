@@ -43,7 +43,7 @@ class CodexAdapterPackageTests(unittest.TestCase):
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
             self.assertEqual(run.returncode, 0, run.stderr)
             result = json.loads(run.stdout)
-            self.assertEqual(result["profile"]["args"][0], str(package))
+            self.assertEqual(result["profile"]["args"][0], str(package.resolve()))
             self.assertEqual(result["status"], "ready")
             self.assertTrue(receipt.is_file())
 
