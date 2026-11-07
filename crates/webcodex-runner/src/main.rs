@@ -216,6 +216,9 @@ where
 }
 
 fn main() {
+    if let Some(code) = webcodex_runner::ssh_credentials::maybe_run_askpass() {
+        std::process::exit(code);
+    }
     let raw_args: Vec<String> = std::env::args().skip(1).collect();
     let service = match webcodex_environment::runtime_entry::split_windows_service_args(&raw_args) {
         Ok(service) => service,

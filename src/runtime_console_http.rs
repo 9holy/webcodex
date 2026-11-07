@@ -39,6 +39,7 @@ mod communication;
 mod goals;
 mod job_projection;
 mod overview_primary;
+mod ssh_resources;
 mod store_read;
 mod trace;
 mod window_inventory;
@@ -98,6 +99,26 @@ pub(crate) fn routes() -> Router {
         .push(
             Router::with_path(api_path(RouteId::RuntimeConsoleCodingAgentRuns))
                 .post(coding_agents::list),
+        )
+        .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleSshResourcesList))
+                .post(ssh_resources::list),
+        )
+        .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleSshResourcesInspect))
+                .post(ssh_resources::inspect),
+        )
+        .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleSshResourcesProbe))
+                .post(ssh_resources::probe),
+        )
+        .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleSshResourcesRegister))
+                .post(ssh_resources::register),
+        )
+        .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleSshResourcesRemove))
+                .post(ssh_resources::remove),
         )
         .push(
             Router::with_path(api_path(RouteId::RuntimeConsoleBrowserStatus)).post(browser_status),

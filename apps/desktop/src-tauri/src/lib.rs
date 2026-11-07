@@ -150,6 +150,8 @@ fn desktop_builder() -> tauri::Builder<tauri::Wry> {
             commands::save_coding_agent,
             commands::remove_coding_agent,
             commands::ssh_resource_list,
+            commands::ssh_connection_inspect,
+            commands::ssh_connection_probe,
             commands::ssh_resource_register,
             commands::ssh_resource_remove,
             commands::authorize_runner_capabilities,

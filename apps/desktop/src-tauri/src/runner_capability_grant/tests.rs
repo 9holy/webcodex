@@ -11,6 +11,8 @@ async fn authorization_status_uses_native_user_token_and_never_contacts_ssh_or_o
         r#"{"coding_agents":true,"ssh_resources":false}"#,
         r#"{"coding_agents":true,"ssh_resources":false,"permission_approval":false}"#,
         r#"{"coding_agents":true,"ssh_resources":false,"permission_approval":true}"#,
+        r#"{"coding_agents":true,"ssh_resources":false,"permission_approval":false,"detached_execution":false}"#,
+        r#"{"coding_agents":true,"ssh_resources":false,"permission_approval":true,"detached_execution":true}"#,
         r#"{"coding_agents":true,"ssh_resources":true,"token":"private-response-sentinel"}"#,
         r#"{"coding_agents":true}"#,
     ] {
@@ -31,6 +33,7 @@ async fn authorization_status_uses_native_user_token_and_never_contacts_ssh_or_o
             let request = String::from_utf8(bytes).unwrap().to_ascii_lowercase();
             assert!(request.starts_with("post /api/pairing/runner-capabilities/status http/1.1"));
             assert!(request.contains("authorization: bearer fixture-legacy-user-token"));
+            assert!(request.contains("x-webcodex-runner-capability-status: detached-execution-v1"));
             assert!(!request.contains("/api/tools/call"));
             stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{}",body.len(),body).as_bytes()).await.unwrap();
         });
@@ -50,6 +53,14 @@ async fn authorization_status_uses_native_user_token_and_never_contacts_ssh_or_o
             assert_eq!(
                 result.permission_approval_grant_available,
                 body.contains("permission_approval\":false")
+            );
+            assert_eq!(
+                result.detached_execution_granted,
+                body.contains("detached_execution\":true")
+            );
+            assert_eq!(
+                result.detached_execution_grant_available,
+                body.contains("detached_execution\":false")
             );
             let value = serde_json::to_string(&result).unwrap();
             assert!(!value.contains("fixture-legacy-user-token"));
@@ -116,7 +127,13 @@ async fn operator_grant_http_keeps_credentials_native_and_does_not_rewrite_files
     tokio::fs::write(&path, "fixture-user-token\n")
         .await
         .unwrap();
-    for (permission_approval, extra_scopes) in [(false, false), (true, false), (true, true)] {
+    for (permission_approval, detached_execution, extra_scopes) in [
+        (false, false, false),
+        (true, false, false),
+        (true, false, true),
+        (false, true, false),
+        (false, true, true),
+    ] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(async move {
@@ -152,11 +169,19 @@ async fn operator_grant_http_keeps_credentials_native_and_does_not_rewrite_files
                 serde_json::from_slice(&bytes[end..end + length]).unwrap();
             assert_eq!(
                 body.as_object().unwrap().len(),
-                if permission_approval { 3 } else { 2 }
+                if permission_approval || detached_execution {
+                    3
+                } else {
+                    2
+                }
             );
             assert_eq!(
                 body.get("permission_approval"),
                 permission_approval.then_some(&serde_json::Value::Bool(true))
+            );
+            assert_eq!(
+                body.get("detached_execution"),
+                detached_execution.then_some(&serde_json::Value::Bool(true))
             );
             assert_eq!(body["client_id"], "mini");
             assert_eq!(
@@ -167,6 +192,8 @@ async fn operator_grant_http_keeps_credentials_native_and_does_not_rewrite_files
             assert!(!body.to_string().contains("fixture-operator-token"));
             let response = if permission_approval && !extra_scopes {
                 r#"{"success":true,"changed":true,"applied_scopes":["coding_agent:approve"]}"#
+            } else if detached_execution && !extra_scopes {
+                r#"{"success":true,"changed":true,"applied_scopes":["job:detach"]}"#
             } else {
                 r#"{"success":true,"changed":true,"applied_scopes":["ssh:local","coding_agent:run"]}"#
             };
@@ -178,6 +205,7 @@ async fn operator_grant_http_keeps_credentials_native_and_does_not_rewrite_files
             &runtime,
             "fixture-operator-token".into(),
             permission_approval,
+            detached_execution,
         )
         .await;
         assert_eq!(granted.is_ok(), !extra_scopes);
@@ -208,8 +236,28 @@ async fn operator_grant_does_not_retry_unknown_http_outcome() {
                 .is_err()
         );
     });
-    assert!(grant(&runtime, "fixture-operator-token".into(), false)
-        .await
-        .is_err());
+    assert!(
+        grant(&runtime, "fixture-operator-token".into(), false, false)
+            .await
+            .is_err()
+    );
     server.await.unwrap();
+}
+
+#[tokio::test]
+async fn mutually_exclusive_grants_are_rejected_before_credential_io() {
+    // No user token file is configured and no HTTP server is listening. A
+    // malformed selection must be rejected without opening either boundary.
+    assert!(
+        grant(&runtime(12345), "fixture-operator-token".into(), true, true)
+            .await
+            .is_err()
+    );
+    let request: GrantRequest = serde_json::from_value(serde_json::json!({
+        "expected": crate::webcodex::settings::target(&runtime(12345)).unwrap(),
+        "confirmed": true,
+    }))
+    .unwrap();
+    assert!(!request.permission_approval);
+    assert!(!request.detached_execution);
 }

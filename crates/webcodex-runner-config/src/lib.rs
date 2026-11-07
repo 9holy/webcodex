@@ -416,6 +416,9 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // Managed SSH resource lifecycle is likewise a running-binary
             // capability and is never implied by generated static SSH config.
             managed_ssh_resources: false,
+            // Credential setup is implemented and advertised by the running
+            // Runner binary, never inferred from a generated configuration.
+            ssh_connection_setup: false,
             // First-class config control is implemented by the running binary
             // against its startup-bound path and must never be inferred from a
             // generated static runner.toml capability block.

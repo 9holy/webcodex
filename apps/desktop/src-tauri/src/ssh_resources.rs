@@ -1,4 +1,4 @@
-//! Closed Desktop facade over the canonical Server `manage_ssh_resource` gateway.
+//! Closed Desktop facade over the first-party SSH operator HTTP routes.
 //! Only a short-lived observation is held here, never a second SSH registry.
 //! Credentials, targets and canonical gateway bindings never enter public state.
 use crate::models::StoredRuntime;
@@ -11,8 +11,10 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use webcodex_core::ssh_resource::{
     normalize_ssh_resource_default_cwd, normalize_ssh_resource_target,
-    validate_response_for_request, validate_ssh_resource_name, SshResourceInventoryEntry,
-    SshResourceRequest, SshResourceResponse, SshResourceSource, SSH_RESOURCE_RESPONSE_MAX_BYTES,
+    validate_response_for_request, validate_ssh_resource_name, SshAuthentication, SshEndpoint,
+    SshHostKeyCandidate, SshHostKeyTrust, SshOperatorConnection, SshResourceInventoryEntry,
+    SshResourceRequest, SshResourceResponse, SshResourceSource, SSH_RESOURCE_REQUEST_MAX_BYTES,
+    SSH_RESOURCE_RESPONSE_MAX_BYTES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -29,6 +31,18 @@ pub enum SshResourceError {
     SshResourceStaticConflict,
     SshResourceNameConflict,
     SshResourceNotFound,
+    SshConnectionSetupUnsupported,
+    SshHostKeyUnavailable,
+    SshHostKeyStale,
+    SshHostKeyChanged,
+    SshAuthenticationFailed,
+    SshConnectionFailed,
+    SshConnectionTimeout,
+    SshProgramUnavailable,
+    SshIdentityFileInvalid,
+    SshCredentialsUnavailable,
+    SshClientPermissionDenied,
+    SshConnectionCancelled,
 }
 
 impl SshResourceError {
@@ -46,6 +60,18 @@ impl SshResourceError {
             Some("ssh_resource_not_found") => Self::SshResourceNotFound,
             Some("ssh_resource_invalid") => Self::SshResourceInvalid,
             Some("ssh_resource_registry_unavailable") => Self::SshResourceRegistryUnavailable,
+            Some("ssh_connection_setup_unsupported") => Self::SshConnectionSetupUnsupported,
+            Some("ssh_host_key_unavailable") => Self::SshHostKeyUnavailable,
+            Some("ssh_host_key_stale") => Self::SshHostKeyStale,
+            Some("ssh_host_key_changed") => Self::SshHostKeyChanged,
+            Some("ssh_authentication_failed") => Self::SshAuthenticationFailed,
+            Some("ssh_connection_failed") => Self::SshConnectionFailed,
+            Some("ssh_connection_timeout") => Self::SshConnectionTimeout,
+            Some("ssh_program_unavailable") => Self::SshProgramUnavailable,
+            Some("ssh_identity_file_invalid") => Self::SshIdentityFileInvalid,
+            Some("ssh_credentials_unavailable") => Self::SshCredentialsUnavailable,
+            Some("ssh_client_permission_denied") => Self::SshClientPermissionDenied,
+            Some("ssh_connection_cancelled") => Self::SshConnectionCancelled,
             _ => Self::unconfirmed(mutation),
         }
     }
@@ -62,6 +88,7 @@ impl SshResourceError {
 pub struct SshResourcesSnapshot {
     pub runner: String,
     pub available: bool,
+    pub setup_supported: bool,
     pub observation_id: Option<String>,
     pub resources: Vec<SshResourceInventoryEntry>,
     pub error_kind: Option<SshResourceError>,
@@ -81,8 +108,61 @@ pub struct SshRegisterRequest {
     pub expected: SettingsTarget,
     pub observation_id: String,
     pub name: String,
-    pub target: String,
+    pub connection: SshOperatorConnection,
     pub default_cwd: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshInspectRequest {
+    pub expected: SettingsTarget,
+    pub observation_id: String,
+    pub endpoint: SshEndpoint,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshProbeRequest {
+    pub expected: SettingsTarget,
+    pub observation_id: String,
+    pub endpoint: SshEndpoint,
+    pub authentication: SshAuthentication,
+    pub host_key: SshHostKeyTrust,
+}
+
+#[derive(Serialize)]
+pub struct SshHostKeyInspection {
+    pub challenge_id: String,
+    pub expires_at: i64,
+    pub host_keys: Vec<SshHostKeyCandidate>,
+}
+
+#[derive(Serialize)]
+pub struct SshInspectionResult {
+    pub success: bool,
+    pub error_kind: Option<SshResourceError>,
+    pub inspection: Option<SshHostKeyInspection>,
+}
+
+#[derive(Serialize)]
+pub struct SshProbeResult {
+    pub success: bool,
+    pub error_kind: Option<SshResourceError>,
+    pub verified: bool,
+}
+
+pub(crate) enum ConnectionCheck {
+    Inspect(SshEndpoint),
+    Probe {
+        endpoint: SshEndpoint,
+        authentication: SshAuthentication,
+        host_key: SshHostKeyTrust,
+    },
+}
+
+pub(crate) enum ConnectionChecked {
+    Inspected(SshHostKeyInspection),
+    Verified,
 }
 
 #[derive(Deserialize)]
@@ -96,7 +176,7 @@ pub struct SshRemoveRequest {
 pub(crate) enum Mutation {
     Register {
         name: String,
-        target: String,
+        connection: SshOperatorConnection,
         default_cwd: Option<String>,
     },
     Remove {
@@ -116,12 +196,33 @@ impl Mutation {
         Ok(match self {
             Self::Register {
                 name,
-                target,
+                connection,
                 default_cwd,
             } => {
+                let connection = match connection {
+                    SshOperatorConnection::Alias { target } => SshOperatorConnection::Alias {
+                        target: normalize_ssh_resource_target(&target)
+                            .map_err(|_| SshResourceError::SshResourceInvalid)?,
+                    },
+                    connection @ SshOperatorConnection::Direct { .. } => {
+                        if let SshOperatorConnection::Direct {
+                            endpoint,
+                            authentication,
+                            host_key,
+                        } = &connection
+                        {
+                            endpoint
+                                .validate()
+                                .and_then(|()| authentication.validate())
+                                .and_then(|()| host_key.validate())
+                                .map_err(|_| SshResourceError::SshResourceInvalid)?;
+                        }
+                        connection
+                    }
+                };
                 let mut arguments = json!({
                     "action":"register", "binding":binding, "name":name,
-                    "target":normalize_ssh_resource_target(&target).map_err(|_| SshResourceError::SshResourceInvalid)?,
+                    "connection":connection,
                 });
                 if let Some(cwd) = normalize_ssh_resource_default_cwd(default_cwd.as_deref())
                     .map_err(|_| SshResourceError::SshResourceInvalid)?
@@ -158,6 +259,7 @@ struct Observation {
     id: String,
     binding: String,
     resources: Vec<SshResourceInventoryEntry>,
+    setup_supported: bool,
 }
 
 #[derive(Default)]
@@ -199,6 +301,7 @@ impl SshResourcesManager {
                 let snapshot = SshResourcesSnapshot {
                     runner: identity.runner.clone(),
                     available: true,
+                    setup_supported: output.setup_supported,
                     observation_id: Some(id.clone()),
                     resources: output.resources.clone(),
                     error_kind: None,
@@ -208,12 +311,14 @@ impl SshResourcesManager {
                     id,
                     binding: output.binding,
                     resources: output.resources,
+                    setup_supported: output.setup_supported,
                 });
                 snapshot
             }
             Err(error) => SshResourcesSnapshot {
                 runner: identity.runner,
                 available: false,
+                setup_supported: false,
                 observation_id: None,
                 resources: Vec::new(),
                 error_kind: Some(error),
@@ -237,6 +342,16 @@ impl SshResourcesManager {
                 .ok_or(SshResourceError::SshResourceRegistryStale)?;
             if observed.identity != Identity::new(runtime) {
                 return Err(SshResourceError::RunnerReplaced);
+            }
+            if matches!(
+                mutation,
+                Mutation::Register {
+                    connection: SshOperatorConnection::Direct { .. },
+                    ..
+                }
+            ) && !observed.setup_supported
+            {
+                return Err(SshResourceError::SshConnectionSetupUnsupported);
             }
             let name = mutation.name().to_owned();
             if matches!(mutation, Mutation::Remove { .. }) {
@@ -281,6 +396,96 @@ impl SshResourcesManager {
             inventory,
         }
     }
+
+    pub async fn check(
+        &self,
+        runtime: &StoredRuntime,
+        observation_id: &str,
+        check: ConnectionCheck,
+        gateway: &impl Gateway,
+    ) -> Result<ConnectionChecked, SshResourceError> {
+        let observed = self
+            .observation
+            .as_ref()
+            .filter(|observed| observed.id == observation_id)
+            .ok_or(SshResourceError::SshResourceRegistryStale)?;
+        if observed.identity != Identity::new(runtime) {
+            return Err(SshResourceError::RunnerReplaced);
+        }
+        if !observed.setup_supported {
+            return Err(SshResourceError::SshConnectionSetupUnsupported);
+        }
+        // Inspect/probe are read-only and do not consume the save observation.
+        // Canonical revision authorization stays in the Server's opaque binding.
+        let mut request = match check {
+            ConnectionCheck::Inspect(endpoint) => SshResourceRequest::Inspect {
+                expected_revision: 0,
+                endpoint,
+            },
+            ConnectionCheck::Probe {
+                endpoint,
+                authentication,
+                host_key,
+            } => SshResourceRequest::Probe {
+                expected_revision: 0,
+                endpoint,
+                authentication,
+                host_key,
+            },
+        };
+        request
+            .validate()
+            .map_err(|_| SshResourceError::SshResourceInvalid)?;
+        let arguments = match &request {
+            SshResourceRequest::Inspect { endpoint, .. } => {
+                json!({"action":"inspect","binding":observed.binding,"endpoint":endpoint})
+            }
+            SshResourceRequest::Probe {
+                endpoint,
+                authentication,
+                host_key,
+                ..
+            } => {
+                json!({"action":"probe","binding":observed.binding,"endpoint":endpoint,"authentication":authentication,"host_key":host_key})
+            }
+            _ => return Err(SshResourceError::SshResourceInvalid),
+        };
+        let response: SshResourceResponse =
+            serde_json::from_value(gateway.call(runtime, arguments).await?)
+                .map_err(|_| SshResourceError::SshResourceRegistryUnavailable)?;
+        let revision = match &response {
+            SshResourceResponse::Inspect { revision, .. }
+            | SshResourceResponse::Probe { revision, .. } => *revision,
+            _ => return Err(SshResourceError::SshResourceRegistryUnavailable),
+        };
+        // The Server checks the actual revision. Reuse its canonical shape,
+        // fingerprint, and bounds validator without projecting the binding.
+        match &mut request {
+            SshResourceRequest::Inspect {
+                expected_revision, ..
+            }
+            | SshResourceRequest::Probe {
+                expected_revision, ..
+            } => *expected_revision = revision,
+            _ => return Err(SshResourceError::SshResourceInvalid),
+        }
+        validate_response_for_request(&request, &response)
+            .map_err(|_| SshResourceError::SshResourceRegistryUnavailable)?;
+        match response {
+            SshResourceResponse::Inspect {
+                challenge_id,
+                expires_at,
+                host_keys,
+                ..
+            } => Ok(ConnectionChecked::Inspected(SshHostKeyInspection {
+                challenge_id,
+                expires_at,
+                host_keys,
+            })),
+            SshResourceResponse::Probe { .. } => Ok(ConnectionChecked::Verified),
+            _ => Err(SshResourceError::SshResourceRegistryUnavailable),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -289,6 +494,8 @@ struct ListOutput {
     runner: String,
     binding: String,
     resources: Vec<SshResourceInventoryEntry>,
+    #[serde(default)]
+    setup_supported: bool,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -326,9 +533,20 @@ impl Gateway for HttpGateway {
     async fn call(
         &self,
         runtime: &StoredRuntime,
-        arguments: Value,
+        mut arguments: Value,
     ) -> Result<Value, SshResourceError> {
-        let mutation = arguments.get("action").and_then(Value::as_str) != Some("list");
+        let action = arguments
+            .get("action")
+            .and_then(Value::as_str)
+            .filter(|action| {
+                matches!(
+                    *action,
+                    "list" | "inspect" | "probe" | "register" | "remove"
+                )
+            })
+            .ok_or(SshResourceError::SshResourceInvalid)?
+            .to_owned();
+        let mutation = matches!(action.as_str(), "register" | "remove");
         let unavailable = || SshResourceError::SshResourceRegistryUnavailable;
         let uncertain = || SshResourceError::unconfirmed(mutation);
         let mut url = url::Url::parse(&runtime.server_url).map_err(|_| unavailable())?;
@@ -339,7 +557,7 @@ impl Gateway for HttpGateway {
         {
             return Err(unavailable());
         }
-        url.set_path("/api/tools/call");
+        url.set_path(&format!("/api/runtime-console/ssh-resources/{action}"));
         url.set_query(None);
         url.set_fragment(None);
         let mut builder = reqwest::Client::builder()
@@ -365,16 +583,31 @@ impl Gateway for HttpGateway {
             return Err(unavailable());
         }
         let client = builder.build().map_err(|_| unavailable())?;
-        // Closed native call. Neither tool name, URL, headers nor token are WebView inputs.
+        arguments
+            .as_object_mut()
+            .ok_or(SshResourceError::SshResourceInvalid)?
+            .remove("action");
+        let body =
+            serde_json::to_vec(&arguments).map_err(|_| SshResourceError::SshResourceInvalid)?;
+        if body.len() > SSH_RESOURCE_REQUEST_MAX_BYTES {
+            return Err(SshResourceError::SshResourceInvalid);
+        }
+        drop(arguments);
+        // Closed first-party route. This body never enters model tool dispatch
+        // or its full trace. URL, headers and native token are not WebView inputs.
         let response = client
             .post(url)
             .bearer_auth(token.trim())
-            .json(&json!({"tool":"manage_ssh_resource", "params":arguments}))
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
             .send()
             .await;
         drop(token);
         let mut response = response.map_err(|_| uncertain())?;
         let status = response.status().as_u16();
+        if matches!(status, 404 | 405 | 501) {
+            return Err(SshResourceError::SshConnectionSetupUnsupported);
+        }
         if status == 403 {
             return Err(SshResourceError::InsufficientScope);
         }

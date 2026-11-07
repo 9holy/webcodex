@@ -74,6 +74,8 @@ pub(crate) struct RemoteShellTransport {
     readers_stop: Arc<AtomicBool>,
     reader_threads: Mutex<Option<Vec<thread::JoinHandle<()>>>>,
     shutdown_started: AtomicBool,
+    _authentication: Option<super::ssh_credentials::AskpassLease>,
+    _profile: Option<super::ssh_credentials::ManagedSshConnection>,
 }
 
 impl RemoteShellTransport {
@@ -100,6 +102,8 @@ impl RemoteShellTransport {
         let PreparedPersistentShellCommand {
             mut command,
             default_cwd,
+            authentication,
+            profile,
         } = prepared;
         command
             .stdin(Stdio::piped())
@@ -187,6 +191,8 @@ impl RemoteShellTransport {
                 readers_stop,
                 reader_threads: Mutex::new(Some(handles)),
                 shutdown_started: AtomicBool::new(false),
+                _authentication: authentication,
+                _profile: profile,
             },
             default_cwd,
         ))

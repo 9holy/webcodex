@@ -36,3 +36,15 @@
   font-size: .85rem;
   line-height: 1.5;
 }
+.ssh-endpoint-fields { display: grid; grid-template-columns: minmax(0, 1fr) 120px; gap: var(--ui-space-4); }
+.ssh-host-verification { display: grid; gap: var(--ui-space-3); min-width: 0; }
+.ssh-host-verification > button { justify-self: start; }
+.ssh-host-keys { min-width: 0; margin: 0; padding: var(--ui-space-3); border: 1px solid var(--ui-border); border-radius: var(--ui-radius-sm); }
+.ssh-host-keys legend { padding: 0 5px; }
+.ssh-host-keys p { margin-top: 0; color: var(--ui-text-secondary); }
+.ssh-host-keys code { overflow-wrap: anywhere; }
+.ssh-host-keys .mantine-Radio-root + .mantine-Radio-root { margin-top: var(--ui-space-3); }
+.ssh-host-keys > button { margin-top: var(--ui-space-4); }
+@media (max-width: 480px) { .ssh-endpoint-fields { grid-template-columns: minmax(0, 1fr); } }
+.profile-checkbox-group { display: grid; gap: var(--ui-space-3); min-width: 0; margin: 0; padding: var(--ui-space-3); border: 1px solid var(--ui-border); border-radius: var(--ui-radius-sm); }
+.profile-checkbox-group legend { padding: 0 var(--ui-space-2); }

@@ -294,6 +294,16 @@ fn ssh_resource_trace_payload(
 ) -> Value {
     let (action, resource_name, target_present, default_cwd_present) = match request {
         SshResourceRequest::List => ("list", None, false, false),
+        SshResourceRequest::Inspect { .. } => ("inspect", None, false, false),
+        SshResourceRequest::Probe { .. } => ("probe", None, false, false),
+        SshResourceRequest::RegisterConnection {
+            name, default_cwd, ..
+        } => (
+            "register_connection",
+            Some(name.as_str()),
+            false,
+            default_cwd.is_some(),
+        ),
         SshResourceRequest::Register {
             name, default_cwd, ..
         } => ("register", Some(name.as_str()), true, default_cwd.is_some()),
@@ -307,6 +317,7 @@ fn ssh_resource_trace_payload(
         "resource_name": resource_name,
         "target_present": target_present,
         "default_cwd_present": default_cwd_present,
+        "connection_setup": request.requires_connection_setup(),
     })
 }
 
@@ -402,6 +413,38 @@ mod tests {
         assert_eq!(payload["action"], "register");
         assert_eq!(payload["resource_name"], "w10");
         assert_eq!(payload["target_present"], true);
+        assert_eq!(payload["default_cwd_present"], true);
+    }
+
+    #[test]
+    fn ssh_connection_trace_projection_never_retains_credentials_or_host_key_trust() {
+        use webcodex_core::ssh_resource::{
+            SshAuthentication, SshEndpoint, SshHostKeyTrust, SshSecret,
+        };
+        let request = SshResourceRequest::RegisterConnection {
+            expected_revision: 7,
+            name: "production".into(),
+            endpoint: SshEndpoint {
+                host: "private-host-sentinel.example".into(),
+                port: 2222,
+                user: "private-user-sentinel".into(),
+            },
+            authentication: SshAuthentication::Password {
+                password: SshSecret::new("private-password-sentinel".into()).unwrap(),
+            },
+            host_key: SshHostKeyTrust {
+                challenge_id: "private-challenge-sentinel".into(),
+                fingerprint: format!("SHA256:{}", "A".repeat(43)),
+            },
+            default_cwd: Some("/private-cwd-sentinel".into()),
+        };
+        let payload = ssh_resource_trace_payload("request-1", "runner-1", &request);
+        let encoded = payload.to_string();
+        assert!(!encoded.contains("private-"));
+        assert!(!encoded.contains("SHA256:"));
+        assert_eq!(payload["action"], "register_connection");
+        assert_eq!(payload["resource_name"], "production");
+        assert_eq!(payload["connection_setup"], true);
         assert_eq!(payload["default_cwd_present"], true);
     }
 }

@@ -61,15 +61,7 @@ fn tool_scope_denied(
     if !fixed_credential {
         return scope_forbidden(context.auth, required_scope, description);
     }
-    let recovery = match context.auth.map(|auth| auth.kind) {
-        Some(crate::auth::AuthKind::ApiToken) =>
-            "Use a token issued with the required scope; this fixed token cannot add scopes through OAuth.",
-        Some(crate::auth::AuthKind::SharedKey) =>
-            "Check the shared-key connection identity and its fixed permission profile; use an authorized credential.",
-        Some(crate::auth::AuthKind::ProjectCredential) =>
-            "Check the project credential grant with its issuer; use an authorized credential.",
-        _ => "Check the current connection identity and permissions; use an authorized credential.",
-    };
+    let recovery = crate::auth::scope_recovery_hint(context.auth, required_scope);
     let mut output = json!({
         "error_kind": "insufficient_scope",
         "execution_started": false,

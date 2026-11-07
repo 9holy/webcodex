@@ -112,6 +112,8 @@ pub struct CodexPrepareRequest {
     pub codex_args: Vec<String>,
     #[serde(default)]
     pub expected_version: Option<String>,
+    #[serde(default)]
+    pub allow_network: bool,
 }
 
 #[derive(Serialize)]

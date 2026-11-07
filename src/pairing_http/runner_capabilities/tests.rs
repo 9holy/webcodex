@@ -8,11 +8,14 @@ use webcodex_core::authority::{SCOPE_RUNNER_MANAGE, SCOPE_RUNTIME_READ};
 #[tokio::test]
 async fn operator_grant_reads_canonical_runner_owner_and_rejects_wrong_or_offline_target() {
     use std::sync::Arc;
-    for (owner, online, target, expected) in [
-        ("alice", true, "target", StatusCode::OK),
-        ("bob", true, "target", StatusCode::FORBIDDEN),
-        ("alice", false, "target", StatusCode::CONFLICT),
-        ("alice", true, "missing", StatusCode::CONFLICT),
+    for (owner, online, target, detached, expected) in [
+        ("alice", true, "target", false, StatusCode::OK),
+        ("bob", true, "target", false, StatusCode::FORBIDDEN),
+        ("alice", false, "target", false, StatusCode::CONFLICT),
+        ("alice", true, "missing", false, StatusCode::CONFLICT),
+        ("alice", true, "target", true, StatusCode::OK),
+        ("bob", true, "target", true, StatusCode::FORBIDDEN),
+        ("alice", false, "target", true, StatusCode::CONFLICT),
     ] {
         let (_dir, db, mut key) = fixture();
         key.id = "live-key".into();
@@ -58,20 +61,30 @@ async fn operator_grant_reads_canonical_runner_owner_and_rejects_wrong_or_offlin
                 .push(Router::with_path("grant").post(grant_runner_capabilities)),
         );
         let mut response = TestClient::post("http://localhost/grant")
-            .json(&json!({"client_id":target,"user_token_hash":hash}))
+            .json(&json!({"client_id":target,"user_token_hash":hash,"detached_execution":detached}))
             .send(&service)
             .await;
         assert_eq!(response.status_code.unwrap_or(StatusCode::OK), expected);
         if expected == StatusCode::OK {
             let body: Value = response.take_json().await.unwrap();
             assert_eq!(body["changed"], true);
+            assert_eq!(
+                body["applied_scopes"],
+                if detached {
+                    json!([SCOPE_JOB_DETACH])
+                } else {
+                    json!([SCOPE_SSH_LOCAL, SCOPE_CODING_AGENT_RUN])
+                }
+            );
         }
     }
 }
 
 #[tokio::test]
 async fn capability_status_observes_scopes_without_runner_or_ssh_inventory_or_grant() {
-    for (coding, ssh) in [(false, false), (true, false), (false, true), (true, true)] {
+    for bits in 0..16 {
+        let (coding, ssh, approval, detached) =
+            (bits & 1 != 0, bits & 2 != 0, bits & 4 != 0, bits & 8 != 0);
         let mut auth = AuthContext::new(AuthKind::ApiToken);
         auth.scopes = vec![crate::auth::SCOPE_RUNTIME_READ.into()];
         if coding {
@@ -80,6 +93,12 @@ async fn capability_status_observes_scopes_without_runner_or_ssh_inventory_or_gr
         if ssh {
             auth.scopes.push(SCOPE_SSH_LOCAL.into());
         }
+        if approval {
+            auth.scopes.push(SCOPE_CODING_AGENT_APPROVE.into());
+        }
+        if detached {
+            auth.scopes.push(SCOPE_JOB_DETACH.into());
+        }
         // No Runtime/Runner/DB is present. Observation cannot contact SSH or mutate grants.
         let service = Service::new(
             Router::new()
@@ -87,6 +106,7 @@ async fn capability_status_observes_scopes_without_runner_or_ssh_inventory_or_gr
                 .push(Router::with_path("status").post(runner_capability_authorization)),
         );
         let mut response = TestClient::post("http://localhost/status")
+            .add_header(CAPABILITY_STATUS_HEADER, CAPABILITY_STATUS_DETACHED, true)
             .json(&json!({}))
             .send(&service)
             .await;
@@ -94,7 +114,35 @@ async fn capability_status_observes_scopes_without_runner_or_ssh_inventory_or_gr
         let value: Value = response.take_json().await.unwrap();
         assert_eq!(
             value,
-            json!({"coding_agents":coding,"ssh_resources":ssh,"permission_approval":false})
+            json!({"coding_agents":coding,"ssh_resources":ssh,"permission_approval":approval,"detached_execution":detached})
+        );
+    }
+}
+
+#[tokio::test]
+async fn capability_status_preserves_released_clients_until_exact_read_only_negotiation() {
+    let mut auth = AuthContext::new(AuthKind::ApiToken);
+    auth.scopes = vec![SCOPE_RUNTIME_READ.into(), SCOPE_JOB_DETACH.into()];
+    let service = Service::new(
+        Router::new()
+            .hoop(affix_state::inject(auth))
+            .push(Router::with_path("status").post(runner_capability_authorization)),
+    );
+    for header in [
+        None,
+        Some("detached-execution-v2"),
+        Some("detached-execution-v1, extra"),
+    ] {
+        let mut request = TestClient::post("http://localhost/status");
+        if let Some(header) = header {
+            request = request.add_header(CAPABILITY_STATUS_HEADER, header, true);
+        }
+        let mut response = request.json(&json!({})).send(&service).await;
+        assert_eq!(response.status_code.unwrap(), StatusCode::OK);
+        let value: Value = response.take_json().await.unwrap();
+        assert_eq!(
+            value,
+            json!({"coding_agents":false,"ssh_resources":false,"permission_approval":false})
         );
     }
 }
@@ -183,7 +231,7 @@ fn fixture() -> (tempfile::TempDir, Database, ApiKeyRecord) {
 fn operator_grant_is_idempotent_and_preserves_token_identity_expiry_and_existing_scopes() {
     let (_dir, db, before) = fixture();
     let hash = hash_token("fixture-user-token");
-    assert!(grant_for_owner(&db, &hash, "alice", 10, false).unwrap());
+    assert!(grant_for_owner(&db, &hash, "alice", 10, GrantSelection::RunnerExecution).unwrap());
     let after = db.get_api_key_by_hash(&hash).unwrap().unwrap();
     assert!(after.scopes.ends_with("ssh:local coding_agent:run"));
     assert!(!after
@@ -196,15 +244,15 @@ fn operator_grant_is_idempotent_and_preserves_token_identity_expiry_and_existing
     expected.as_object_mut().unwrap().remove("scopes");
     actual.as_object_mut().unwrap().remove("scopes");
     assert_eq!(actual, expected);
-    assert!(!grant_for_owner(&db, &hash, "alice", 10, false).unwrap());
+    assert!(!grant_for_owner(&db, &hash, "alice", 10, GrantSelection::RunnerExecution).unwrap());
 }
 
 #[test]
 fn approval_opt_in_is_independent_idempotent_and_does_not_grant_run_or_ssh() {
     let (_dir, db, before) = fixture();
     let hash = hash_token("fixture-user-token");
-    assert!(grant_for_owner(&db, &hash, "alice", 10, true).unwrap());
-    assert!(!grant_for_owner(&db, &hash, "alice", 10, true).unwrap());
+    assert!(grant_for_owner(&db, &hash, "alice", 10, GrantSelection::PermissionApproval).unwrap());
+    assert!(!grant_for_owner(&db, &hash, "alice", 10, GrantSelection::PermissionApproval).unwrap());
     let after = db.get_api_key_by_hash(&hash).unwrap().unwrap();
     assert_eq!(
         after.scopes,
@@ -212,15 +260,65 @@ fn approval_opt_in_is_independent_idempotent_and_does_not_grant_run_or_ssh() {
     );
     assert_eq!(after.id, before.id);
     assert_eq!(after.expires_at, before.expires_at);
-    assert_eq!(selected_grant_scopes(true), &[SCOPE_CODING_AGENT_APPROVE]);
-    assert!(!selected_grant_scopes(false).contains(&SCOPE_CODING_AGENT_APPROVE));
     assert_eq!(
-        grant_for_owner(&db, &hash, "bob", 10, true),
+        GrantSelection::PermissionApproval.scopes(),
+        &[SCOPE_CODING_AGENT_APPROVE]
+    );
+    assert!(!GrantSelection::RunnerExecution
+        .scopes()
+        .contains(&SCOPE_CODING_AGENT_APPROVE));
+    assert_eq!(
+        grant_for_owner(&db, &hash, "bob", 10, GrantSelection::PermissionApproval),
         Err(StatusCode::FORBIDDEN)
     );
     assert_eq!(
-        grant_for_owner(&db, &hash, "alice", 1000, true),
+        grant_for_owner(
+            &db,
+            &hash,
+            "alice",
+            1000,
+            GrantSelection::PermissionApproval
+        ),
         Err(StatusCode::FORBIDDEN)
+    );
+}
+
+#[test]
+fn detached_opt_in_grants_only_job_detach_and_retains_owner_expiry_and_identity() {
+    let (_dir, db, mut before) = fixture();
+    before.id = "detach-only-key".into();
+    before.scopes = "runtime:read".into();
+    let hash = hash_token("fixture-detach-only-token");
+    db.insert_api_key(&before, &hash).unwrap();
+    assert!(grant_for_owner(&db, &hash, "alice", 10, GrantSelection::DetachedExecution).unwrap());
+    assert!(!grant_for_owner(&db, &hash, "alice", 10, GrantSelection::DetachedExecution).unwrap());
+    let after = db.get_api_key_by_hash(&hash).unwrap().unwrap();
+    assert_eq!(after.scopes, "runtime:read job:detach");
+    assert_eq!(after.id, before.id);
+    assert_eq!(after.expires_at, before.expires_at);
+    assert_eq!(
+        GrantSelection::DetachedExecution.scopes(),
+        &[SCOPE_JOB_DETACH]
+    );
+    assert!(!GrantSelection::RunnerExecution
+        .scopes()
+        .contains(&SCOPE_JOB_DETACH));
+    assert!(!GrantSelection::PermissionApproval
+        .scopes()
+        .contains(&SCOPE_JOB_DETACH));
+    assert_eq!(
+        grant_for_owner(&db, &hash, "bob", 10, GrantSelection::DetachedExecution),
+        Err(StatusCode::FORBIDDEN)
+    );
+    assert_eq!(
+        grant_for_owner(&db, &hash, "alice", 1000, GrantSelection::DetachedExecution),
+        Err(StatusCode::FORBIDDEN)
+    );
+    let legacy: GrantRequest =
+        serde_json::from_value(json!({"client_id":"mini","user_token_hash":hash})).unwrap();
+    assert_eq!(
+        legacy.selection().unwrap().scopes(),
+        GrantSelection::RunnerExecution.scopes()
     );
 }
 
@@ -229,11 +327,11 @@ fn operator_grant_rejects_another_runner_owner_and_nonlive_or_transport_keys() {
     let (_dir, db, original) = fixture();
     let hash = hash_token("fixture-user-token");
     assert_eq!(
-        grant_for_owner(&db, &hash, "bob", 10, false),
+        grant_for_owner(&db, &hash, "bob", 10, GrantSelection::RunnerExecution),
         Err(StatusCode::FORBIDDEN)
     );
     assert_eq!(
-        grant_for_owner(&db, &hash, "alice", 1000, false),
+        grant_for_owner(&db, &hash, "alice", 1000, GrantSelection::RunnerExecution),
         Err(StatusCode::FORBIDDEN)
     );
     for (index, mut key) in [
@@ -260,7 +358,7 @@ fn operator_grant_rejects_another_runner_owner_and_nonlive_or_transport_keys() {
         let hash = hash_token(&format!("fixture-{index}"));
         db.insert_api_key(&key, &hash).unwrap();
         assert_eq!(
-            grant_for_owner(&db, &hash, "alice", 10, false),
+            grant_for_owner(&db, &hash, "alice", 10, GrantSelection::RunnerExecution),
             Err(StatusCode::FORBIDDEN)
         );
     }
@@ -281,7 +379,13 @@ fn operator_grant_scope_write_is_fenced_against_stale_or_revoked_keys() {
         .compare_and_swap_user_key_scopes(&key.id, &key.user_id, &key.scopes, "ssh:local", 10)
         .unwrap());
     assert_eq!(
-        grant_for_owner(&db, &hash_token("fixture-user-token"), "alice", 10, false),
+        grant_for_owner(
+            &db,
+            &hash_token("fixture-user-token"),
+            "alice",
+            10,
+            GrantSelection::RunnerExecution
+        ),
         Err(StatusCode::FORBIDDEN)
     );
 }
@@ -324,6 +428,7 @@ async fn operator_grant_http_rejects_arbitrary_scopes_and_malformed_hash_without
     for body in [
         json!({"client_id":"mini", "user_token_hash":hash_token("fixture-user-token"), "scopes":["admin"]}),
         json!({"client_id":"mini", "user_token_hash":"not-a-hash-secret-sentinel"}),
+        json!({"client_id":"mini", "user_token_hash":hash_token("fixture-user-token"), "permission_approval":true, "detached_execution":true}),
     ] {
         let mut response = TestClient::post("http://localhost/grant")
             .json(&body)

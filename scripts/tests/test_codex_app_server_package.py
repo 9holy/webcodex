@@ -35,17 +35,22 @@ class CodexAdapterPackageTests(unittest.TestCase):
         import json
         with tempfile.TemporaryDirectory(prefix="webcodex-安装-") as directory:
             package = PACKAGE.package(Path(directory, "codex-adapter.pyz"))
-            receipt = Path(directory, "receipt.json")
             fixture = ROOT / "integrations/codex_app_server/tests/fake_codex.py"
-            run = subprocess.run([sys.executable, str(package), "prepare", "--experimental",
-                "--codex-bin", sys.executable, "--codex-arg", str(fixture), "--receipt", str(receipt)],
-                cwd=directory, env=dict(os.environ, PYTHONIOENCODING="ascii"),
-                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
-            self.assertEqual(run.returncode, 0, run.stderr)
-            result = json.loads(run.stdout)
-            self.assertEqual(result["profile"]["args"][0], str(package.resolve()))
-            self.assertEqual(result["status"], "ready")
-            self.assertTrue(receipt.is_file())
+            for allow_network in (False, True):
+                with self.subTest(allow_network=allow_network):
+                    receipt = Path(directory, f"receipt-{allow_network}.json")
+                    extra = ["--network"] if allow_network else []
+                    run = subprocess.run([sys.executable, str(package), "prepare", "--experimental",
+                        "--codex-bin", sys.executable, "--codex-arg", str(fixture), "--receipt", str(receipt), *extra],
+                        cwd=directory, env=dict(os.environ, PYTHONIOENCODING="ascii"),
+                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
+                    self.assertEqual(run.returncode, 0, run.stderr)
+                    result = json.loads(run.stdout)
+                    self.assertEqual(result["profile"]["args"], [str(package.resolve()), "serve", "--experimental",
+                        "--receipt", str(receipt.resolve()), *extra])
+                    self.assertFalse(result["profile"]["enabled"])
+                    self.assertEqual(result["status"], "ready")
+                    self.assertTrue(receipt.is_file())
 
 
 if __name__ == "__main__":

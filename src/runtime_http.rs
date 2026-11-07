@@ -462,12 +462,17 @@ fn tool_call_trace_raw_body(body: &Value) -> Value {
     let Some(object) = body.as_object() else {
         return body.clone();
     };
-    if object.get(TOOL_CALL_TOOL_FIELD).and_then(Value::as_str)
-        != Some(crate::plugin_gateway::PLUGIN_TOOL_NAME)
-    {
+    let tool = object.get(TOOL_CALL_TOOL_FIELD).and_then(Value::as_str);
+    if !matches!(
+        tool,
+        Some(
+            crate::plugin_gateway::PLUGIN_TOOL_NAME
+                | crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME
+        )
+    ) {
         return body.clone();
     }
-    let plugin_arguments = object
+    let arguments = object
         .get(TOOL_CALL_PARAMS_FIELD)
         .filter(|value| value.is_object())
         .cloned()
@@ -485,8 +490,8 @@ fn tool_call_trace_raw_body(body: &Value) -> Value {
             Value::Object(flattened)
         });
     json!({
-        "tool": crate::plugin_gateway::PLUGIN_TOOL_NAME,
-        "arguments": crate::plugin_gateway::audit_arguments(&plugin_arguments),
+        "tool": tool,
+        "arguments": tool_call_trace_effective_arguments(tool.unwrap_or_default(), &arguments),
         "recording_session_id_present": object
             .get(TOOL_CALL_RECORDING_SESSION_ID_FIELD)
             .is_some(),
@@ -496,6 +501,8 @@ fn tool_call_trace_raw_body(body: &Value) -> Value {
 fn tool_call_trace_effective_arguments(tool: &str, params: &Value) -> Value {
     if tool == crate::plugin_gateway::PLUGIN_TOOL_NAME {
         crate::plugin_gateway::audit_arguments(params)
+    } else if tool == crate::ssh_resource_gateway::SSH_RESOURCE_TOOL_NAME {
+        crate::ssh_resource_gateway::audit_arguments(params)
     } else {
         params.clone()
     }

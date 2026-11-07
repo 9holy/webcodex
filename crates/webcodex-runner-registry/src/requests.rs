@@ -2187,7 +2187,14 @@ impl RunnerRegistry {
         requested_by: String,
     ) -> Result<(String, oneshot::Receiver<ShellRunResponse>), String> {
         let runner_instance_id = expected_runner_instance_id.to_string();
+        let connection_setup = matches!(&operation, RunnerOperation::SshResource(request) if request.requires_connection_setup());
         let (required, invalid_request, unsupported, fence) = match &operation {
+            RunnerOperation::SshResource(_) if connection_setup => (
+                RunnerFeature::SshConnectionSetup,
+                "ssh_resource_invalid: request was not started",
+                "ssh_connection_setup_unsupported: upgrade this Runner before configuring SSH authentication",
+                PendingDispatchFence::SshResource { runner_instance_id },
+            ),
             RunnerOperation::SshResource(_) => (
                 RunnerFeature::ManagedSshResources,
                 "ssh_resource_invalid: request was not started",
@@ -2224,7 +2231,12 @@ impl RunnerRegistry {
         if runner.runner_instance_id != expected_runner_instance_id {
             return Err("runner_replaced: request was not started".to_string());
         }
-        if !runner.runner_features.supports(required) {
+        if !runner.runner_features.supports(required)
+            || (connection_setup
+                && !runner
+                    .runner_features
+                    .supports(RunnerFeature::ManagedSshResources))
+        {
             return Err(unsupported.to_string());
         }
         if now_ts().saturating_sub(runner.last_seen) > RUNNER_ONLINE_WINDOW_SECS {

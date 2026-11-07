@@ -9,7 +9,7 @@ import { SettingsPanel } from "./SettingsPanel";
 const api = vi.hoisted(() => ({
   runnerSettings: vi.fn(), getState: vi.fn(), getLaunchAtLogin: vi.fn(),
   setLaunchAtLogin: vi.fn(), updateTunnelProxy: vi.fn(), restartOwnedRunner: vi.fn(),
-  updateRunnerAllowedRoots: vi.fn(),
+  updateRunnerAllowedRoots: vi.fn(), runnerCapabilityAuthorization: vi.fn(), authorizeRunnerCapabilities: vi.fn(),
 }));
 vi.mock("../../lib/desktop-api", () => ({ desktopApi: api }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -54,6 +54,7 @@ beforeEach(() => {
   vi.resetAllMocks(); localStorage.clear(); localStorage.setItem("webcodex.desktop.locale", "en-US");
   state = structuredClone(fixture); settings = structuredClone(fixtureSettings);
   api.runnerSettings.mockImplementation(async () => structuredClone(settings));
+  api.runnerCapabilityAuthorization.mockImplementation(async () => ({ target: settings.target, can_authorize: true, coding_agents: true, ssh_resources: true, permission_approval_granted: false, permission_approval_grant_available: true, detached_execution_granted: false, detached_execution_grant_available: true }));
   api.getState.mockImplementation(async () => state);
   api.getLaunchAtLogin.mockResolvedValue(false);
   api.setLaunchAtLogin.mockImplementation(async value => value);
@@ -63,6 +64,22 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.useRealTimers(); });
 
 describe("Settings observation and action ownership", () => {
+  it("offers the separate Runner-local background grant in Files & permissions", async () => {
+    api.authorizeRunnerCapabilities.mockResolvedValue({ target, can_authorize: true, coding_agents: false, ssh_resources: false, permission_approval_granted: false, permission_approval_grant_available: true, detached_execution_granted: true, detached_execution_grant_available: false });
+    render(wrap(<SettingsPanel state={state} onState={vi.fn()} initialSection="access" />));
+    expect(screen.getByRole("tab", { name: "Files & permissions" })).toHaveAttribute("aria-selected", "true");
+    fireEvent.click(await screen.findByRole("button", { name: "Authorize Background Processes" }));
+    const dialog = screen.getByRole("dialog");
+    expect(within(dialog).getByText(/background process access on the Runner machine/)).toBeVisible();
+    const consent = within(dialog).getByRole("checkbox");
+    expect(consent).not.toBeChecked(); expect(api.authorizeRunnerCapabilities).not.toHaveBeenCalled();
+    fireEvent.click(consent);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Confirm Authorize Background Processes" }));
+    await waitFor(() => expect(api.authorizeRunnerCapabilities).toHaveBeenCalledExactlyOnceWith(target, "detached_execution"));
+    await screen.findByText("Background process access is authorized for this connection.");
+    expect(api.updateRunnerAllowedRoots).not.toHaveBeenCalled(); expect(api.restartOwnedRunner).not.toHaveBeenCalled();
+  });
+
   it.each(["unmount", "retarget"])("does not restore an old Desktop state from PowerShell guidance after %s", async boundary => {
     state = { ...state, powershell_runtime: { pwsh_available: false, windows_powershell_available: true } };
     const pending = deferred<DesktopState>(), onState = vi.fn(), original = state;

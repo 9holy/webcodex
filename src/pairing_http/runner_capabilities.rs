@@ -5,10 +5,13 @@ use super::*;
 use crate::runtime_http::require_runtime;
 #[cfg(test)]
 use serde_json::Value;
-use webcodex_core::authority::SCOPE_CODING_AGENT_APPROVE;
+use webcodex_core::authority::{SCOPE_CODING_AGENT_APPROVE, SCOPE_JOB_DETACH};
 use webcodex_store::Database;
 
-/// Observe only this credential's two capability scopes. This is independent of
+const CAPABILITY_STATUS_HEADER: &str = "x-webcodex-runner-capability-status";
+const CAPABILITY_STATUS_DETACHED: &str = "detached-execution-v1";
+
+/// Observe only this credential's bounded capability scopes. This is independent of
 /// SSH/provider inventory and never changes a grant or contacts a Runner.
 #[handler]
 pub(crate) async fn runner_capability_authorization(
@@ -43,11 +46,23 @@ pub(crate) async fn runner_capability_authorization(
         grant_error(res, StatusCode::BAD_REQUEST);
         return;
     }
-    res.render(Json(json!({
+    let mut status = json!({
         "coding_agents": auth.has_scope(SCOPE_CODING_AGENT_RUN),
         "ssh_resources": auth.has_scope(SCOPE_SSH_LOCAL),
         "permission_approval": auth.has_scope(SCOPE_CODING_AGENT_APPROVE),
-    })));
+    });
+    // Released Desktop clients reject unknown response fields. Negotiate this
+    // read-only addition explicitly, without widening any credential or
+    // changing the closed empty request accepted by older Servers.
+    if req
+        .headers()
+        .get(CAPABILITY_STATUS_HEADER)
+        .and_then(|value| value.to_str().ok())
+        == Some(CAPABILITY_STATUS_DETACHED)
+    {
+        status["detached_execution"] = json!(auth.has_scope(SCOPE_JOB_DETACH));
+    }
+    res.render(Json(status));
 }
 
 #[derive(Deserialize)]
@@ -60,6 +75,38 @@ struct GrantRequest {
     /// omission preserves the existing SSH/Run grant and never adds approval.
     #[serde(default)]
     permission_approval: bool,
+    /// Independent opt-in for Supervisor-owned background processes. It does
+    /// not grant job:run, project access, or provider callback approval.
+    #[serde(default)]
+    detached_execution: bool,
+}
+
+#[derive(Clone, Copy)]
+enum GrantSelection {
+    RunnerExecution,
+    PermissionApproval,
+    DetachedExecution,
+}
+
+impl GrantRequest {
+    fn selection(&self) -> Result<GrantSelection, StatusCode> {
+        match (self.permission_approval, self.detached_execution) {
+            (false, false) => Ok(GrantSelection::RunnerExecution),
+            (true, false) => Ok(GrantSelection::PermissionApproval),
+            (false, true) => Ok(GrantSelection::DetachedExecution),
+            (true, true) => Err(StatusCode::BAD_REQUEST),
+        }
+    }
+}
+
+impl GrantSelection {
+    fn scopes(self) -> &'static [&'static str] {
+        match self {
+            Self::RunnerExecution => &[SCOPE_SSH_LOCAL, SCOPE_CODING_AGENT_RUN],
+            Self::PermissionApproval => &[SCOPE_CODING_AGENT_APPROVE],
+            Self::DetachedExecution => &[SCOPE_JOB_DETACH],
+        }
+    }
 }
 
 #[handler]
@@ -106,6 +153,13 @@ pub(crate) async fn grant_runner_capabilities(
             return;
         }
     };
+    let selection = match body.selection() {
+        Ok(selection) => selection,
+        Err(status) => {
+            grant_error(res, status);
+            return;
+        }
+    };
     let Some(db) = crate::get_db(depot) else {
         grant_error(res, StatusCode::INTERNAL_SERVER_ERROR);
         return;
@@ -136,11 +190,11 @@ pub(crate) async fn grant_runner_capabilities(
         &body.user_token_hash,
         &owner,
         chrono::Utc::now().timestamp(),
-        body.permission_approval,
+        selection,
     ) {
         Ok(changed) => res.render(Json(json!({
             "success":true, "changed":changed,
-            "applied_scopes": selected_grant_scopes(body.permission_approval),
+            "applied_scopes": selection.scopes(),
         }))),
         Err(status) => grant_error(res, status),
     }
@@ -151,7 +205,7 @@ fn grant_for_owner(
     token_hash: &str,
     runner_owner: &str,
     now: i64,
-    permission_approval: bool,
+    selection: GrantSelection,
 ) -> Result<bool, StatusCode> {
     let key = db
         .get_api_key_by_hash(token_hash)
@@ -174,7 +228,7 @@ fn grant_for_owner(
         .map(str::to_owned)
         .collect();
     let before = scopes.len();
-    for &scope in selected_grant_scopes(permission_approval) {
+    for &scope in selection.scopes() {
         if !scopes.iter().any(|existing| existing == scope) {
             scopes.push(scope.to_owned());
         }
@@ -195,14 +249,6 @@ fn grant_for_owner(
         Ok(true)
     } else {
         Err(StatusCode::CONFLICT)
-    }
-}
-
-fn selected_grant_scopes(permission_approval: bool) -> &'static [&'static str] {
-    if permission_approval {
-        &[SCOPE_CODING_AGENT_APPROVE]
-    } else {
-        &[SCOPE_SSH_LOCAL, SCOPE_CODING_AGENT_RUN]
     }
 }
 

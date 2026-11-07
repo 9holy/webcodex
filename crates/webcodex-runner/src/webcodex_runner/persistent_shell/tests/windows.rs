@@ -389,6 +389,7 @@ fn windows_named_ssh_persistent_shell_real_transport_opt_in() {
         SshResourceConfig {
             host,
             default_cwd: Some("/tmp".to_string()),
+            connection: None,
         },
     );
     let config = SshConfig { resources };

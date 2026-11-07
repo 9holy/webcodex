@@ -463,7 +463,13 @@ pub(crate) fn dispatch_request_with_outcome(
                 .map(|_| true)
         }
         RunnerOperation::SshResource(operation) => {
-            let response = runtime.managed_ssh().handle(&config.static_ssh, operation);
+            let response = runtime.managed_ssh().handle_with_runtime(
+                &config.static_ssh,
+                operation,
+                config.generation,
+                Some(runtime.shutdown_flag()),
+                || runtime.snapshot().generation == config.generation,
+            );
             let result = CommandResult {
                 exit_code: Some(0),
                 stdout: Some(

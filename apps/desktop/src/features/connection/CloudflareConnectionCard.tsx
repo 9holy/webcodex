@@ -6,6 +6,7 @@ import { normalizeDesktopError } from "../../i18n/presentation";
 import type { CloudflareConnectionRequest, CloudflareConnectionStatus, CloudflareOAuthHandoff, TunnelConnection } from "../../models/connections-tools";
 import { useConnectionsTools } from "../../i18n/connections-tools";
 import { useProduct } from "../../i18n/product";
+import { useRunnerCapabilitiesText } from "../../i18n/runner-capabilities";
 import { WorkspaceDialog } from "../workspace/WorkspaceDialog";
 
 // Matches webcodex_core::authority::profiles::LOCAL_USER.
@@ -18,7 +19,7 @@ const OPTIONAL_OAUTH_SCOPES = [
 ];
 
 function OAuthHandoff({ profile, status, onClose }: { profile: TunnelConnection; status: CloudflareConnectionStatus; onClose: () => void }) {
-  const c = useConnectionsTools(); const p = useProduct();
+  const c = useConnectionsTools(); const p = useProduct(); const r = useRunnerCapabilitiesText();
   const [callback, setCallback] = useState("");
   const [scopes, setScopes] = useState(DEFAULT_OAUTH_SCOPES);
   const [handoff, setHandoff] = useState<CloudflareOAuthHandoff | null>(null);
@@ -26,6 +27,14 @@ function OAuthHandoff({ profile, status, onClose }: { profile: TunnelConnection;
   const [copied, setCopied] = useState(false);
   const alive = useRef(true); const submitting = useRef(false);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
+  const selectedScopes = scopes.trim().split(/\s+/).filter(Boolean);
+  const toggleScope = (scope: string, enabled: boolean) => {
+    if (submitting.current || handoff?.client_secret) return;
+    setScopes(current => {
+      const selected = current.trim().split(/\s+/).filter(Boolean);
+      return (enabled ? [...new Set([...selected, scope])] : selected.filter(value => value !== scope)).join(" ");
+    });
+  };
   const issue = async (replace: boolean) => {
     if (submitting.current) return;
     submitting.current = true; setBusy(true); setFailed(false); setHandoff(null);
@@ -39,15 +48,24 @@ function OAuthHandoff({ profile, status, onClose }: { profile: TunnelConnection;
     <form className="profile-editor" onSubmit={event => { event.preventDefault(); void issue(false); }}>
       <p>{c("oauthHandoffHelp")}</p>
       <TextInput label={c("oauthCallback")} aria-label={c("oauthCallback")} type="url" required value={callback} maxLength={2048} onChange={event => setCallback(event.currentTarget.value)} disabled={busy || Boolean(handoff?.client_secret)} autoFocus />
-      <TextInput label={c("oauthScopes")} aria-label={c("oauthScopes")} required value={scopes} maxLength={1024} onChange={event => setScopes(event.currentTarget.value)} disabled={busy || Boolean(handoff?.client_secret)} />
-      <details><summary>{c("oauthOptionalScopes")}</summary>{OPTIONAL_OAUTH_SCOPES.map(group => <p key={group}><code>{group}</code></p>)}</details>
+      <fieldset className="profile-checkbox-group" disabled={busy || Boolean(handoff?.client_secret)}>
+        <legend>{r("oauthCapabilityChoices")}</legend>
+        {([
+          ["job:detach", "detachedExecutionTitle", "Allow OAuth Background Processes"],
+          ["ssh:local", "sshResources", "Allow OAuth SSH Resources"],
+          ["coding_agent:run", "codingAgents", "Allow OAuth Coding Agents"],
+        ] as const).map(([scope, label, name]) => <label className="profile-checkbox" key={scope}><input type="checkbox" aria-label={name} checked={selectedScopes.includes(scope)} onChange={event => toggleScope(scope, event.target.checked)} />{r(label)}</label>)}
+      </fieldset>
+      <p className="field-help">{r("oauthCapabilityChoicesHelp")}</p>
+      <details><summary>{p("advanced")}</summary><TextInput label={c("oauthScopes")} aria-label={c("oauthScopes")} required value={scopes} maxLength={1024} onChange={event => setScopes(event.currentTarget.value)} disabled={busy || Boolean(handoff?.client_secret)} /><p>{c("oauthOptionalScopes")}</p>{OPTIONAL_OAUTH_SCOPES.map(group => <p key={group}><code>{group}</code></p>)}</details>
       {failed && <p role="alert">{c("operationFailed")}</p>}
       {handoff?.client_secret ? <div className="oauth-handoff" role="region" aria-label={c("configureOauth")}>
+        <p role="status">{r("oauthPermissionsPrepared")}</p>
         <TextInput label={c("clientId")} aria-label={c("clientId")} readOnly value={handoff.client_id} />
         <PasswordInput label={c("clientSecret")} aria-label={c("clientSecret")} readOnly value={handoff.client_secret} autoComplete="off" />
         <button type="button" className="secondary-button" onClick={() => { void writeText(JSON.stringify({client_id: handoff.client_id, client_secret: handoff.client_secret})).then(() => setCopied(true)).catch(() => setFailed(true)); }}>{copied ? p("copied") : c("copyCredentials")}</button>
       </div> : <>
-        {(status.oauth_configured || handoff?.already_configured) && <p role="status">{c("oauthSecretLost")}</p>}
+        {(status.oauth_configured || handoff?.already_configured) && <p role="status">{r("oauthReplacePermissionsHelp")}</p>}
         <div className="connection-actions">
           {!status.oauth_configured && !handoff?.already_configured && <button type="submit" className="primary-button" disabled={busy || !callback.trim() || !scopes.trim()}>{c("issueOauth")}</button>}
           {(status.oauth_configured || handoff?.already_configured) && <button type="button" className="primary-button" disabled={busy || !callback.trim() || !scopes.trim()} onClick={() => void issue(true)}>{c("replaceOauth")}</button>}

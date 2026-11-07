@@ -503,7 +503,7 @@ fn tool_categories_and_recommended_flows_are_well_formed() {
         "keep remote shell state",
         "manage_ssh_resource list/register -> restart -> list -> bind -> open/reuse",
         "local shell is only for same-process state",
-        "one-shot ssh uses run_process",
+        "named-resource one-shot uses run_shell",
         "execution selection: run_process/run_script/run_shell and structured validation are runner-owned sync-first",
         "run_job is runner-owned immediate async",
         "run_detached_process is supervisor-owned immediate async",
@@ -669,7 +669,14 @@ fn discovery_and_persistent_shell_flows_route_high_value_adaptive_tools() {
     assert!(persistent
         .summary
         .contains("Local shell is only for same-process state"));
-    assert!(persistent.summary.contains("one-shot SSH uses run_process"));
+    assert!(persistent
+        .summary
+        .contains("named-resource one-shot uses run_shell"));
+    assert!(persistent.tools.contains(&"run_shell"));
+    assert!(persistent.tools.contains(&"run_job"));
+    assert!(persistent
+        .manifest_purpose
+        .contains("never Chat/tool arguments"));
     assert!(persistent
         .manifest_purpose
         .contains("SSH target does not run WebCodex Runner"));

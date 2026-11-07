@@ -134,7 +134,7 @@ pub(crate) fn scope_forbidden_body(
     description: impl Into<String>,
 ) -> serde_json::Value {
     let description = description.into();
-    if auth.is_some_and(AuthContext::is_oauth_token)
+    let mut body = if auth.is_some_and(AuthContext::is_oauth_token)
         && oauth_scope_denial_is_delegable(required_scope)
     {
         oauth_insufficient_scope_body(description)
@@ -143,7 +143,14 @@ pub(crate) fn scope_forbidden_body(
             "status": StatusCode::FORBIDDEN.as_u16(),
             "error": description,
         })
+    };
+    body["error_kind"] = serde_json::json!("insufficient_scope");
+    body["execution_started"] = serde_json::json!(false);
+    if let Some(scope) = required_scope {
+        body["missing_scope"] = serde_json::json!(scope);
     }
+    body["recovery"] = serde_json::json!(super::scope_recovery_hint(auth, required_scope));
+    body
 }
 
 pub(crate) fn render_scope_forbidden(
@@ -156,8 +163,10 @@ pub(crate) fn render_scope_forbidden(
     if auth.is_some_and(AuthContext::is_oauth_token)
         && oauth_scope_denial_is_delegable(required_scope)
     {
-        render_oauth_insufficient_scope(res, required_scope, description);
-        return;
+        let challenge = oauth_insufficient_scope_challenge(required_scope);
+        if let Ok(val) = salvo::http::HeaderValue::from_str(&challenge) {
+            res.headers_mut().insert("www-authenticate", val);
+        }
     }
     res.status_code(StatusCode::FORBIDDEN);
     res.render(Json(scope_forbidden_body(

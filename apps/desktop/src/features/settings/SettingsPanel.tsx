@@ -11,6 +11,7 @@ import { useProduct } from "../../i18n/product";
 import type { RunnerSettings } from "../../models/topology";
 import { ComputerPermissions } from "./ComputerPermissions";
 import { RunnerFileAccess } from "./RunnerFileAccess";
+import { DetachedExecutionAuthorization } from "../extensions/RunnerCapabilityAuthorization";
 import { PowerShellInstallGuidance } from "./PowerShellInstallGuidance";
 import { APPEARANCES, useAppearance } from "../../hooks/useAppearance";
 import { AccentPicker } from "../../components/AccentPicker";
@@ -217,6 +218,7 @@ function SettingsView({
       <div id="desktop-settings-access" hidden={section !== "access"}>
       <RunnerFileAccess state={state} settings={runnerSettings} loading={loadingRunnerSettings} disabled={operationBusy || loadingRunnerSettings || Boolean(runnerSettingsError)} onState={onState} onSettings={acceptRunnerSettings} />
       {runnerSettingsError && <SettingsError error={runnerSettingsError} onRetry={() => void refreshRunnerSettings()} />}
+      {visited.includes("access") && <DetachedExecutionAuthorization settings={runnerSettings} disabled={operationBusy || loadingRunnerSettings || Boolean(runnerSettingsError)} />}
       {visited.includes("access") && <ComputerPermissions />}
       </div>
       <div id="desktop-settings-diagnostics" hidden={section !== "diagnostics"}>

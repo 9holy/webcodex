@@ -27,11 +27,23 @@ profile. Preparation returns a disabled profile. Save and enable it through the
 normal provider configuration workflow, then apply the Runner configuration as
 shown by Desktop. Existing configured providers are not silently replaced.
 
+Network access is off by default. Select **Allow network access** during Codex
+preparation when this provider needs to download dependencies, push commits, or
+contact deployment services. After saving and applying the profile, subsequent
+Runs use that setting while retaining workspace-write and on-request approval.
+Service credentials are still configured separately; this option does not add
+GitHub tokens, SSH agent credentials, or permission to write outside the Project.
+
 The headless preparation command creates the same reviewable profile:
 
 ```sh
 webcodex coding-agent prepare-codex --experimental --json
 ```
+
+Add `--network` to explicitly select the same network permission from the CLI.
+The setting is stored in the generated provider arguments, not in a separate
+permission registry or the installation compatibility receipt. Prepare and save
+the provider again to change it, then apply the configuration shown by Desktop.
 
 For an explicit installation:
 
@@ -80,7 +92,7 @@ reviewer, broader network access, or additional write root is a setup failure. A
 stricter initial network policy is allowed; the turn carries the operator's
 explicit network setting. There is
 no danger-full-access or unsandboxed shell fallback. An operator may explicitly
-select read-only mode or enable network access in provider arguments; callers
+enable network during preparation or select read-only mode in provider arguments; callers
 cannot inject these changes through the prompt or ACP config options.
 
 Command and file approval requests become ACP session/request_permission calls

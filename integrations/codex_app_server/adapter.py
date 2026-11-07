@@ -666,13 +666,16 @@ class Adapter:
             await self.shutdown()
 
 
-def profile(receipt, receipt_path, entry_path):
+def profile(receipt, receipt_path, entry_path, *, network=False):
     environment = {name: name for name in ("PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
                    "SystemRoot", "CODEX_HOME", "OPENAI_API_KEY", "HTTPS_PROXY", "HTTP_PROXY", "NO_PROXY",
                    "SSL_CERT_FILE", "SSL_CERT_DIR") if name in os.environ}
+    args = [str(Path(entry_path).resolve()), "serve", "--experimental",
+            "--receipt", str(Path(receipt_path).resolve())]
+    if network:
+        args.append("--network")
     return {"provider_id": "codex-app-server", "name": "Codex app-server (experimental)",
-            "executable": sys.executable, "args": [str(Path(entry_path).resolve()), "serve", "--experimental",
-                "--receipt", str(Path(receipt_path).resolve())], "enabled": False,
+            "executable": sys.executable, "args": args, "enabled": False,
             "env_from_env": environment, "allowed_config_options": []}
 
 
@@ -685,6 +688,7 @@ def parser():
     setup.add_argument("--codex-arg", action="append", default=[], help="Fixed operator-owned interpreter/launcher argument")
     setup.add_argument("--expected-version", help="Also require this exact codex-cli version")
     setup.add_argument("--receipt", required=True, help="Absolute operator-owned receipt path")
+    setup.add_argument("--network", action="store_true", help="Explicitly allow network in the prepared provider; workspace-write and on-request approval remain")
     run = commands.add_parser("serve", help="Serve one Runner-owned ACP Run")
     run.add_argument("--experimental", action="store_true", required=True)
     run.add_argument("--receipt", required=True)
@@ -708,7 +712,7 @@ def main():
             receipt = asyncio.run(prepare(arguments.codex_bin, arguments.codex_arg, arguments.receipt, arguments.expected_version))
             print(json.dumps({"status": "ready", "codex_version": receipt["codex_version"],
                               "receipt": arguments.receipt,
-                              "profile": profile(receipt, arguments.receipt, sys.argv[0])}))
+                              "profile": profile(receipt, arguments.receipt, sys.argv[0], network=arguments.network)}))
         except (Failure, OSError, ValueError, RecursionError) as exc:
             kind = exc.kind if isinstance(exc, Failure) else "codex_prepare_failed"
             print(json.dumps({"status": "error", "kind": kind,

@@ -426,6 +426,12 @@ jobs:
         run: bash scripts/release_check.sh --static-only
       - name: Check Linux workspace production surfaces without warnings
         run: python3 scripts/check_production_warnings.py
+      - name: Verify SSH password onboarding and remote execution
+        run: |
+          python3 -m venv target/ssh-acceptance-venv
+          target/ssh-acceptance-venv/bin/python -m pip install --disable-pip-version-check paramiko==4.0.0
+          cargo build --locked --profile dogfood -p webcodex -p webcodex-runner
+          target/ssh-acceptance-venv/bin/python scripts/e2e_ssh_connections.py --bin-dir target/dogfood
       - name: Upload Linux production build evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -582,6 +588,8 @@ jobs:
         run: cargo test --locked -p webcodex-runner -p webcodex-lsp -p webcodex-computer --features runner-real-process-tests
       - name: Test bundled Codex provider preparation on macOS
         run: cargo test --locked -p webcodex-environment codex_app_server
+      - name: Test private SSH credential files and leases on macOS
+        run: cargo test --locked -p webcodex-environment private_files
       - name: Test Codex app-server protocol and package on macOS
         run: |
           python3 -m unittest discover -s integrations/codex_app_server/tests -p 'test_*.py' -v
@@ -813,6 +821,8 @@ jobs:
         run: python -m unittest discover -s integrations/codex -p 'test_*.py' -v
       - name: Test bundled Codex provider preparation on Windows
         run: cargo test --locked -p webcodex-environment codex_app_server
+      - name: Test private SSH credential files and leases on Windows
+        run: cargo test --locked -p webcodex-environment private_files
       - name: Test Codex app-server protocol and package on Windows
         run: |
           python -m unittest discover -s integrations/codex_app_server/tests -p 'test_*.py' -v

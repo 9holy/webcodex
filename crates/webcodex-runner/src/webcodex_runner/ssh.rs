@@ -1,13 +1,13 @@
 //! Runner-local SSH resource execution.
 //!
-//! The pool deliberately delegates authentication and Host alias resolution to
-//! the Runner host's OpenSSH client. WebCodex only keeps named resource
-//! metadata plus short-lived in-memory control-socket state; it never stores
-//! keys, passwords, SSH configuration, or a transport in a Workflow Session.
+//! Static/legacy aliases use the Runner account's OpenSSH configuration.
+//! Structured managed resources use explicitly pinned host keys and private
+//! Runner credentials. Workflow Sessions retain only logical resource names.
 
 use super::config::SshConfig;
 use super::output::{CommandResult, ShellCommandResult};
 use super::shutdown::lock_unpoison;
+use super::ssh_credentials::{AskpassLease, ManagedSshConnection};
 use super::RunnerPolicy;
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -61,6 +61,7 @@ struct SshConnection {
     /// production leaves this `None` and uses the Runner user's normal SSH
     /// configuration exactly as intended.
     config_path: Option<PathBuf>,
+    managed: Option<ManagedSshConnection>,
 }
 
 #[derive(Debug, Default)]
@@ -247,6 +248,8 @@ pub(crate) struct PreparedSshCommand {
     pub(crate) command: Command,
     pub(crate) transport: PreparedSshTransport,
     pub(crate) program_delivery: PreparedSshProgramDelivery,
+    pub(crate) authentication: Option<AskpassLease>,
+    pub(crate) profile: Option<ManagedSshConnection>,
 }
 
 /// A ready-to-spawn long-lived SSH shell command with the resource's default
@@ -256,6 +259,8 @@ pub(crate) struct PreparedSshCommand {
 pub(crate) struct PreparedPersistentShellCommand {
     pub(crate) command: Command,
     pub(crate) default_cwd: Option<String>,
+    pub(crate) authentication: Option<AskpassLease>,
+    pub(crate) profile: Option<ManagedSshConnection>,
 }
 
 impl SshConnectionPool {
@@ -378,13 +383,19 @@ impl SshConnectionPool {
                 session_id,
                 &resource.host,
                 resource.default_cwd.as_deref(),
+                resource.connection.as_ref(),
             )?;
             let effective_cwd = requested_cwd.or(connection.default_cwd.clone());
             let remote_script = remote_script(effective_cwd.as_deref(), command);
             let mut ssh = ssh_command(&connection);
+            if let Some(managed) = &connection.managed {
+                managed
+                    .configure(&mut ssh, false)
+                    .map_err(|code| format!("{code}: SSH command was not started"))?;
+            } else {
+                ssh.arg("-o").arg("BatchMode=yes");
+            }
             ssh.arg("-o")
-                .arg("BatchMode=yes")
-                .arg("-o")
                 .arg("LogLevel=ERROR")
                 .arg("-S")
                 .arg(&connection.control_path)
@@ -397,6 +408,8 @@ impl SshConnectionPool {
                 command: ssh,
                 transport: PreparedSshTransport::Mux(connection.key),
                 program_delivery: PreparedSshProgramDelivery::Argv,
+                authentication: None,
+                profile: connection.managed.clone(),
             });
         }
 
@@ -415,9 +428,17 @@ impl SshConnectionPool {
             debug_assert!(program_frame.len() <= WINDOWS_DIRECT_FRAME_MAX_BYTES);
             let bootstrap = windows_direct_program_bootstrap(program_frame.len());
             let mut ssh = self.direct_ssh_command();
+            let authentication = resource
+                .connection
+                .as_ref()
+                .map(|managed| managed.configure(&mut ssh, true))
+                .transpose()
+                .map_err(|code| format!("{code}: SSH command was not started"))?
+                .flatten();
+            if resource.connection.is_none() {
+                ssh.arg("-o").arg("BatchMode=yes");
+            }
             ssh.arg("-o")
-                .arg("BatchMode=yes")
-                .arg("-o")
                 .arg("LogLevel=ERROR")
                 .arg(&resource.host)
                 .arg(bootstrap);
@@ -427,6 +448,8 @@ impl SshConnectionPool {
                 program_delivery: PreparedSshProgramDelivery::StdinFramed {
                     program: program_frame.into_bytes(),
                 },
+                authentication,
+                profile: resource.connection.clone(),
             });
         }
 
@@ -502,11 +525,17 @@ impl SshConnectionPool {
                 session_id,
                 &resource.host,
                 resource.default_cwd.as_deref(),
+                resource.connection.as_ref(),
             )?;
             let mut ssh = ssh_command(&connection);
+            if let Some(managed) = &connection.managed {
+                managed
+                    .configure(&mut ssh, false)
+                    .map_err(|code| format!("{code}: SSH shell was not started"))?;
+            } else {
+                ssh.arg("-o").arg("BatchMode=yes");
+            }
             ssh.arg("-o")
-                .arg("BatchMode=yes")
-                .arg("-o")
                 .arg("LogLevel=ERROR")
                 .arg("-o")
                 .arg("ControlMaster=no")
@@ -518,6 +547,8 @@ impl SshConnectionPool {
             return Ok(PreparedPersistentShellCommand {
                 command: ssh,
                 default_cwd: connection.default_cwd.clone(),
+                authentication: None,
+                profile: connection.managed.clone(),
             });
         }
 
@@ -525,15 +556,25 @@ impl SshConnectionPool {
         {
             let _ = generation;
             let mut ssh = Command::new(ssh_executable());
+            let authentication = resource
+                .connection
+                .as_ref()
+                .map(|managed| managed.configure(&mut ssh, true))
+                .transpose()
+                .map_err(|code| format!("{code}: SSH shell was not started"))?
+                .flatten();
+            if resource.connection.is_none() {
+                ssh.arg("-o").arg("BatchMode=yes");
+            }
             ssh.arg("-o")
-                .arg("BatchMode=yes")
-                .arg("-o")
                 .arg("LogLevel=ERROR")
                 .arg(&resource.host)
                 .arg(shell_program);
             Ok(PreparedPersistentShellCommand {
                 command: ssh,
                 default_cwd: resource.default_cwd.clone(),
+                authentication,
+                profile: resource.connection.clone(),
             })
         }
     }
@@ -614,6 +655,7 @@ impl SshConnectionPool {
         session_id: &str,
         host: &str,
         default_cwd: Option<&str>,
+        managed: Option<&ManagedSshConnection>,
     ) -> Result<SshConnection, String> {
         let key = SshConnectionKey {
             session_id: session_id.to_string(),
@@ -661,6 +703,7 @@ impl SshConnectionPool {
             host: host.to_string(),
             default_cwd: default_cwd.map(str::to_string),
             config_path: state.test_config_path.clone(),
+            managed: managed.cloned(),
         };
         establish_control_socket(&connection)?;
         state.entries.insert(key, connection.clone());
@@ -750,6 +793,8 @@ pub(crate) fn run_ssh_shell_with_execution_state(
             Err(error) => return ShellCommandResult::not_started(command_error(start, error)),
         };
     let transport = prepared.transport.clone();
+    let _authentication = prepared.authentication;
+    let _profile = prepared.profile;
     let mut result = run_piped_ssh_command(
         prepared.command,
         prepared.program_delivery,
@@ -877,9 +922,17 @@ mod macos_control_path_tests;
 #[cfg(unix)]
 fn establish_control_socket(connection: &SshConnection) -> Result<(), String> {
     let mut ssh = ssh_command(connection);
+    let _authentication = connection
+        .managed
+        .as_ref()
+        .map(|managed| managed.configure(&mut ssh, true))
+        .transpose()
+        .map_err(|code| format!("{code}: SSH connection was not started"))?
+        .flatten();
+    if connection.managed.is_none() {
+        ssh.arg("-o").arg("BatchMode=yes");
+    }
     ssh.arg("-o")
-        .arg("BatchMode=yes")
-        .arg("-o")
         .arg("LogLevel=ERROR")
         .arg("-o")
         .arg(format!("ConnectTimeout={SSH_CONNECT_TIMEOUT_SECS}"))
@@ -895,14 +948,82 @@ fn establish_control_socket(connection: &SshConnection) -> Result<(), String> {
         .arg("-N")
         .arg("-f")
         .arg(&connection.host)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    match ssh.status() {
-        Ok(status) if status.success() => Ok(()),
-        Ok(_) | Err(_) => Err(format!(
-            "ssh_connection_failed: resource '{}'; command was not started",
+        .stderr(Stdio::piped());
+    configure_private_process_group(&mut ssh);
+    let mut child = ssh.spawn().map_err(|error| {
+        format!(
+            "{}: SSH connection was not started",
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "ssh_program_unavailable"
+            } else {
+                "ssh_connection_failed"
+            },
+        )
+    })?;
+    let result = wait_control_handshake(&mut child);
+    if result.is_err() {
+        // A timeout can race OpenSSH's post-authentication fork. Close only the
+        // master belonging to this private control socket; never retry a call.
+        close_control_socket(connection);
+    }
+    result.map_err(|code| {
+        format!(
+            "{code}: resource '{}'; command was not started",
             connection.key.resource_name
-        )),
+        )
+    })
+}
+
+#[cfg(unix)]
+fn wait_control_handshake(child: &mut Child) -> Result<(), &'static str> {
+    use std::os::fd::AsRawFd;
+    let mut stderr = child.stderr.take().ok_or("ssh_connection_failed")?;
+    let descriptor = stderr.as_raw_fd();
+    let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(descriptor, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("ssh_connection_failed");
+    }
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let mut captured = Vec::new();
+    loop {
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stderr.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => {
+                    let keep = count.min((16 * 1024usize).saturating_sub(captured.len()));
+                    captured.extend_from_slice(&buffer[..keep]);
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(_)) => {
+                return Err(super::managed_ssh::classify_ssh_connection_failure(
+                    &captured,
+                ))
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => {
+                unsafe {
+                    let _ = libc::kill(-(child.id() as i32), libc::SIGKILL);
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("ssh_connection_timeout");
+            }
+        }
     }
 }
 
@@ -1017,7 +1138,20 @@ fn control_master_pid(connection: &SshConnection) -> Option<i32> {
 }
 
 fn ssh_command(connection: &SshConnection) -> Command {
-    ssh_command_with_config(connection.config_path.as_deref())
+    let mut command = ssh_command_with_config(connection.config_path.as_deref());
+    // Mux check/stop/exit must not import unrelated Host/ProxyCommand settings
+    // for structured connections either. They address this pool's exact local
+    // socket and never create a new authenticated channel.
+    if let Some(managed) = &connection.managed {
+        command
+            .arg("-F")
+            .arg("none")
+            .arg("-p")
+            .arg(managed.stored.endpoint.port.to_string())
+            .arg("-l")
+            .arg(&managed.stored.endpoint.user);
+    }
+    command
 }
 
 fn ssh_command_with_config(config_path: Option<&Path>) -> Command {
@@ -1743,6 +1877,7 @@ mod tests {
                 SshResourceConfig {
                     host: server.alias.clone(),
                     default_cwd: Some(server.remote_cwd.to_string_lossy().into_owned()),
+                    connection: None,
                 },
             );
         }
@@ -2719,6 +2854,7 @@ mod tests {
             SshResourceConfig {
                 host: server.alias.clone(),
                 default_cwd: None,
+                connection: None,
             },
         );
         SshConfig { resources }
@@ -3626,6 +3762,7 @@ fn main() {
             SshResourceConfig {
                 host: host.to_string(),
                 default_cwd: default_cwd.map(str::to_string),
+                connection: None,
             },
         );
         SshConfig { resources }

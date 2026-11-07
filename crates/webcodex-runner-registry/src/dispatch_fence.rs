@@ -261,14 +261,29 @@ impl PendingDispatchFence {
                 "capability_unavailable",
                 "Runner config-control capability changed before dispatch",
             ),
-            Self::SshResource { runner_instance_id } => control_rejection(
-                runner,
-                runner_instance_id,
-                RunnerFeature::ManagedSshResources,
-                "SSH resource",
-                "ssh_resource_registry_unavailable",
-                "Managed SSH resource capability changed before dispatch",
-            ),
+            Self::SshResource { runner_instance_id } => {
+                control_rejection(
+                    runner,
+                    runner_instance_id,
+                    RunnerFeature::ManagedSshResources,
+                    "SSH resource",
+                    "ssh_resource_registry_unavailable",
+                    "Managed SSH resource capability changed before dispatch",
+                ).or_else(|| {
+                    if matches!(operation, RunnerOperation::SshResource(request) if request.requires_connection_setup()) {
+                        control_rejection(
+                            runner,
+                            runner_instance_id,
+                            RunnerFeature::SshConnectionSetup,
+                            "SSH connection setup",
+                            "ssh_connection_setup_unsupported",
+                            "SSH connection setup capability changed before dispatch",
+                        )
+                    } else {
+                        None
+                    }
+                })
+            }
         }
     }
 }

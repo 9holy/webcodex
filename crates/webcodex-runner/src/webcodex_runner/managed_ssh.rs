@@ -1,4 +1,5 @@
 use super::config::{SshConfig, SshResourceConfig};
+use super::ssh_credentials::{ManagedSshConnection, StoredSshConnection};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -8,6 +9,7 @@ use std::fs::File;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::{atomic::AtomicBool, Mutex};
 use webcodex_core::ssh_resource::{
     normalize_ssh_resource_default_cwd, normalize_ssh_resource_target, validate_ssh_resource_name,
     SshResourceInventoryEntry, SshResourceRequest, SshResourceResponse, SshResourceSource,
@@ -19,12 +21,17 @@ const STORE_DIR: &str = "runner-managed-ssh-resources-v1";
 const STORE_FILE: &str = "managed-ssh-resources.json";
 const LOCK_FILE: &str = "managed-ssh-resources.lock";
 
+mod connection;
+pub(crate) use connection::classify_failure as classify_ssh_connection_failure;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ManagedResource {
     target: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    connection: Option<StoredSshConnection>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,6 +57,7 @@ pub(crate) struct ManagedSshResourceStore {
     path: Option<PathBuf>,
     lock_path: Option<PathBuf>,
     startup_managed: SshConfig,
+    challenges: Mutex<connection::Challenges>,
 }
 
 impl ManagedSshResourceStore {
@@ -62,6 +70,7 @@ impl ManagedSshResourceStore {
                     path: None,
                     lock_path: None,
                     startup_managed: SshConfig::default(),
+                    challenges: Mutex::default(),
                 };
             }
         };
@@ -74,13 +83,17 @@ impl ManagedSshResourceStore {
                 path: None,
                 lock_path: None,
                 startup_managed: SshConfig::default(),
+                challenges: Mutex::default(),
             };
         }
         let path = root.join(STORE_FILE);
         let lock_path = root.join(LOCK_FILE);
-        let startup_managed = match with_registry_lock(&lock_path, || load_registry(&path))
-            .and_then(|registry| registry_to_ssh(&registry, static_ssh))
-        {
+        let startup_managed = match with_registry_lock(&lock_path, || {
+            let registry = load_registry(&path)?;
+            let active = registry_to_ssh(&registry, static_ssh, &root.join("private"))?;
+            collect_unreferenced_connection_files(&root.join("private"), &registry);
+            Ok(active)
+        }) {
             Ok(ssh) => ssh,
             Err(code) => {
                 tracing::error!(code, "managed SSH resource registry unavailable at startup; static SSH resources remain active");
@@ -91,6 +104,7 @@ impl ManagedSshResourceStore {
             path: Some(path),
             lock_path: Some(lock_path),
             startup_managed,
+            challenges: Mutex::default(),
         }
     }
 
@@ -114,11 +128,29 @@ impl ManagedSshResourceStore {
         Ok(merged)
     }
 
+    #[cfg(test)]
     pub(crate) fn handle(
         &self,
         static_active: &SshConfig,
         request: SshResourceRequest,
     ) -> SshResourceResponse {
+        self.handle_with_runtime(static_active, request, 0, None, || true)
+    }
+
+    pub(crate) fn handle_with_runtime(
+        &self,
+        static_active: &SshConfig,
+        request: SshResourceRequest,
+        generation: u64,
+        stop_requested: Option<&AtomicBool>,
+        still_current: impl Fn() -> bool,
+    ) -> SshResourceResponse {
+        if request.validate().is_err() {
+            return safe_error(
+                "ssh_resource_invalid",
+                safe_error_message("ssh_resource_invalid"),
+            );
+        }
         let (Some(path), Some(lock_path)) = (self.path.as_deref(), self.lock_path.as_deref())
         else {
             return safe_error(
@@ -126,6 +158,18 @@ impl ManagedSshResourceStore {
                 "Managed SSH resource registry is unavailable for this Runner configuration",
             );
         };
+        if request.requires_connection_setup() {
+            return match self.handle_connection(
+                static_active,
+                request,
+                generation,
+                stop_requested,
+                &still_current,
+            ) {
+                Ok(response) => response,
+                Err(code) => safe_error(code, safe_error_message(code)),
+            };
+        }
         match with_registry_lock(lock_path, || {
             let registry = load_registry(path)?;
             ensure_no_static_collision(&registry, static_active)?;
@@ -153,6 +197,7 @@ impl ManagedSshResourceStore {
                     expected_revision,
                     name,
                 } => self.remove_locked(path, registry, static_active, expected_revision, name),
+                _ => Err("ssh_resource_invalid"),
             }
         }) {
             Ok(response) => response,
@@ -180,6 +225,7 @@ impl ManagedSshResourceStore {
         let desired = ManagedResource {
             target: normalize_ssh_resource_target(&target)?,
             default_cwd: normalize_ssh_resource_default_cwd(default_cwd.as_deref())?,
+            connection: None,
         };
         if let Some(existing) = registry.resources.get(&name) {
             if existing != &desired {
@@ -235,15 +281,27 @@ impl ManagedSshResourceStore {
         if static_active.resources.contains_key(&name) {
             return Err("ssh_resource_static_read_only");
         }
-        if registry.resources.remove(&name).is_none() {
-            return Err("ssh_resource_not_found");
-        }
+        let removed = registry
+            .resources
+            .remove(&name)
+            .ok_or("ssh_resource_not_found")?;
         let active = self.startup_managed.resources.contains_key(&name);
         registry.revision = registry
             .revision
             .checked_add(1)
             .ok_or("ssh_resource_registry_unavailable")?;
         write_registry(path, &registry)?;
+        if let Some(connection) = removed.connection.as_ref() {
+            let retained_by_active = self.startup_managed.resources.values().any(|active| {
+                active
+                    .connection
+                    .as_ref()
+                    .is_some_and(|active| active.stored.id == connection.id)
+            });
+            if !retained_by_active {
+                self.discard_connection_files(connection);
+            }
+        }
         Ok(SshResourceResponse::Remove {
             revision: registry.revision,
             resource: name.clone(),
@@ -252,6 +310,111 @@ impl ManagedSshResourceStore {
             restart_required: active,
         })
     }
+}
+
+impl ManagedSshResourceStore {
+    fn discard_connection_files(&self, connection: &StoredSshConnection) {
+        let Some(root) = self.path.as_deref().and_then(Path::parent) else {
+            return;
+        };
+        if let Ok(store) =
+            webcodex_environment::private_files::PrivateFileStore::existing(&root.join("private"))
+        {
+            let Ok(Some(lease)) = store.try_exclusive_lease(&connection.known_hosts_name()) else {
+                return;
+            };
+            for name in connection
+                .file_names()
+                .into_iter()
+                .filter(|name| name != &connection.known_hosts_name())
+            {
+                if store.remove(&name).is_err() {
+                    return;
+                }
+            }
+            let _ = store.remove_leased(&lease);
+        }
+    }
+}
+
+impl Drop for ManagedSshResourceStore {
+    fn drop(&mut self) {
+        // Removal cannot revoke credentials from the process-local active
+        // snapshot before its documented restart boundary. Retire those exact
+        // files only when this Runner releases the snapshot, and only if the
+        // current durable registry no longer owns their immutable references.
+        // Release this store's references first. Other live Runtime snapshots,
+        // pools, or Runner processes retain their own shared file leases.
+        self.startup_managed = SshConfig::default();
+        let (Some(path), Some(lock)) = (self.path.as_deref(), self.lock_path.as_deref()) else {
+            return;
+        };
+        let _ = with_registry_lock(lock, || {
+            let registry = load_registry(path)?;
+            if let Some(root) = path.parent() {
+                collect_unreferenced_connection_files(&root.join("private"), &registry);
+            }
+            Ok(())
+        });
+    }
+}
+
+fn collect_unreferenced_connection_files(root: &Path, registry: &ManagedRegistry) {
+    let Ok(store) = webcodex_environment::private_files::PrivateFileStore::existing(root) else {
+        return;
+    };
+    let retained = registry
+        .resources
+        .values()
+        .filter_map(|resource| resource.connection.as_ref())
+        .map(|connection| connection.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let Ok(names) = store.file_names(512) else {
+        return;
+    };
+    for name in names {
+        if let Some(id) = name
+            .strip_prefix("credential-")
+            .and_then(|name| name.strip_suffix(".json"))
+        {
+            if id.len() == 32
+                && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+                && !retained.contains(id)
+            {
+                // Candidate creation holds this same registry lock until its
+                // host-key anchor and shared lease exist. A missing anchor
+                // here can only be an interrupted, uncommitted creation.
+                if let Ok(anchor) = store.path(&format!("hosts-{id}.txt")) {
+                    if std::fs::symlink_metadata(anchor)
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        let _ = store.remove(&name);
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(id) = name
+            .strip_prefix("hosts-")
+            .and_then(|name| name.strip_suffix(".txt"))
+        else {
+            continue;
+        };
+        if id.len() != 32
+            || !id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || retained.contains(id)
+        {
+            continue;
+        }
+        let Ok(Some(lease)) = store.try_exclusive_lease(&name) else {
+            continue;
+        };
+        if store.remove(&format!("credential-{id}.json")).is_err() {
+            continue;
+        }
+        let _ = store.remove_leased(&lease);
+    }
+    super::ssh_credentials::collect_expired_askpass(&store);
 }
 
 fn managed_state_root(client_id: &str, server_url: &str) -> Result<PathBuf, &'static str> {
@@ -292,6 +455,17 @@ fn safe_error_message(code: &str) -> &'static str {
             "Managed SSH resource durability is uncertain; list resources again"
         }
         "ssh_resource_invalid" => "Managed SSH resource request or registry is invalid",
+        "ssh_credentials_unavailable" => "Runner could not safely read or save its private SSH credentials",
+        "ssh_host_key_unavailable" => "Could not inspect a supported SSH host key; verify the host and port",
+        "ssh_host_key_stale" => "Host-key confirmation expired or the endpoint, Runner configuration, or registry changed; inspect again",
+        "ssh_host_key_changed" => "SSH host key differs from the explicitly confirmed fingerprint; no credential was sent",
+        "ssh_authentication_failed" => "SSH authentication failed; check the account and credential. Interactive MFA and password changes are not supported",
+        "ssh_client_permission_denied" => "OpenSSH rejected the local key or configuration permissions; check ownership and private access for the Runner account",
+        "ssh_identity_file_invalid" => "OpenSSH could not use the selected private-key file on the Runner host",
+        "ssh_connection_timeout" => "SSH connection or authentication did not finish within the bounded setup timeout",
+        "ssh_connection_cancelled" => "SSH setup was cancelled because the Runner is stopping",
+        "ssh_program_unavailable" => "Install OpenSSH ssh and ssh-keyscan for the Runner account",
+        "ssh_connection_failed" => "SSH connection failed before the fixed connection test completed",
         _ => "Managed SSH resource registry is unavailable",
     }
 }
@@ -337,7 +511,13 @@ fn list_response(
 }
 
 fn managed_matches_config(resource: &ManagedResource, active: &SshResourceConfig) -> bool {
-    resource.target == active.host && resource.default_cwd == active.default_cwd
+    resource.target == active.host
+        && resource.default_cwd == active.default_cwd
+        && resource.connection.as_ref()
+            == active
+                .connection
+                .as_ref()
+                .map(|connection| &connection.stored)
 }
 
 fn ensure_no_static_collision(
@@ -357,6 +537,7 @@ fn ensure_no_static_collision(
 fn registry_to_ssh(
     registry: &ManagedRegistry,
     static_ssh: &SshConfig,
+    private_root: &Path,
 ) -> Result<SshConfig, &'static str> {
     validate_registry(registry)?;
     ensure_no_static_collision(registry, static_ssh)?;
@@ -367,6 +548,11 @@ fn registry_to_ssh(
             SshResourceConfig {
                 host: resource.target.clone(),
                 default_cwd: resource.default_cwd.clone(),
+                connection: resource
+                    .connection
+                    .clone()
+                    .map(|stored| ManagedSshConnection::load(stored, private_root.to_path_buf()))
+                    .transpose()?,
             },
         );
     }
@@ -383,6 +569,12 @@ fn validate_registry(registry: &ManagedRegistry) -> Result<(), &'static str> {
         validate_ssh_resource_name(name)?;
         normalize_ssh_resource_target(&resource.target)?;
         normalize_ssh_resource_default_cwd(resource.default_cwd.as_deref())?;
+        if let Some(connection) = &resource.connection {
+            connection.validate()?;
+            if resource.target != connection.endpoint.host {
+                return Err("ssh_resource_invalid");
+            }
+        }
     }
     Ok(())
 }
@@ -593,6 +785,7 @@ mod tests {
                 SshResourceConfig {
                     host: name.to_string(),
                     default_cwd: None,
+                    connection: None,
                 },
             )]),
         }
@@ -1000,6 +1193,7 @@ mod tests {
                         ManagedResource {
                             target: "host".to_string(),
                             default_cwd: None,
+                            connection: None,
                         },
                     )
                 })
@@ -1019,6 +1213,7 @@ mod tests {
                             default_cwd: Some("x".repeat(
                                 webcodex_core::ssh_resource::SSH_RESOURCE_DEFAULT_CWD_MAX_BYTES,
                             )),
+                            connection: None,
                         },
                     )
                 })
@@ -1042,6 +1237,7 @@ mod tests {
                 ManagedResource {
                     target: "other".to_string(),
                     default_cwd: None,
+                    connection: None,
                 },
             )]),
         };

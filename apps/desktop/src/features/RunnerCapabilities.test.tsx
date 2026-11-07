@@ -11,7 +11,7 @@ import { CodingAgentsPanel } from "./extensions/CodingAgentsPanel";
 import { SshResourcesPanel } from "./extensions/SshResourcesPanel";
 import { RunnerCapabilityAuthorization } from "./extensions/RunnerCapabilityAuthorization";
 
-const api = vi.hoisted(() => ({ prepareCodexCodingAgent: vi.fn(), saveCodingAgent: vi.fn(), removeCodingAgent: vi.fn(), runnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), registerSshResource: vi.fn(), removeSshResource: vi.fn(), authorizeRunnerCapabilities: vi.fn(), runnerCapabilityAuthorization: vi.fn() }));
+const api = vi.hoisted(() => ({ prepareCodexCodingAgent: vi.fn(), saveCodingAgent: vi.fn(), removeCodingAgent: vi.fn(), runnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), registerSshResource: vi.fn(), removeSshResource: vi.fn(), inspectSshConnection: vi.fn(), probeSshConnection: vi.fn(), authorizeRunnerCapabilities: vi.fn(), runnerCapabilityAuthorization: vi.fn() }));
 const query = vi.hoisted(() => vi.fn());
 vi.mock("../lib/desktop-api", () => ({ desktopApi: api }));
 vi.mock("./workspace/WorkspaceContext", () => ({ workspaceQuery: query }));
@@ -31,14 +31,14 @@ function state(): DesktopState {
   };
 }
 function inventory(resources: SshResource[] = [], observation = "first"): SshResourcesSnapshot {
-  return { runner: "fixture", available: true, observation_id: observation, resources, error_kind: null };
+  return { runner: "fixture", available: true, setup_supported: true, observation_id: observation, resources, error_kind: null };
 }
 function resource(name: string, source: "static" | "managed" = "managed", pending = false): SshResource {
   return { name, source, active: !pending, pending_restart: pending };
 }
 function Harness({ mode = "acp", initial = state() }: { mode?: "acp" | "ssh"; initial?: DesktopState }) {
   const [snapshot, setSnapshot] = useState(initial);
-  return <LocaleProvider><DesktopMantineProvider>{mode === "acp"
+  return <LocaleProvider><DesktopMantineProvider env="test">{mode === "acp"
     ? <CodingAgentsPanel state={snapshot} onState={setSnapshot} settings={settings} onRestarted={() => undefined} />
     : <SshResourcesPanel state={snapshot} onState={setSnapshot} settings={settings} onRestarted={() => undefined} />}</DesktopMantineProvider></LocaleProvider>;
 }
@@ -208,7 +208,7 @@ describe("Desktop SSH Resources", () => {
     api.sshResources.mockResolvedValue(inventory([resource("managed"), resource("static", "static"), resource("pending", "managed", true)]));
     render(<Harness mode="ssh" />);
     await screen.findByRole("article", { name: "static" });
-    expect(within(screen.getByRole("article", { name: "static" })).getByText("From config file · Active · Read only")).toBeInTheDocument();
+    expect(within(screen.getByRole("article", { name: "static" })).getByText("From config file · Loaded in Runner · Read only")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Remove static" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove managed" })).toBeEnabled();
     expect(within(screen.getByRole("article", { name: "pending" })).getByText("Managed by WebCodex · Configured · Restart required")).toBeInTheDocument();
@@ -224,12 +224,14 @@ describe("Desktop SSH Resources", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Add SSH Resource" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Add SSH Resource" }));
     await screen.findByRole("dialog", { name: "Add SSH resource" });
+    fireEvent.click(screen.getByRole("combobox", { name: "Connection Type" }));
+    fireEvent.click(await screen.findByRole("option", { name: "OpenSSH alias" }));
     fireEvent.change(screen.getByLabelText("Resource Name"), { target: { value: "temporary" } });
     fireEvent.change(screen.getByLabelText("Target"), { target: { value: "fixture-user@fixture-private-host" } });
     fireEvent.change(screen.getByLabelText("Default Working Directory"), { target: { value: "/fixture-private/cwd" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await screen.findByRole("article", { name: "temporary" });
-    expect(api.registerSshResource).toHaveBeenCalledExactlyOnceWith({ expected: target, observation_id: "obs-2", name: "temporary", target: "fixture-user@fixture-private-host", default_cwd: "/fixture-private/cwd" });
+    expect(api.registerSshResource).toHaveBeenCalledExactlyOnceWith({ expected: target, observation_id: "obs-2", name: "temporary", connection: { kind: "alias", target: "fixture-user@fixture-private-host" }, default_cwd: "/fixture-private/cwd" });
     expect(document.body.textContent).not.toContain("fixture-private-host");
     expect(document.body.textContent).not.toContain("/fixture-private/cwd");
     expect(screen.queryByLabelText("Target")).not.toBeInTheDocument();
@@ -240,6 +242,57 @@ describe("Desktop SSH Resources", () => {
     await waitFor(() => expect(api.removeSshResource).toHaveBeenCalledExactlyOnceWith(target, "obs-3", "temporary"));
     await waitFor(() => expect(screen.queryByRole("article", { name: "temporary" })).not.toBeInTheDocument());
     expect(api.restartOwnedRunner).not.toHaveBeenCalled();
+  });
+
+  it("separates a verified connection from loaded configuration and clears verification on restart", async () => {
+    const fingerprint = `SHA256:${"A".repeat(43)}`;
+    let rows: SshResource[] = [];
+    api.sshResources.mockImplementation(async () => inventory(rows, "observed"));
+    api.inspectSshConnection.mockResolvedValue({ success: true, error_kind: null, inspection: {
+      challenge_id: "fixture-challenge", expires_at: Math.floor(Date.now() / 1000) + 300,
+      host_keys: [{ algorithm: "ssh-ed25519", fingerprint }],
+    } });
+    api.probeSshConnection.mockResolvedValue({ success: true, error_kind: null, verified: true });
+    api.registerSshResource.mockImplementation(async () => {
+      rows = [resource("production", "managed", true)];
+      return { success: true, error_kind: null, restart_required: true, inventory: inventory(rows, "saved") };
+    });
+    api.restartOwnedRunner.mockImplementation(async () => { rows = [resource("production")]; return state(); });
+    render(<Harness mode="ssh" />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add SSH Resource" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Add SSH Resource" }));
+    await screen.findByRole("dialog", { name: "Add SSH resource" });
+    fireEvent.change(screen.getByLabelText("Resource Name"), { target: { value: "production" } });
+    fireEvent.change(screen.getByLabelText("Host or IP Address"), { target: { value: "192.0.2.10" } });
+    fireEvent.change(screen.getByLabelText("SSH Username"), { target: { value: "operator" } });
+    fireEvent.change(screen.getByLabelText("SSH Password"), { target: { value: "fixture-only-password" } });
+    fireEvent.click(screen.getByRole("button", { name: "Verify SSH Host" }));
+    fireEvent.click(await screen.findByRole("radio", { name: `Trust ${fingerprint}` }));
+    fireEvent.click(screen.getByRole("button", { name: "Test SSH Connection" }));
+    await screen.findByText("Connection verified");
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    const saved = await screen.findByRole("article", { name: "production" });
+    expect(within(saved).getByText("Connection verified")).toBeInTheDocument();
+    expect(within(saved).queryByText(/Loaded in Runner/)).not.toBeInTheDocument();
+    expect(api.restartOwnedRunner).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Restart Runner" }));
+    await waitFor(() => expect(api.restartOwnedRunner).toHaveBeenCalledExactlyOnceWith(target));
+    const loaded = await screen.findByRole("article", { name: "production" });
+    expect(within(loaded).getByText(/Loaded in Runner/)).toBeInTheDocument();
+    expect(within(loaded).getByText("Connection not verified")).toBeInTheDocument();
+    expect(within(loaded).queryByText("Connection verified")).not.toBeInTheDocument();
+  });
+
+  it("discards an open SSH credential form when the selected Runner changes", async () => {
+    const view = (currentSettings: RunnerSettings) => <LocaleProvider><DesktopMantineProvider env="test"><SshResourcesPanel state={state()} settings={currentSettings} onState={() => undefined} onRestarted={() => undefined} /></DesktopMantineProvider></LocaleProvider>;
+    const rendered = render(view(settings));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Add SSH Resource" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Add SSH Resource" }));
+    await screen.findByRole("dialog", { name: "Add SSH resource" });
+    fireEvent.change(screen.getByLabelText("SSH Password"), { target: { value: "fixture-private-draft" } });
+    rendered.rerender(view({ ...settings, target: { ...target, client_id: "another-runner" } }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    expect(api.registerSshResource).not.toHaveBeenCalled(); expect(api.probeSshConnection).not.toHaveBeenCalled();
   });
 
   it.each(["canonical", "ipc"])("keeps %s unknown outcomes visible until Refresh without retrying", async kind => {
@@ -357,7 +410,7 @@ describe("Desktop approval and Codex setup flows", () => {
     expect(within(dialog).getByText(/Any client that holds this credential/)).toBeInTheDocument();
     const confirm = within(dialog).getByRole("button", { name: "Confirm Authorize Coding Approvals" });
     expect(confirm).toBeDisabled(); fireEvent.click(consent); fireEvent.click(confirm); fireEvent.click(confirm);
-    await waitFor(() => expect(api.authorizeRunnerCapabilities).toHaveBeenCalledExactlyOnceWith(target, true));
+    await waitFor(() => expect(api.authorizeRunnerCapabilities).toHaveBeenCalledExactlyOnceWith(target, "coding_approval"));
     await waitFor(() => expect(screen.getByRole("button", { name: /Allow once/ })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: /Allow once/ }));
     await screen.findByText("One-time approval received — waiting for the agent to continue");
@@ -377,7 +430,7 @@ describe("Desktop approval and Codex setup flows", () => {
     expect(screen.getByLabelText("Python Executable").closest("details")).not.toHaveAttribute("open");
     fireEvent.click(screen.getByRole("button", { name: "Prepare Codex Configuration" }));
     const save = await screen.findByRole("button", { name: "Save and Enable Codex" });
-    expect(api.prepareCodexCodingAgent).toHaveBeenCalledExactlyOnceWith({ target, expected_revision: 0, codex_args: [] });
+    expect(api.prepareCodexCodingAgent).toHaveBeenCalledExactlyOnceWith({ target, expected_revision: 0, codex_args: [], allow_network: false });
     expect(api.saveCodingAgent).not.toHaveBeenCalled(); expect(api.authorizeRunnerCapabilities).not.toHaveBeenCalled(); expect(api.restartOwnedRunner).not.toHaveBeenCalled();
     fireEvent.click(save); fireEvent.click(save);
     await waitFor(() => expect(api.saveCodingAgent).toHaveBeenCalledExactlyOnceWith({ target, expected_revision: 0, previous_id: null, profile: { ...generated, enabled: true }, global_settings: null }));

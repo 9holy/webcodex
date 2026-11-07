@@ -100,6 +100,8 @@ impl JobManager {
         };
         let transport = prepared.transport.clone();
         let program_delivery = prepared.program_delivery;
+        let authentication = prepared.authentication;
+        let profile = prepared.profile;
         let mut command = prepared.command;
         if program_delivery.requires_stdin() {
             command.stdin(Stdio::piped());
@@ -190,6 +192,8 @@ impl JobManager {
         let timeout_secs = request.timeout_secs.min(policy.max_timeout_secs).max(1);
         std::thread::spawn(move || {
             let _worker_guard = worker_guard;
+            let _authentication = authentication;
+            let _profile = profile;
             const OUTPUT_CHANNEL_CAPACITY: usize = 64;
             let (tx, rx) = mpsc::sync_channel::<OutputChunk>(OUTPUT_CHANNEL_CAPACITY);
             let mut readers = Vec::new();

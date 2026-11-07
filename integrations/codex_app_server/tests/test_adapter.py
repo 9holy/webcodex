@@ -57,10 +57,11 @@ class AdapterTests(unittest.TestCase):
             "--receipt", str(self.receipt), *extra], env=environment or self.environment,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
 
-    def start(self, scenario="complete", *extra, handshake=True, environment=None, entry=ADAPTER, runner_cwd=None):
+    def start(self, scenario="complete", *extra, handshake=True, environment=None, entry=ADAPTER, runner_cwd=None, profile=None):
         env = dict(environment or self.environment, FAKE_CODEX_SCENARIO=scenario)
-        self.process = subprocess.Popen([sys.executable, str(entry), "serve", "--experimental",
-            "--receipt", str(self.receipt), *extra], cwd=runner_cwd or self.root, env=env,
+        command = ([profile["executable"], *profile["args"], *extra] if profile is not None else
+                   [sys.executable, str(entry), "serve", "--experimental", "--receipt", str(self.receipt), *extra])
+        self.process = subprocess.Popen(command, cwd=runner_cwd or self.root, env=env,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.messages = queue.Queue()
         def read():
@@ -152,7 +153,40 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(self.profile["allowed_config_options"], [])
         self.assertTrue(Path(self.profile["executable"]).is_absolute())
         self.assertEqual(self.profile["args"][1:3], ["serve", "--experimental"])
+        self.assertNotIn("--network", self.profile["args"])
         self.assertTrue(all(key == value for key, value in self.profile["env_from_env"].items()))
+
+    def test_prepared_network_profile_keeps_workspace_and_explicit_approval(self):
+        prepared = self.prepare("--network")
+        self.assertEqual(prepared.returncode, 0, prepared.stdout)
+        profile = json.loads(prepared.stdout)["profile"]
+        self.assertEqual(profile, dict(self.profile, args=[*self.profile["args"], "--network"]))
+        self.assertFalse(profile["enabled"])
+        self.assertNotIn("GH_TOKEN", profile["env_from_env"])
+        self.assertNotIn("SSH_AUTH_SOCK", profile["env_from_env"])
+        self.start("approval", profile=profile)
+        self.prompt()
+        permission = self.approval()
+        self.assertFalse((self.root / "approved-command.txt").exists())
+        thread = self.wait_log("thread/start")[0]["params"]
+        turn = self.wait_log("turn/start")[0]["params"]
+        for request in (thread, turn):
+            self.assertEqual(request["approvalPolicy"], "on-request")
+            self.assertEqual(request["approvalsReviewer"], "user")
+            self.assertEqual(request["cwd"], str(self.root))
+        self.assertEqual(thread["sandbox"], "workspace-write")
+        self.assertEqual(thread["config"], {
+            "sandbox_workspace_write.writable_roots": [str(self.root)],
+            "sandbox_workspace_write.network_access": True,
+            "sandbox_workspace_write.exclude_tmpdir_env_var": True,
+            "sandbox_workspace_write.exclude_slash_tmp": True,
+        })
+        self.assertEqual(turn["sandboxPolicy"], {"type": "workspaceWrite", "writableRoots": [str(self.root)],
+            "networkAccess": True, "excludeTmpdirEnvVar": True, "excludeSlashTmp": True})
+        self.assertEqual([option["kind"] for option in permission["params"]["options"]], ["allow_once", "reject_once"])
+        self.answer(permission, "reject")
+        self.assertEqual(self.terminal()[0]["result"]["stopReason"], "end_turn")
+        self.assertFalse((self.root / "approved-command.txt").exists())
 
     def test_project_alias_uses_the_runner_owned_directory_before_native_start(self):
         native_root = self.root.resolve()

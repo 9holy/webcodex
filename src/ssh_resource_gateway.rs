@@ -18,6 +18,8 @@ use webcodex_core::ssh_resource::{
     validate_response_for_request, SshResourceRequest, SshResourceResponse,
 };
 
+pub(crate) mod operator;
+
 pub(crate) const SSH_RESOURCE_TOOL_NAME: &str = "manage_ssh_resource";
 const MAX_BINDINGS: usize = 256;
 const RUNNER_WAIT_TIMEOUT: Duration = Duration::from_secs(65);
@@ -53,7 +55,7 @@ impl CallerIdentity {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Binding {
     caller: CallerIdentity,
     client_id: String,
@@ -111,6 +113,19 @@ impl SshResourceGatewayRuntime {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         store.values.remove(binding);
         store.order.retain(|candidate| candidate != binding);
+    }
+
+    fn consume(&self, binding: &str, expected: &Binding) -> bool {
+        let mut store = self
+            .bindings
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if store.values.get(binding) != Some(expected) {
+            return false;
+        }
+        store.values.remove(binding);
+        store.order.retain(|candidate| candidate != binding);
+        true
     }
 }
 
@@ -172,6 +187,7 @@ pub(crate) fn operation_policy(
 struct ResolvedRunner {
     client_id: String,
     runner_instance_id: String,
+    connection_setup: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -456,7 +472,15 @@ async fn list(
         )
     })?;
     let runner = resolve_runner(runtime, runner_id, auth).await?;
-    let response = execute_exact(runtime, &runner, SshResourceRequest::List, auth).await?;
+    list_resolved(runtime, &runner, auth).await
+}
+
+async fn list_resolved(
+    runtime: &ToolRuntime,
+    runner: &ResolvedRunner,
+    auth: Option<&AuthContext>,
+) -> Result<Value, GatewayError> {
+    let response = execute_exact(runtime, runner, SshResourceRequest::List, auth).await?;
     let SshResourceResponse::List {
         revision,
         resources,
@@ -468,7 +492,7 @@ async fn list(
     let binding = runtime.ssh_resource_gateway.remember(Binding {
         caller,
         client_id: runner.client_id.clone(),
-        runner_instance_id: runner.runner_instance_id,
+        runner_instance_id: runner.runner_instance_id.clone(),
         revision,
     });
     Ok(json!({
@@ -661,6 +685,7 @@ async fn resolve_runner(
         .map(|runner| ResolvedRunner {
             client_id: runner.client_id,
             runner_instance_id: runner.runner_instance_id,
+            connection_setup: runner.capabilities.ssh_connection_setup,
         })
         .ok_or_else(|| {
             GatewayError::new(
@@ -676,6 +701,12 @@ async fn execute_exact(
     request: SshResourceRequest,
     auth: Option<&AuthContext>,
 ) -> Result<SshResourceResponse, GatewayError> {
+    if request.requires_connection_setup() && !runner.connection_setup {
+        return Err(GatewayError::new(
+            "ssh_connection_setup_unsupported",
+            "Upgrade this Runner to configure SSH connection authentication",
+        ));
+    }
     let expected_request = request.clone();
     let access = crate::runner_http::runner_access_from_auth(auth);
     let (request_id, receiver) = runtime
@@ -689,7 +720,12 @@ async fn execute_exact(
         )
         .await
         .map_err(|message| {
-            if message.starts_with("runner_replaced")
+            if message.starts_with("ssh_connection_setup_unsupported") {
+                GatewayError::new(
+                    "ssh_connection_setup_unsupported",
+                    "Upgrade this Runner to configure SSH connection authentication",
+                )
+            } else if message.starts_with("runner_replaced")
                 || message.contains("exact Runner")
                 || message.contains("offline")
             {
@@ -734,6 +770,15 @@ async fn execute_exact(
             if response
                 .error
                 .as_deref()
+                .is_some_and(|message| message.starts_with("ssh_connection_setup_unsupported"))
+            {
+                GatewayError::new(
+                    "ssh_connection_setup_unsupported",
+                    "The Runner SSH connection capability changed before dispatch",
+                )
+            } else if response
+                .error
+                .as_deref()
                 .is_some_and(|message| message.starts_with("runner_replaced"))
             {
                 GatewayError::new(
@@ -764,7 +809,9 @@ async fn execute_exact(
 fn invalid_runner_response_error(request: &SshResourceRequest) -> GatewayError {
     if matches!(
         request,
-        SshResourceRequest::Register { .. } | SshResourceRequest::Remove { .. }
+        SshResourceRequest::Register { .. }
+            | SshResourceRequest::RegisterConnection { .. }
+            | SshResourceRequest::Remove { .. }
     ) {
         GatewayError::new(
             "ssh_resource_outcome_unknown",
@@ -820,6 +867,18 @@ fn response_to_error<T>(response: SshResourceResponse) -> Result<T, GatewayError
                     "managed SSH resource request or registry is invalid",
                     None,
                 ),
+                "ssh_connection_setup_unsupported" => ("ssh_connection_setup_unsupported", "Upgrade this Runner to configure SSH connection authentication", None),
+                "ssh_host_key_unavailable" => ("ssh_host_key_unavailable", "No supported SSH host key could be inspected", None),
+                "ssh_host_key_stale" => ("ssh_host_key_stale", "The SSH host-key inspection expired or no longer matches this connection", Some("Inspect this exact connection again and explicitly confirm its host key.")),
+                "ssh_host_key_changed" => ("ssh_host_key_changed", "The server host key differs from the explicitly approved key", Some("Verify the server identity before inspecting and approving a replacement key.")),
+                "ssh_authentication_failed" => ("ssh_authentication_failed", "SSH authentication failed", None),
+                "ssh_connection_failed" => ("ssh_connection_failed", "The SSH connection could not be established", None),
+                "ssh_connection_timeout" => ("ssh_connection_timeout", "The SSH connection timed out", None),
+                "ssh_program_unavailable" => ("ssh_program_unavailable", "A required OpenSSH client program is unavailable on the Runner", None),
+                "ssh_identity_file_invalid" => ("ssh_identity_file_invalid", "The Runner identity file is invalid or inaccessible", None),
+                "ssh_credentials_unavailable" => ("ssh_credentials_unavailable", "Private SSH credential storage or authentication helper is unavailable", None),
+                "ssh_client_permission_denied" => ("ssh_client_permission_denied", "OpenSSH rejected the identity file permissions", None),
+                "ssh_connection_cancelled" => ("ssh_connection_cancelled", "SSH connection setup was cancelled", None),
                 _ => (
                     "ssh_resource_registry_unavailable",
                     "managed SSH resource registry is unavailable",

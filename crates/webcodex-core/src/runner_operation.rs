@@ -1756,7 +1756,7 @@ fn decode_operation(wire: &RunnerRequest) -> Result<RunnerOperation, String> {
             ensure_empty_generic_execution_fields(wire, true)?;
             let content = bounded_content(wire, SSH_RESOURCE_REQUEST_MAX_BYTES, "ssh_resource")?;
             let operation = serde_json::from_str::<SshResourceRequest>(content)
-                .map_err(|error| format!("invalid SSH resource payload: {error}"))?;
+                .map_err(|_| "invalid SSH resource payload".to_string())?;
             operation
                 .validate()
                 .map_err(|error| format!("invalid SSH resource request: {error}"))?;
