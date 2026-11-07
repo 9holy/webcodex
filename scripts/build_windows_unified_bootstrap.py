@@ -31,18 +31,20 @@ def nsis_quote(path: Path) -> str:
 
 
 def candidate_hash_command(expected_sha256: str) -> str:
-    # Keep the candidate path out of PowerShell source. Use .NET file/crypto APIs
-    # directly instead of PowerShell provider cmdlets so exact-path hashing does
-    # not depend on provider parsing or hosted-runner cmdlet behavior.
+    # NSIS expands ExecWait into a 1024-character buffer. Keep the one-shot
+    # helper small enough for the real installer, not only direct PowerShell
+    # tests. Base64 represents the same 32 SHA-256 bytes and MUST compare with
+    # -cne (case sensitive). This process owns its stream/crypto handles until
+    # exit; ExecWait observes exit before any candidate executable is launched.
+    expected_bytes = bytes.fromhex(expected_sha256)
+    if len(expected_bytes) != 32:
+        raise ValueError("candidate SHA-256 must contain 32 bytes")
+    expected = base64.b64encode(expected_bytes).decode("ascii")
+    # Paths remain outside the source, in a child-local environment variable.
     script = (
-        "$ErrorActionPreference='Stop'; try { "
-        "$s=[System.IO.File]::OpenRead($env:WEBCODEX_INSTALLER_CANDIDATE_CLI); try { "
-        "$sha=[System.Security.Cryptography.SHA256]::Create(); try { "
-        "$h=([System.BitConverter]::ToString($sha.ComputeHash($s))).Replace('-','').ToLowerInvariant() "
-        "} finally { $sha.Dispose() } "
-        "} finally { $s.Dispose() }; "
-        f"if($h -ne '{expected_sha256}') {{ exit 1 }}; exit 0 "
-        "} catch { exit 1 }"
+        "try { $s=[IO.File]::OpenRead($env:WEBCODEX_INSTALLER_CANDIDATE_CLI); "
+        "$h=[Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash($s)); "
+        f"exit ([int]($h -cne '{expected}')) }} catch {{ exit 1 }}"
     )
     return base64.b64encode(script.encode("utf-16le")).decode("ascii")
 
@@ -53,6 +55,8 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
     inner = inner_installer.resolve(strict=True)
     if inner.read_bytes()[:2] != b"MZ":
         raise ValueError("inner Tauri installer is not a Windows executable")
+    hash_arguments = " -NoProfile -NonInteractive -EncodedCommand " + candidate_hash_command(manifest["artifacts"]["webcodex"]["sha256"])
+    hash_fixed_length = len(r"\System32\WindowsPowerShell\v1.0\powershell.exe") + len(hash_arguments) + 2
     target = "x86_64" if platform == "win32-x64" else "aarch64"
     lines = [
         'Unicode true',
@@ -253,7 +257,14 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
-        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -NonInteractive -EncodedCommand {candidate_hash_command(manifest["artifacts"]["webcodex"]["sha256"])}\' $0',
+        '  StrLen $0 "$WINDIR"',
+        f'  IntOp $0 $0 + {hash_fixed_length}',
+        '  ${If} $0 >= ${NSIS_MAX_STRLEN}',
+        '    MessageBox MB_ICONSTOP "The Windows system path exceeds this installer command bound." /SD IDOK',
+        '    SetErrorLevel 1',
+        '    Abort',
+        '  ${EndIf}',
+        f'  ExecWait \'"$WINDIR\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"{hash_arguments}\' $0',
         '  ${If} $0 != 0',
         '    MessageBox MB_ICONSTOP "WebCodex candidate CLI failed its manifest-bound SHA-256 check." /SD IDOK',
         '    SetErrorLevel 1',

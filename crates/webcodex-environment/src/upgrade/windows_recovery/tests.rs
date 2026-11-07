@@ -248,7 +248,10 @@ fn system_recovery_selects_only_the_bound_candidate_and_keeps_its_image_unchange
         assert!(std::fs::remove_file(&candidate).is_err());
         drop(helper);
     }
-    let foreign = fixture._temporary.path().join("foreign.exe");
+    // A raw Windows TempDir may inherit a group owner or non-private ACL.
+    // Use the fixture's private store so this reaches the unverified-image
+    // rejection instead of failing the atomic writer's parent-directory gate.
+    let foreign = fixture.store.root().join("foreign.exe");
     atomic_private_write(&foreign, b"unverified helper").unwrap();
     assert!(service_helper_for(
         &fixture.store,

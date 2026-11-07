@@ -276,6 +276,8 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
             self.assertIn("SetEnvironmentVariableW", section)
             self.assertIn("-EncodedCommand", section)
             self.assertIn("manifest-bound SHA-256 check", section)
+            self.assertIn('StrLen $0 "$WINDIR"', section)
+            self.assertLess(section.index('StrLen $0 "$WINDIR"'), section.index(" -EncodedCommand "))
             self.assertIn('"$WebCodexTrustedCLI" environment installer-verify-same', section)
             self.assertFalse(any(line.strip().startswith("File ") for line in function_bodies.splitlines()))
             depth = 0
@@ -358,12 +360,18 @@ class WindowsUnifiedNsisTests(unittest.TestCase):
     def test_candidate_hash_check_quotes_the_digest_and_keeps_paths_out_of_source(self):
         expected = "a" * 64
         program = base64.b64decode(bootstrap.candidate_hash_command(expected)).decode("utf-16le")
-        self.assertIn(f"$h -ne '{expected}'", program)
-        self.assertIn("[System.IO.File]::OpenRead($env:WEBCODEX_INSTALLER_CANDIDATE_CLI)", program)
-        self.assertIn("[System.Security.Cryptography.SHA256]::Create()", program)
+        encoded_digest = base64.b64encode(bytes.fromhex(expected)).decode("ascii")
+        self.assertIn(f"$h -cne '{encoded_digest}'", program)
+        self.assertIn("[IO.File]::OpenRead($env:WEBCODEX_INSTALLER_CANDIDATE_CLI)", program)
+        self.assertIn("[Security.Cryptography.SHA256]::Create()", program)
         self.assertIn("catch { exit 1 }", program)
         self.assertNotIn("Get-FileHash", program)
         self.assertNotIn("$args", program)
+        # Exercise the actual NSIS string budget, including a maximum-length
+        # Windows directory. A correct standalone PS script can still truncate
+        # and always fail when embedded in NSIS.
+        command = '"' + ("C:\\" + "x" * 257) + r'\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -NonInteractive -EncodedCommand ' + bootstrap.candidate_hash_command(expected)
+        self.assertLess(len(command), 1024)
 
     @unittest.skipUnless(os.name == "nt", "requires native Windows PowerShell")
     def test_native_candidate_hash_check_accepts_only_exact_bytes_in_quoted_paths(self):
