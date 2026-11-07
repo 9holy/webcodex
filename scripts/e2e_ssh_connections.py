@@ -18,6 +18,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import socket
@@ -102,6 +103,28 @@ class HostTools:
         return value
 
 
+def acl_failure_details(result) -> str:
+    """Report only bounded OS failure metadata, never PowerShell's raw errors."""
+    details = {"stage": "powershell_start", "exit_code": result.returncode}
+    if len(result.stdout) <= 4096:
+        try:
+            reported = json.loads(result.stdout)
+        except (UnicodeError, ValueError):
+            reported = None
+        if isinstance(reported, dict):
+            stage = reported.get("stage")
+            if isinstance(stage, str) and stage in {"inspect", "identity", "descriptor", "persist", "verify"}:
+                details["stage"] = stage
+            kind = reported.get("exception_type")
+            if isinstance(kind, str) and re.fullmatch(r"System\.[A-Za-z0-9_.+`]{1,150}", kind):
+                details["exception_type"] = kind
+            for name in ["hresult", "native_code"]:
+                value = reported.get(name)
+                if type(value) is int and -(2**31) <= value < 2**32:
+                    details[name] = value
+    return json.dumps(details, sort_keys=True)
+
+
 def secure_fixture_path(path: Path) -> None:
     """Protect only newly created, owned fixture paths; never repair user files."""
     if os.name != "nt":
@@ -111,21 +134,67 @@ def secure_fixture_path(path: Path) -> None:
     # native private store's current SID + SYSTEM + Administrators contract.
     script = r"""
 $ErrorActionPreference = 'Stop'
-$path = $env:WEBCODEX_SSH_FIXTURE_PRIVATE_PATH
-$item = Get-Item -LiteralPath $path -Force
-if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Fixture link refused' }
-$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
-if ($item.PSIsContainer) { $acl = New-Object Security.AccessControl.DirectorySecurity }
-else { $acl = New-Object Security.AccessControl.FileSecurity }
-$acl.SetSecurityDescriptorSddlForm("O:${sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;${sid})")
-Set-Acl -LiteralPath $path -AclObject $acl
+$stage = 'inspect'
+try {
+    $path = $env:WEBCODEX_SSH_FIXTURE_PRIVATE_PATH
+    $item = Get-Item -LiteralPath $path -Force
+    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw [System.InvalidOperationException]::new()
+    }
+    $stage = 'identity'
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $stage = 'descriptor'
+    if ($item.PSIsContainer) { $acl = New-Object System.Security.AccessControl.DirectorySecurity }
+    else { $acl = New-Object System.Security.AccessControl.FileSecurity }
+    $sections = [System.Security.AccessControl.AccessControlSections]::Owner -bor [System.Security.AccessControl.AccessControlSections]::Access
+    $acl.SetSecurityDescriptorSddlForm("O:${sid}D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;${sid})", $sections)
+    $stage = 'persist'
+    # Set-Acl copies the descriptor with All sections. The direct .NET API
+    # persists only the modified Owner/Access sections, leaving Group/SACL alone.
+    $item.SetAccessControl($acl)
+    $stage = 'verify'
+    $actual = $item.GetAccessControl($sections)
+    if ($actual.GetOwner([System.Security.Principal.SecurityIdentifier]).Value -ne $sid -or -not $actual.AreAccessRulesProtected) {
+        throw [System.InvalidOperationException]::new()
+    }
+    $allowed = @($sid, 'S-1-5-18', 'S-1-5-32-544')
+    $seen = @{}
+    $full = [System.Security.AccessControl.FileSystemRights]::FullControl
+    foreach ($rule in $actual.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier])) {
+        $identity = $rule.IdentityReference.Value
+        if ($allowed -notcontains $identity -or $rule.IsInherited -or
+            $rule.AccessControlType -ne [System.Security.AccessControl.AccessControlType]::Allow -or
+            ($rule.FileSystemRights -band $full) -ne $full) {
+            throw [System.InvalidOperationException]::new()
+        }
+        $seen[$identity] = $true
+    }
+    foreach ($identity in $allowed) {
+        if (-not $seen.ContainsKey($identity)) { throw [System.InvalidOperationException]::new() }
+    }
+} catch {
+    $exception = $_.Exception.GetBaseException()
+    $native = $null
+    if ($exception -is [System.ComponentModel.Win32Exception]) { $native = $exception.NativeErrorCode }
+    $diagnostic = [ordered]@{
+        stage = $stage; exception_type = $exception.GetType().FullName;
+        hresult = $exception.HResult; native_code = $native
+    } | ConvertTo-Json -Compress
+    [Console]::Out.WriteLine($diagnostic)
+    exit 1
+}
 """
     program = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    result = subprocess.run([str(program), "-NoLogo", "-NoProfile", "-NonInteractive",
-                             "-EncodedCommand", base64.b64encode(script.encode("utf-16le")).decode("ascii")],
-                            env=os.environ | {"WEBCODEX_SSH_FIXTURE_PRIVATE_PATH": str(path)},
-                            stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
-    check(result.returncode == 0, "Could not protect the newly created Windows fixture path")
+    try:
+        result = subprocess.run([str(program), "-NoLogo", "-NoProfile", "-NonInteractive",
+                                 "-EncodedCommand", base64.b64encode(script.encode("utf-16le")).decode("ascii")],
+                                env=os.environ | {"WEBCODEX_SSH_FIXTURE_PRIVATE_PATH": str(path)},
+                                stdin=subprocess.DEVNULL, capture_output=True, timeout=20)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("Windows fixture ACL failed: stage=powershell_timeout") from None
+    except OSError as error:
+        raise AssertionError(f"Windows fixture ACL failed: stage=powershell_spawn; errno={error.errno}") from None
+    check(result.returncode == 0, "Windows fixture ACL failed: " + acl_failure_details(result))
 
 
 def stop(process: subprocess.Popen | None) -> None:
