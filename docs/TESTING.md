@@ -361,6 +361,16 @@ The lanes above define test semantics; workflows decide when to run them.
   intent and recovery, immutable tag/asset handling, and the GitHub-only delivery
   boundary. `.github/workflows/release-publish.yml` is an explicitly authorized
   publication entry point, not another candidate builder or a pull-request test.
+- The fixed `v0.5.2` assembly recovery is covered by
+  `scripts/tests/test_recover_release_assembly.py` and
+  `scripts/tests/test_release_assembly_publication.py`. These verify original
+  producer and artifact identities, bounded extraction, exact sidecar repairs,
+  unchanged public input bytes, separate producer/assembly provenance, and
+  same-run checkpoint recovery. `scripts/tests/test_release_checksum_layout.py`
+  executes the workflow's real checksum writer/reader fragments with flat
+  artifact downloads, so the original `dist/` path mismatch cannot silently
+  return. These tests do not substitute for executing full bundle verification
+  on the real native artifacts in the recovery workflow.
 
 ### CI cancellation versus required lane results
 

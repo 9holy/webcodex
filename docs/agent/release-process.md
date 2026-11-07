@@ -96,8 +96,9 @@ complete installer set. The high-level npm publication plan remains unchanged.
 For the explicitly authorized `9holy/webcodex` `v0.5.2` distribution,
 [`release-publish.yml`](../../.github/workflows/release-publish.yml) provides a
 repository-owned control host. A reviewed change to the fixed
-[`release request`](../../.github/release-requests/v0.5.2.json) on `main` starts
-that publication; ordinary code pushes and pull requests do not. The request
+[`release request`](../../.github/release-requests/v0.5.2.json) or its
+[`assembly recovery origin`](../../.github/release-requests/v0.5.2-assembly-recovery.json)
+on `main` starts that publication; ordinary code pushes and pull requests do not. The request
 pins the repository and owner IDs, release source commit/tree, successful source
 CI and evidence attempts, installer selection, and approved Release body digest.
 The adjacent body file is an input to that request; the published GitHub Release
@@ -112,17 +113,40 @@ installation token as a human login or weakening the existing operator's
 build workflows retain their existing read-only permissions, exact-source gates,
 native signing requirements, and same-run bundle contract.
 
-Each remote effect has a prepared intent uploaded as an Actions artifact before
-it is attempted. The controller reuses the existing readiness/build request
-schemas, correlation, collection, draft verification, and public-byte verifier.
-It creates an annotated immutable tag only after dispatched readiness succeeds,
-uploads only the exact verified public asset set, and publishes only after all
-draft sizes and digests match. It never deletes or replaces a tag, release, or
-asset. A retry of the same controller run restores its newest verified checkpoint
+The initial controller created the annotated tag after dispatched readiness
+succeeded. All twelve required producer jobs in native run `42373155729` then
+succeeded, but its assembly job failed because ten Linux/macOS checksum sidecars
+contained `dist/<basename>` while downloaded candidates were flat files. That
+original run remains failed. The current entry point is the one-version
+[`assembly recovery controller`](../../scripts/release_assembly_publication.py):
+it observes the original annotated tag unchanged and cannot dispatch another
+producer run or create a replacement tag. It verifies the original publisher
+stopped before any draft or public asset, rechecks source CI/readiness and every
+producer job, and downloads only the fourteen pinned, unexpired artifact IDs
+with their exact sizes and SHA-256 digests.
+
+Recovery checks all ten sidecars against their actual input bytes before removing
+only the `dist/` prefix. The original tagged assembly and full bundle-verification
+steps then run in an isolated source worktree. Public native archives, signed
+installers, Desktop packages, and source manifests remain byte-identical. Derived
+metadata retains the real original producer run; a separate checkpoint receipt
+records this recovery run, original and executed script hashes, input/output
+hashes, and all ten normalizations. The ordinary collector still requires a
+successful original build; this fixed recovery does not relax that contract or
+claim the old failed aggregate succeeded. Future producers write basename-only
+sidecars directly and have executable producer-to-consumer regression tests.
+
+Each publication effect has a prepared intent uploaded as an Actions artifact
+before it is attempted. Recovery reuses the existing draft verification and
+public-byte verifier, uploads only the exact verified public asset set, and
+publishes only after all draft sizes and digests match. It never deletes or
+replaces a tag, release, or asset. A retry of the same controller run restores its newest verified checkpoint
 and reconciles recorded effects; missing evidence or an uncertain absent effect
 stops instead of initiating a second operation. Checkpoints contain bounded JSON
 state, not credentials, signing material, or installer payloads. Retain the run's
-artifacts until publication and all follow-up verification finish.
+artifacts and the original fourteen input artifacts until publication and all
+follow-up verification finish. A retry reassembles those exact inputs and must
+match the first receipt before it can reuse already uploaded assets.
 
 Because Release events created with `GITHUB_TOKEN` do not automatically start
 other workflows, this controller explicitly dispatches the existing image and

@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "kind": "webcodex-v0.5.2-assembly-only-recovery",
+  "repo": "9holy/webcodex",
+  "repo_id": 1404596174,
+  "owner": "9holy",
+  "owner_id": 45361924,
+  "version": "0.5.2",
+  "tag": "v0.5.2",
+  "source_sha": "2299ffe5bcc0f3965e11b753fabc3fb558769de8",
+  "source_tree": "c1b02a3d3820f595f832105772ecbeb181468db1",
+  "tag_object_sha": "d85163dc707e45ac8c014eeec67ffa529b78e1c9",
+  "tag_created_at": 1794054750,
+  "tag_journal_id": "9d5fe02e-ac28-5acd-85aa-71cacdc99b9a",
+  "original_publisher_run_id": 42372920138,
+  "original_publisher_attempt": 1,
+  "original_control_sha": "5cbb0a087390c220c430a59a5a836bfb5750daf1",
+  "original_request_sha256": "6bf8a4acc525a0a55126ec715a8ff8bc5fec61f8ba0d3764f69f138fc0dedb92",
+  "readiness_run_id": 42372956165,
+  "readiness_run_attempt": 1,
+  "readiness_request_id": "rr_8ece142122c7135845bab242",
+  "source_build_run_id": 42373155729,
+  "source_build_run_attempt": 1,
+  "source_build_request_id": "rb_d71b1111926a9ef697d21eb1",
+  "source_build_workflow_ref": "9holy/webcodex/.github/workflows/release-build.yml@refs/tags/v0.5.2",
+  "built_at": 1794054750,
+  "include_unified_installers": true,
+  "include_runtime_installers": false,
+  "jobs": [
+    {
+      "id": 128405245040,
+      "name": "preflight",
+      "conclusion": "success"
+    },
+    {
+      "id": 128406232180,
+      "name": "prepare",
+      "conclusion": "success"
+    },
+    {
+      "id": 128406443010,
+      "name": "linux (linux-arm64, ubuntu-24.04-arm, quay.io/pypa/manylinux2014_aarch64, aarch64, AArch64)",
+      "conclusion": "success"
+    },
+    {
+      "id": 128406443015,
+      "name": "windows (win32-arm64, windows-11-arm, aarch64-pc-windows-msvc, ARM64, AA64, arm64)",
+      "conclusion": "success"
+    },
+    {
+      "id": 128406443025,
+      "name": "macos (darwin-x64, macos-15-intel, x86_64, x86_64-apple-darwin, x86_64)",
+      "conclusion": "success"
+    },
+    {
+      "id": 128406443026,
+      "name": "linux (linux-x64, ubuntu-latest, quay.io/pypa/manylinux2014_x86_64, x86_64, Advanced Micro Device...",
+      "conclusion": "success"
+    },
+    {
+      "id": 128406443063,
+      "name": "macos (darwin-arm64, macos-26, arm64, aarch64-apple-darwin, arm64)",
+      "conclusion": "success"
+    },
+    {
+      "id": 128406443096,
+      "name": "windows (win32-x64, windows-latest, x86_64-pc-windows-msvc, AMD64, 8664, x64)",
+      "conclusion": "success"
+    },
+    {
+      "id": 128408812151,
+      "name": "runtime-native",
+      "conclusion": "skipped"
+    },
+    {
+      "id": 128411288415,
+      "name": "unified-native (linux-x64, ubuntu-latest, linux, x86_64)",
+      "conclusion": "success"
+    },
+    {
+      "id": 128411288421,
+      "name": "unified-native (darwin-arm64, macos-26, macos, arm64)",
+      "conclusion": "success"
+    },
+    {
+      "id": 128411288437,
+      "name": "unified-native (linux-arm64, ubuntu-24.04-arm, linux, aarch64)",
+      "conclusion": "success"
+    },
+    {
+      "id": 128411288456,
+      "name": "unified-native (darwin-x64, macos-15-intel, macos, x86_64)",
+      "conclusion": "success"
+    },
+    {
+      "id": 128415980572,
+      "name": "assemble",
+      "conclusion": "failure"
+    }
+  ],
+  "artifacts": [
+    {
+      "id": 13575481688,
+      "name": "webcodex-v0.5.2-darwin-arm64",
+      "size_in_bytes": 88080325,
+      "digest": "sha256:8539d9a6cc9d7c538f4e06b93a68046fcaf4fb50506311965fd52fb274ec5f42"
+    },
+    {
+      "id": 13575251443,
+      "name": "webcodex-v0.5.2-darwin-x64",
+      "size_in_bytes": 39517801,
+      "digest": "sha256:26aebcb5651e70e2d1df18d1c159580dd1a0ead9ea2446de24adaf1e4880f8d5"
+    },
+    {
+      "id": 13575232706,
+      "name": "webcodex-v0.5.2-desktop-win32-arm64",
+      "size_in_bytes": 30059592,
+      "digest": "sha256:081a988b29d6e6a433dcc506e0b98b611071d19a48da12d28265ea2fb3b5bd20"
+    },
+    {
+      "id": 13575028304,
+      "name": "webcodex-v0.5.2-desktop-win32-x64",
+      "size_in_bytes": 34058357,
+      "digest": "sha256:1727e6c29f2ca8693e7da59339ae876aa4ec346793f87e064b6e52e264a21791"
+    },
+    {
+      "id": 13573879970,
+      "name": "webcodex-v0.5.2-linux-arm64",
+      "size_in_bytes": 37828166,
+      "digest": "sha256:436da8d2291d0edd403b7c9a6b2c185956d60b164609e119755d7367e4ac9ce1"
+    },
+    {
+      "id": 13574907382,
+      "name": "webcodex-v0.5.2-linux-x64",
+      "size_in_bytes": 40656767,
+      "digest": "sha256:15734d0fe55402e07195ebd0c68e98e72718c90d641d1e8a52749b0d2896d4f0"
+    },
+    {
+      "id": 13575787202,
+      "name": "webcodex-v0.5.2-unified-darwin-arm64",
+      "size_in_bytes": 165494425,
+      "digest": "sha256:a33ec2d7f6bc7bbbe65ac39851830104a85ac59ac613174f9cfefdbe1a515333"
+    },
+    {
+      "id": 13575549942,
+      "name": "webcodex-v0.5.2-unified-darwin-x64",
+      "size_in_bytes": 177132937,
+      "digest": "sha256:bd75ad7d98939fd18713edd2b9bd9dbc47d02b436cc45beb63a69b37d364e953"
+    },
+    {
+      "id": 13575861468,
+      "name": "webcodex-v0.5.2-unified-linux-arm64",
+      "size_in_bytes": 168307065,
+      "digest": "sha256:a539434fb7bf89639480e2f4bfbae0145933752d43f84694d8d81d4824666e32"
+    },
+    {
+      "id": 13575463159,
+      "name": "webcodex-v0.5.2-unified-linux-x64",
+      "size_in_bytes": 177359532,
+      "digest": "sha256:a37ecc9589cb2ca22ed39df2ec657c2d9b7899986412a11b9070c31cce979b7f"
+    },
+    {
+      "id": 13575711511,
+      "name": "webcodex-v0.5.2-unified-win32-arm64",
+      "size_in_bytes": 76508359,
+      "digest": "sha256:d135820fd050b0a2f3fabaa9514d2614bcf54cc87ed285ecfcf853f64b57563c"
+    },
+    {
+      "id": 13575900997,
+      "name": "webcodex-v0.5.2-unified-win32-x64",
+      "size_in_bytes": 83437393,
+      "digest": "sha256:82a1fb4a8c6717eec35597418b54b480bf23c2d078309c599bce2ca2d16363df"
+    },
+    {
+      "id": 13575955637,
+      "name": "webcodex-v0.5.2-win32-arm64",
+      "size_in_bytes": 38362285,
+      "digest": "sha256:8436bfb2d48b40a290aacbaf7d785502fa06b991656cb703f1c72f16dfeca65d"
+    },
+    {
+      "id": 13574928667,
+      "name": "webcodex-v0.5.2-win32-x64",
+      "size_in_bytes": 40923166,
+      "digest": "sha256:2243a501d26e8300620cda7cdfc8f3ade67c188fb81e8dc082765bc5235b24f9"
+    }
+  ],
+  "assembly_steps_sha256": {
+    "Verify and assemble one release bundle": "fd2b5cabb6adacd7104a617134a88180e4b04a85d0ad4c933c09fde6a4b4a6d1",
+    "Verify complete selected bundle": "daf6f94850b74ffb482c60af7bd158b3554b668f650380cc0a26c2e20c913460"
+  }
+}
