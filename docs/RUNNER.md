@@ -678,6 +678,22 @@ and registration timeouts/backoff also contribute to recovery latency, so 30
 seconds is a retry interval, not an end-to-end recovery deadline. Explicit
 `polling` remains polling, and explicit `websocket` keeps retrying WebSocket.
 
+A half-open WebSocket or QUIC stream cannot wait indefinitely for an operating-system
+TCP/UDP failure. If the registered Runner receives no decoded application envelope
+for 90 seconds (three 30-second Ping periods), it discards the connection and
+reconnects with the same Runner instance and retained Job inventory. A healthy
+Pong or another valid inbound envelope renews this deadline; a successful local
+Ping send does not. Each registered frame write is limited to 30 seconds.
+Registration writes and acknowledgement reads each have a separate 10-second
+limit. These bounds trigger recovery; reconnect backoff and network/authentication
+still determine when a new connection becomes available.
+
+This reconnect does not restart Jobs, change scopes or policy, or replay commands.
+A cancelled write may already have reached the peer, so an ordinary request whose
+result was lost remains uncertain. Existing Job inventory/update-sequence
+reconciliation is the only Job recovery path. Connection-bound persistent shells
+close under their existing disconnect rules and are never silently recreated.
+
 Runner admission and Server inventory validation share the same semantic shell
 identities, including `python` (not concrete executables such as `python3`).
 Ordinary Job start/end timestamps are clamped to their causal predecessors:

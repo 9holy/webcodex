@@ -47,6 +47,10 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 xml = "1"
 webpki-roots = "1"
 
+[dev-dependencies]
+# Deterministic transport liveness tests exercise real deadlines without sleeps.
+tokio = { version = "1", features = ["test-util"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

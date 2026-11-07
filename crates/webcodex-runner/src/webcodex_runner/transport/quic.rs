@@ -239,7 +239,10 @@ pub(super) async fn quic_session(
         );
     let register_frame = QuicRegisterFrame::new(register_payload, non_empty_token(&cfg.token));
     let Some(register_write) = future_or_shutdown(
-        write_quic_register_frame(&mut send, &register_frame),
+        tokio::time::timeout(
+            STREAM_REGISTER_TIMEOUT,
+            write_quic_register_frame(&mut send, &register_frame),
+        ),
         runtime,
     )
     .await
@@ -248,11 +251,13 @@ pub(super) async fn quic_session(
         client_endpoint.close(quinn::VarInt::from_u32(0), b"process shutdown");
         return Ok(RunnerSessionExit::Shutdown);
     };
-    register_write.map_err(|e| format!("failed to send quic register: {}", e))?;
+    register_write
+        .map_err(|_| "quic register write timed out".to_string())?
+        .map_err(|e| format!("failed to send quic register: {}", e))?;
 
     // Wait for the Registered ack.
     let Some(ack_result) = future_or_shutdown(
-        tokio::time::timeout(Duration::from_secs(10), read_quic_frame(&mut recv)),
+        tokio::time::timeout(STREAM_REGISTER_TIMEOUT, read_quic_frame(&mut recv)),
         runtime,
     )
     .await
@@ -277,16 +282,21 @@ pub(super) async fn quic_session(
         let ping = RunnerEnvelope::Ping {
             ts: chrono::Utc::now().timestamp(),
         };
-        let Some(ping_write) =
-            future_or_shutdown(write_quic_frame(&mut send, &ping), runtime).await
+        let Some(ping_write) = future_or_shutdown(
+            tokio::time::timeout(STREAM_WRITE_TIMEOUT, write_quic_frame(&mut send, &ping)),
+            runtime,
+        )
+        .await
         else {
             conn.close(quinn::VarInt::from_u32(0), b"process shutdown");
             client_endpoint.close(quinn::VarInt::from_u32(0), b"process shutdown");
             return Ok(RunnerSessionExit::Shutdown);
         };
-        ping_write.map_err(|e| format!("quic once ping send failed: {}", e))?;
+        ping_write
+            .map_err(|_| "quic once ping write timed out".to_string())?
+            .map_err(|e| format!("quic once ping send failed: {}", e))?;
         let Some(pong_result) = future_or_shutdown(
-            tokio::time::timeout(Duration::from_secs(10), read_quic_frame(&mut recv)),
+            tokio::time::timeout(STREAM_REGISTER_TIMEOUT, read_quic_frame(&mut recv)),
             runtime,
         )
         .await
@@ -339,22 +349,15 @@ pub(super) async fn quic_session(
         while let Some(env) = out_rx.recv().await {
             let envelope_kind = env.kind();
             let graceful = matches!(env, RunnerEnvelope::Goodbye { .. });
-            let send_started = Instant::now();
-            if write_quic_frame(&mut send, &env).await.is_err() {
-                observe_runner_stream_writer_send(
-                    StreamTransport::Quic,
-                    envelope_kind,
-                    None,
-                    RunnerStreamMetricOutcome::TransportError,
-                );
-                return StreamWriterExit::TransportFailed;
-            }
-            observe_runner_stream_writer_send(
+            if !write_stream_frame(
                 StreamTransport::Quic,
                 envelope_kind,
-                Some(send_started.elapsed()),
-                RunnerStreamMetricOutcome::Success,
-            );
+                write_quic_frame(&mut send, &env),
+            )
+            .await
+            {
+                return StreamWriterExit::TransportFailed;
+            }
             if graceful {
                 return if send.finish().is_ok() {
                     StreamWriterExit::GracefulClose

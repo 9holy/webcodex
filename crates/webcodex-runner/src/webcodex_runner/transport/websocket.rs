@@ -115,17 +115,21 @@ where
     let reg_json =
         serde_json::to_string(&reg_env).map_err(|e| format!("failed to encode register: {}", e))?;
     tokio::select! {
-        result = ws_stream.send(WsMessage::Text(reg_json.into())) => result,
+        result = tokio::time::timeout(
+            STREAM_REGISTER_TIMEOUT,
+            ws_stream.send(WsMessage::Text(reg_json.into())),
+        ) => result,
         _ = &mut shutdown => {
             runtime.request_shutdown_signal();
             return Ok(RunnerSessionExit::Shutdown);
         }
     }
+    .map_err(|_| "websocket register write timed out".to_string())?
     .map_err(|e| format!("failed to send register: {}", e))?;
 
     // Wait for Registered ack.
     let ack_msg = tokio::select! {
-        result = tokio::time::timeout(Duration::from_secs(10), ws_stream.next()) => {
+        result = tokio::time::timeout(STREAM_REGISTER_TIMEOUT, ws_stream.next()) => {
             result.map_err(|_| "websocket register ack timed out".to_string())?
         }
         _ = &mut shutdown => {
@@ -154,7 +158,6 @@ where
         while let Some(env) = out_rx.recv().await {
             let envelope_kind = env.kind();
             let is_goodbye = matches!(env, RunnerEnvelope::Goodbye { .. });
-            let send_started = Instant::now();
             let Ok(json) = serde_json::to_string(&env) else {
                 observe_runner_stream_writer_send(
                     StreamTransport::WebSocket,
@@ -164,21 +167,15 @@ where
                 );
                 return StreamWriterExit::TransportFailed;
             };
-            if sink.send(WsMessage::Text(json.into())).await.is_err() {
-                observe_runner_stream_writer_send(
-                    StreamTransport::WebSocket,
-                    envelope_kind,
-                    None,
-                    RunnerStreamMetricOutcome::TransportError,
-                );
-                return StreamWriterExit::TransportFailed;
-            }
-            observe_runner_stream_writer_send(
+            if !write_stream_frame(
                 StreamTransport::WebSocket,
                 envelope_kind,
-                Some(send_started.elapsed()),
-                RunnerStreamMetricOutcome::Success,
-            );
+                sink.send(WsMessage::Text(json.into())),
+            )
+            .await
+            {
+                return StreamWriterExit::TransportFailed;
+            }
             if is_goodbye {
                 // The session loop continues polling the split read half while
                 // awaiting this task, allowing tungstenite's close handshake to
