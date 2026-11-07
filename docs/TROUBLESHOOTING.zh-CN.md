@@ -41,6 +41,40 @@ Client：
 `FORBIDDEN` **不是** WebCodex 的 `get_runtime_status` 返回值。一个没有到达 Server 的
 请求，无法通过重启或重配 Runner 来修复。
 
+### 工具反复提示权限不足
+
+先保留工具的精确名称，以及返回中存在的有界字段 `error_kind`、`failure_kind`、
+`missing_scope`、`reason` 和 `execution_state`。相似的界面提示可能来自不同权限边界；
+重复调用或在聊天里回复“同意”不会改变这些边界。
+
+在发生失败的同一个连接中调用
+`get_runtime_status(compact=false, summary_only=false)`。`authorization` 对象显示
+当前凭据类型及显式持有的已知 scopes，`authority` 显示 Server 实际采用的执行策略。
+这些字段用于诊断，不代表某个 Project 或工具一定可用。已安装版本若没有
+`authorization`，请在受保护的凭据管理界面查看。使用发现结果中的确切 Runner ID 调用
+`list_runners(client_id=..., summary_only=false)`，检查运行中 Runner 的 capabilities、
+policy、build 和 provider 清单。
+
+| 精确现象 | 应检查或修改的地方 |
+| --- | --- |
+| HTTP 401 / 凭据无效或过期 | 为原连接重新认证，并核对凭据用途；Runner token 不能作为 MCP client 凭据。 |
+| `insufficient_scope`，可能包含 `missing_scope` | 由所有者为该凭据/client 授予所需 scope。OAuth 还要同时核对 client allow-list 与授权凭据的权限；scope 上限改变后重新授权，刷新旧 grant 不会自动增加权限。 |
+| `restricted_requires_human_authorization` | Server 处于 `restricted` 模式，会直接拒绝有后果的工具，并没有审批队列。由操作者决定部署是否应使用 `WEBCODEX_AUTHORITY_MODE=trusted_agent`，修改配置后重启 Server；聊天确认不能切换该模式。 |
+| `invalid_authority_mode:...` | 检查 Server 环境，彻底移除已退役的 `WEBCODEX_PERMISSION_MODE`，即使其值为空也要删除，再选择有效的新模式。只在本机检查，不分享环境变量值。 |
+| 只读 Session，或 Project/path 的 `policy_rejected` | 检查所选 Session、确切注册的 Project、allowed roots、`allow_patch` 及 Runner 命令策略。通过正常所有者流程选择或配置所需的可写 Project/Session；增加 scope 不会覆盖这些限制。 |
+| `capability_unavailable` 或 provider 不可用 | 对比运行中 Runner 的 build、advertised capabilities 与 Server。Desktop 保存的设置要按文档重启/重载 Runner 后才会生效，见 [Runner capabilities](agent/desktop-runner-capabilities.md)。 |
+| ACP `waiting_permission` / `permission_request` | 当前 ACP 适配器没有回传审批的 UI/API，只会在有界等待后向 provider 返回 ACP `Cancelled`；`trusted_agent` 不会批准这个内部请求。观察或显式取消同一个 Run；交互审批需要接完整 provider 的审批交互，见 [ACP 权限行为](agent/acp-coding-agent-run.md#8-permission-request-exceptional-path)。 |
+| 原生 `EACCES`、文件系统只读，或操作系统拒绝屏幕/输入权限 | 检查实际 Runner 服务用户、文件所有权/挂载方式及系统权限。Server scope 不能授予操作系统权限。 |
+
+按实际工作流授予能力。普通编程使用 runtime/project/Job scopes；Browser、Computer、
+local MCP、Plugins、memory、SSH 和委托编程各有独立 scope。新配对中的
+`--runner-capabilities` 只追加 SSH/委托编程权限，并非“所有工具”开关。已有本机
+Desktop enrollment 可以在提供该入口时显式使用 **Authorize Runner capabilities**；
+远端 enrollment 通过操作者的配对/凭据流程处理。Shared-key OAuth 中已有的
+`--oauth-browser-permissions`、`--oauth-computer-permissions` 和 `--oauth-local-mcp`
+分别选择独立的委托类别；已有 OAuth client 不会静默获得新 scope。精确的凭据与同意
+规则见[认证模型](AUTH_MODEL.zh-CN.md)。
+
 ### ChatGPT 提示 developer MCP 被禁用或当前会话不支持
 
 [Issue #500](https://github.com/yyjeqhc/webcodex/issues/500) 已出现一组很有代表性的

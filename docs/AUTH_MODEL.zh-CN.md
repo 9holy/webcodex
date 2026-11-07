@@ -125,6 +125,19 @@ Authentication 回答“**调用方是谁**”；scope 回答“**该调用方�
 无效配置会拒绝执行。该模式不改变凭据身份或 scope，也不授权超出用户任务范围的发布
 或部署。Maintainer 级细节见 [Authority model](agent/permission-model.md)。
 
+排查权限问题时，应使用报错的同一连接调用 `get_runtime_status`，显式设置
+`compact=false`、`summary_only=false`。完整状态会同时返回该次请求的
+`authorization.credential_kind`、`authorization.granted_scopes` 和运行中 Server 的
+`authority` 策略。Scope 名称经过白名单过滤和去重；不会返回凭据内容、哈希、用户或
+token ID，也不会回显未知 scope 文本。`admin` 保持为一个超级 scope，不展开成所有
+scope；`none` 仅表示没有显式 authentication context，不代表无限制访问。
+精简状态省略该诊断对象。
+
+将失败工具要求的 scope 与该连接已有的 scope 比较。`trusted_agent`、已启用的 Runner
+capability 或用户的管理员 role，都不会补上凭据缺失的 scope。已有凭据需要通过其支持的
+配对、授权或 OAuth 流程显式授予权限或重新授权。Session、路径、原生操作系统与 Host
+限制的区别见[故障排查](TROUBLESHOOTING.zh-CN.md)。
+
 ## Computer observation and control authorization
 
 Computer Use 权限有意与普通 project/runtime 权限分开。只读 Computer observation 需要 `computer:read`，会产生 UI effect 的控制需要 `computer:control`，启动应用使用 `computer:launch`。全屏 display、pointer 与全局 clipboard 还拥有额外显式 scope，不会因为旧 credential 已经有普通 Computer 权限就自动继承。

@@ -12,8 +12,8 @@ use serde_json::{json, Value};
 /// Resolved rule name recorded on auto-authorized decisions.
 pub(crate) const TRUSTED_AGENT_AUTO_REASON: &str = "trusted_agent_authority";
 
-/// Resolved rule name recorded on restricted-mode denials of the runtime
-/// surface (the connector surface routes through one-time human approvals).
+/// Resolved rule name recorded on restricted-mode denials. Neither runtime nor
+/// Connector surfaces offer an interactive approval queue for this mode.
 pub(crate) const RESTRICTED_DENY_REASON: &str = "restricted_requires_human_authorization";
 
 /// Where the resolved authority mode came from.

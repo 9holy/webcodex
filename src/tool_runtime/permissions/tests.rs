@@ -262,7 +262,9 @@ fn permission_execution_denied_result_is_stable_and_non_approving() {
     assert_eq!(result.output["permission_reason"], RESTRICTED_DENY_REASON);
     let err = result.error.as_deref().unwrap();
     assert!(err.contains("restricted"), "{err}");
-    assert!(err.contains("human authorization"), "{err}");
+    assert!(err.contains("no interactive approval queue"), "{err}");
+    assert!(err.contains("Server operator"), "{err}");
+    assert!(err.contains(AUTHORITY_MODE_ENV), "{err}");
     // Must not look like hard-deny (permission attach must remain).
     assert!(!is_hard_denied_output(
         &result.output,

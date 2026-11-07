@@ -9,7 +9,8 @@ import json
 import re
 from pathlib import Path
 
-SERVER_IMAGE = "ghcr.io/yyjeqhc/webcodex-server"
+DEFAULT_REPOSITORY = "yyjeqhc/webcodex"
+SERVER_IMAGE = f"ghcr.io/{DEFAULT_REPOSITORY.split('/')[0]}/webcodex-server"
 BOOTSTRAP_ASSET = "webcodex-server-bootstrap.sh"
 MATERIALIZED_COMPOSE = "webcodex-server-compose.yaml"
 DEFAULT_IMAGE_MARKER = f"image: ${{WEBCODEX_SERVER_IMAGE:-{SERVER_IMAGE}:latest}}"
@@ -31,7 +32,17 @@ def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def render_bootstrap(*, compose: str, bootstrap: str, digest: str) -> str:
+def render_bootstrap(
+    *, compose: str, bootstrap: str, digest: str, repo: str = DEFAULT_REPOSITORY
+) -> str:
+    # Use the same owner/name allowlist as the other release adapters. Never
+    # interpolate an arbitrary registry, tag, URL, or shell text into Compose.
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+        raise ValueError("invalid GitHub repository")
+    owner, repository = repo.split("/")
+    if owner in {".", ".."} or repository in {".", ".."}:
+        raise ValueError("invalid GitHub repository")
+    image = f"ghcr.io/{owner.lower()}/webcodex-server"
     if not DIGEST_RE.fullmatch(digest):
         raise ValueError(f"invalid server image digest: {digest!r}")
     if compose.count(DEFAULT_IMAGE_MARKER) != 1:
@@ -41,7 +52,7 @@ def render_bootstrap(*, compose: str, bootstrap: str, digest: str) -> str:
     if HEREDOC_MARKER in compose:
         raise ValueError("canonical compose collides with the bootstrap heredoc marker")
 
-    pinned = f"image: ${{WEBCODEX_SERVER_IMAGE:-{SERVER_IMAGE}@{digest}}}"
+    pinned = f"image: ${{WEBCODEX_SERVER_IMAGE:-{image}@{digest}}}"
     compose = compose.replace(DEFAULT_IMAGE_MARKER, pinned, 1)
 
     required_bootstrap_markers = (
@@ -94,11 +105,13 @@ def prepare_assets(
     bootstrap_path: Path,
     output_dir: Path,
     digest: str,
+    repo: str = DEFAULT_REPOSITORY,
 ) -> dict[str, str]:
     rendered = render_bootstrap(
         compose=_read_text(compose_path),
         bootstrap=_read_text(bootstrap_path),
         digest=digest,
+        repo=repo,
     ).encode("utf-8")
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / BOOTSTRAP_ASSET
@@ -114,6 +127,7 @@ def main() -> int:
     parser.add_argument("--bootstrap", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--digest", required=True)
+    parser.add_argument("--repo", default=DEFAULT_REPOSITORY)
     parser.add_argument("--summary", type=Path)
     args = parser.parse_args()
 
@@ -122,6 +136,7 @@ def main() -> int:
         bootstrap_path=args.bootstrap,
         output_dir=args.output_dir,
         digest=args.digest,
+        repo=args.repo,
     )
     summary = json.dumps({"assets": assets}, indent=2, sort_keys=True) + "\n"
     if args.summary is not None:

@@ -20,6 +20,7 @@ mod tests;
 
 pub(crate) use evaluator::PermissionEvaluator;
 pub(crate) use model::{PermissionDecision, DEFAULT_PERMISSION_RECENT_LIMIT};
+#[cfg(test)]
 pub(crate) use policy::EffectiveAuthorityConfig;
 
 #[cfg(test)]
@@ -43,8 +44,8 @@ use super::tool_definition::runtime_tool_approval_policy;
 use super::tool_result::{RecoveryKind, ToolResult};
 
 /// Canonical authority profile (get_runtime_status / coding-task startup).
-pub(crate) fn authority_profile_payload() -> Value {
-    policy::authority_profile_payload_for(&EffectiveAuthorityConfig::from_env())
+pub(crate) fn authority_profile_payload(evaluator: &PermissionEvaluator) -> Value {
+    policy::authority_profile_payload_for(evaluator.config())
 }
 
 /// Evaluate interactive permission only when the canonical tool approval
@@ -86,8 +87,9 @@ pub(crate) fn add_permission_to_result(result: &mut ToolResult, permission: &Per
 pub(crate) fn permission_execution_denied_result(decision: &PermissionDecision) -> ToolResult {
     let message = match decision.reason.as_str() {
         policy::RESTRICTED_DENY_REASON => {
-            "permission denied: restricted authority mode requires human authorization \
-             for consequential tools"
+            "permission denied: restricted authority mode blocks consequential tools; \
+             no interactive approval queue is available. The Server operator must review \
+             WEBCODEX_AUTHORITY_MODE before execution can be enabled"
                 .to_string()
         }
         reason if reason.starts_with("invalid_authority_mode:") => format!(
@@ -153,7 +155,11 @@ pub(crate) fn is_hard_denied_output(output: &Value, error: Option<&str>) -> bool
         || lower.contains("path traversal")
 }
 
-pub(crate) fn permission_summary_from_events(events: &[SessionEvent], limit: usize) -> Value {
+pub(crate) fn permission_summary_from_events(
+    evaluator: &PermissionEvaluator,
+    events: &[SessionEvent],
+    limit: usize,
+) -> Value {
     let mut events_total = 0usize;
     let mut required_count = 0usize;
     let mut auto_approved_count = 0usize;
@@ -193,7 +199,7 @@ pub(crate) fn permission_summary_from_events(events: &[SessionEvent], limit: usi
     }
 
     let total_approved_count = manual_approved_count + auto_approved_count;
-    let config = EffectiveAuthorityConfig::from_env();
+    let config = evaluator.config();
 
     json!({
         "policy": config.mode_name(),

@@ -152,9 +152,11 @@ async fn restricted_blocks_mutation_before_agent_enqueue() {
     assert_ne!(result.output["permission"]["status"], "auto_approved");
     let err = result.error.as_deref().unwrap();
     assert!(
-        err.contains("restricted authority mode requires human authorization"),
+        err.contains("restricted authority mode blocks consequential tools"),
         "{err}"
     );
+    assert!(err.contains("no interactive approval queue"), "{err}");
+    assert!(err.contains("Server operator"), "{err}");
 
     assert!(
         probe_patch_agent_request(&runtime, client_id)
@@ -215,6 +217,55 @@ async fn invalid_mode_blocks_mutation_and_does_not_auto_approve() {
             .is_none(),
         "invalid mode must not enqueue mutation"
     );
+}
+
+#[tokio::test]
+async fn runtime_authority_diagnostics_use_the_execution_evaluator_snapshot() {
+    for (value, expected_mode, allows_execution) in [
+        ("trusted_agent", "trusted_agent", true),
+        ("restricted", "restricted", false),
+        ("invalid-mode", "invalid", false),
+    ] {
+        let runtime = runtime_with_config(
+            "authority-snapshot",
+            EffectiveAuthorityConfig::from_raw(Some(value)),
+        );
+        register_write_agent(&runtime, "authority-snapshot").await;
+        let auth = auth_context(None, true);
+
+        // These runtime-held evaluators coexist in the same process without
+        // environment mutation. Neither status path may re-read ambient policy.
+        for client_id in [None, Some("authority-snapshot".to_string())] {
+            let status = runtime
+                .runtime_status_with_options(Some(&auth), false, false, client_id)
+                .await;
+            assert!(status.success, "{:?}", status.error);
+            assert_eq!(status.output["authority"]["mode"], expected_mode);
+            assert_eq!(
+                status.output["authority"]["project_write"],
+                allows_execution
+            );
+            assert_eq!(
+                status.output["authority"]["human_approval_required"],
+                !allows_execution
+            );
+        }
+
+        let decision = runtime
+            .permission_evaluator
+            .evaluate("write_project_file", None)
+            .expect("write decision");
+        assert_eq!(decision.policy, expected_mode);
+        assert_eq!(decision.allows_execution(), allows_execution);
+        let summary = super::super::permissions::permission_summary_from_events(
+            &runtime.permission_evaluator,
+            &[],
+            10,
+        );
+        assert_eq!(summary["policy"], expected_mode);
+        assert_eq!(summary["human_approval_required"], !allows_execution);
+        assert_eq!(summary["events_total"], 0);
+    }
 }
 
 #[tokio::test]
@@ -581,8 +632,11 @@ async fn kernel_path_does_not_double_evaluate_or_duplicate_request_id() {
     assert_eq!(work[0]["tool_name"], "write_project_file");
     assert_eq!(work[0]["count"], 1);
     assert_eq!(summary.counts.tool_calls, 1);
-    let permission_summary =
-        super::super::permissions::permission_summary_from_events(&summary.events, 10);
+    let permission_summary = super::super::permissions::permission_summary_from_events(
+        &runtime.permission_evaluator,
+        &summary.events,
+        10,
+    );
     assert_eq!(permission_summary["events_total"], 1);
     assert_eq!(permission_summary["auto_approved_count"], 1);
 }

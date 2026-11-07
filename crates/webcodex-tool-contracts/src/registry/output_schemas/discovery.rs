@@ -156,6 +156,29 @@ pub(super) fn output_schema_for_tool(name: &str) -> Option<Value> {
                 authority_profile_schema("Canonical authority profile. trusted_agent is the self-hosted single-operator default and does not bypass hard safety checks (scopes, project boundary, read-only sessions, path policy)."),
             ),
             (
+                "authorization",
+                json!({
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Current caller's credential class and recorded known scopes in full diagnostics only. These do not imply Project ownership, Runner capability, OS permission, or that the authority mode permits execution. No credential values, hashes or principal identifiers are returned.",
+                    "properties": {
+                        "credential_kind": {
+                            "type": "string",
+                            "enum": ["none", "bootstrap", "api_token", "agent_token", "account_credential", "oauth2_token", "shared_key", "project_credential", "open_anonymous"],
+                            "description": "Authenticated request context class; none means no explicit context, not unrestricted access."
+                        },
+                        "granted_scopes": {
+                            "type": "array",
+                            "maxItems": webcodex_core::authority::KNOWN_SCOPES.len(),
+                            "uniqueItems": true,
+                            "items": {"type": "string", "enum": webcodex_core::authority::KNOWN_SCOPES},
+                            "description": "Known scope names present on the current credential, deduplicated in canonical order. admin is a super-scope and is not expanded into every scope. Unknown names are omitted."
+                        }
+                    },
+                    "required": ["credential_kind", "granted_scopes"]
+                }),
+            ),
+            (
                 "quic",
                 open_object_schema("QUIC transport status, when enabled."),
             ),

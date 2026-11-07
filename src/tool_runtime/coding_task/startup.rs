@@ -567,7 +567,7 @@ impl ToolRuntime {
             },
             "runtime_status": runtime_status.clone(),
             "connection_state": connection_state,
-            "authority": authority_profile_payload(),
+            "authority": authority_profile_payload(&self.permission_evaluator),
             "rules": rules_summary(Some(project_instructions)),
             "git": git.clone(),
             "semantic_navigation": semantic_navigation.clone(),

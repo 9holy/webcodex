@@ -525,14 +525,18 @@ jobs:
               --bootstrap deploy/docker/bootstrap.sh \
               --output-dir "$deployment_dir" \
               --digest "$digest" \
+              --repo "$GITHUB_REPOSITORY" \
               --summary "$deployment_summary" >/dev/null
-            python3 - "$metadata" "$deployment_summary" "$WORKFLOW_SHA" <<'PY'
+            python3 - "$metadata" "$deployment_summary" "$WORKFLOW_SHA" "$deployment_dir/$bootstrap_name" <<'PY'
           import json
           import os
           import re
           import sys
+          from pathlib import Path
 
-          metadata_path, deployment_path, workflow_sha = sys.argv[1:]
+          from scripts.verify_public_release import validate_server_image_release_record
+
+          metadata_path, deployment_path, workflow_sha, bootstrap_path = sys.argv[1:]
           value = json.load(open(metadata_path, encoding="utf-8"))
           deployment = json.load(open(deployment_path, encoding="utf-8"))
           assets = deployment.get("assets")
@@ -542,6 +546,14 @@ jobs:
               raise SystemExit("publication workflow source SHA is invalid")
           value["deployment_source_sha"] = workflow_sha
           value["deployment_assets"] = assets
+          # Reject a wrong publisher/digest before changing mutable image aliases
+          # or uploading either immutable deployment asset to GitHub Releases.
+          validate_server_image_release_record(
+              value,
+              value["version"],
+              Path(bootstrap_path).read_bytes(),
+              repo=os.environ["GITHUB_REPOSITORY"],
+          )
           tmp = metadata_path + ".tmp"
           with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
               json.dump(value, handle, indent=2, sort_keys=True)

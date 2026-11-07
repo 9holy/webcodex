@@ -75,7 +75,7 @@ pub(super) const DEFINITIONS: &[ToolDefinition] = &[
             false,
             super::ToolSessionEvidencePolicy::NONE,
         ),
-        "Observe bounded normalized events and lifecycle for one existing CodingAgentRun. Return the opaque token for only-new follow-ups; history loss/reset is explicit. Observation never starts, retries, or resumes ACP work.",
+        "Observe one existing CodingAgentRun with bounded events and Run-bound tokens for only-new follow-ups; history loss/reset is explicit. waiting_permission has no WebCodex approval UI/API: at its deadline the Runner answers ACP Cancelled. Observe the same Run for the provider's terminal outcome or explicitly cancel_coding_agent. Observation never starts, retries, resumes or approves ACP work.",
     ),
     permission_risk(
         model_spec(

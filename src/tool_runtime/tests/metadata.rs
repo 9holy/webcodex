@@ -2280,6 +2280,150 @@ async fn runtime_status_with_no_projects_returns_configured_false() {
 }
 
 #[tokio::test]
+async fn runtime_status_authorization_is_current_caller_only_and_bounded() {
+    use crate::auth::{AuthContext, AuthKind};
+    use webcodex_core::authority::KNOWN_SCOPES;
+
+    // Deployment authentication metadata is not the caller's credential grant.
+    let runtime = runtime_with_info(RuntimeInfo {
+        auth_enabled: false,
+        ..RuntimeInfo::default()
+    });
+    let output_schema = webcodex_tool_contracts::output_schema_for_tool("get_runtime_status");
+    let authorization_schema =
+        &output_schema["properties"]["output"]["properties"]["authorization"];
+    let absent = runtime.runtime_status(None).await;
+    assert_eq!(
+        absent.output["authorization"],
+        json!({"credential_kind": "none", "granted_scopes": []})
+    );
+    webcodex_tool_contracts::test_support::validate_schema_instance(
+        &absent.output["authorization"],
+        authorization_schema,
+    )
+    .unwrap();
+
+    for (kind, expected_kind) in [
+        (AuthKind::ApiToken, "api_token"),
+        (AuthKind::OAuth2Token, "oauth2_token"),
+        (AuthKind::SharedKey, "shared_key"),
+        (AuthKind::ProjectCredential, "project_credential"),
+        (AuthKind::OpenAnonymous, "open_anonymous"),
+    ] {
+        let mut auth = AuthContext::new(kind);
+        auth.scopes = vec![
+            "project:read".to_string(),
+            "runtime:read".to_string(),
+            "runtime:read".to_string(),
+            "private-diagnostic-sentinel".repeat(128),
+        ];
+        auth.user_id = Some("private-diagnostic-sentinel-user".to_string());
+        auth.username = Some("private-diagnostic-sentinel-name".to_string());
+        auth.api_key_id = Some("private-diagnostic-sentinel-key".to_string());
+        auth.role = Some("admin".to_string());
+        auth.token_kind = Some("private-diagnostic-sentinel-kind".to_string());
+        auth.allowed_client_id = Some("private-diagnostic-sentinel-client".to_string());
+        auth.shared_key_hash = Some("private-diagnostic-sentinel-hash".to_string());
+        auth.project_grant_id = Some("private-diagnostic-sentinel-grant".to_string());
+        auth.project_root_scopes = vec![PathBuf::from("/private-diagnostic-sentinel")];
+
+        let status = runtime.runtime_status(Some(&auth)).await;
+        assert!(status.success, "{:?}", status.error);
+        let authorization = &status.output["authorization"];
+        webcodex_tool_contracts::test_support::validate_schema_instance(
+            authorization,
+            authorization_schema,
+        )
+        .unwrap();
+        assert_eq!(
+            authorization,
+            &json!({
+                "credential_kind": expected_kind,
+                "granted_scopes": ["runtime:read", "project:read"]
+            })
+        );
+        assert!(authorization["granted_scopes"].as_array().unwrap().len() <= KNOWN_SCOPES.len());
+        assert!(!authorization
+            .to_string()
+            .contains("private-diagnostic-sentinel"));
+        assert!(!authorization["granted_scopes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|scope| scope == "admin"));
+    }
+
+    let bootstrap = auth_context(None, true);
+    let status = runtime.runtime_status(Some(&bootstrap)).await;
+    assert_eq!(
+        status.output["authorization"],
+        json!({"credential_kind": "bootstrap", "granted_scopes": ["admin"]})
+    );
+    let mut forbidden = status.output["authorization"].clone();
+    forbidden["token_hash"] = json!("private-diagnostic-sentinel");
+    assert!(
+        webcodex_tool_contracts::test_support::validate_schema_instance(
+            &forbidden,
+            authorization_schema,
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn runtime_status_authorization_preserves_runner_visibility_and_sparse_output() {
+    let runtime = test_runtime();
+    for (client_id, owner) in [
+        ("owned-status-runner", "alice"),
+        ("foreign-status-runner", "bob"),
+    ] {
+        let mut registration = metadata_agent_registration(client_id);
+        registration.owner = Some(owner.to_string());
+        runtime
+            .runner_registry
+            .register(registration)
+            .await
+            .unwrap();
+    }
+    let mut auth = auth_context(Some("alice"), false);
+    auth.scopes = vec![crate::auth::SCOPE_RUNTIME_READ.to_string()];
+    for arguments in [json!({}), json!({"client_id": "owned-status-runner"})] {
+        let result = runtime
+            .dispatch_with_auth(
+                ToolCall::from_tool_name("get_runtime_status", arguments).unwrap(),
+                Some(&auth),
+            )
+            .await;
+        assert!(result.success, "{:?}", result.error);
+        assert_eq!(
+            result.output["authorization"],
+            json!({"credential_kind": "api_token", "granted_scopes": ["runtime:read"]})
+        );
+        assert_eq!(result.output["runners"]["count"], 1);
+        assert!(!result.output.to_string().contains("foreign-status-runner"));
+    }
+    let foreign = runtime
+        .runtime_status_with_options(
+            Some(&auth),
+            false,
+            false,
+            Some("foreign-status-runner".to_string()),
+        )
+        .await;
+    assert!(!foreign.success);
+    assert_eq!(foreign.output["error_kind"], "unknown_client_id");
+    assert!(foreign.output.get("authorization").is_none());
+
+    for (compact, summary_only) in [(true, false), (false, true)] {
+        let sparse = runtime
+            .runtime_status_with_options(Some(&auth), compact, summary_only, None)
+            .await;
+        assert!(sparse.success);
+        assert!(sparse.output.get("authorization").is_none());
+    }
+}
+
+#[tokio::test]
 async fn runtime_status_uses_agent_projects_as_effective() {
     let runtime = test_runtime();
     let mut smoke = registered_project("webcodex-smoke", "/tmp/webcodex-smoke");
@@ -2620,6 +2764,7 @@ async fn runtime_status_compact_and_summary_only_return_sanitized_summary() {
         assert_eq!(summary["projects"]["status"], "ok");
         for field in [
             "authority",
+            "authorization",
             "effective_config",
             "tools",
             "auth_enabled",
@@ -2667,8 +2812,18 @@ async fn runtime_status_does_not_expose_tokens_or_secrets() {
     let runtime = runtime_with_info(info);
     let result = runtime.dispatch(runtime_status_call()).await;
     assert!(result.success);
-    let serialized = serde_json::to_string(&result.output).unwrap();
-    // The summary must never contain secret-like field names.
+    // Only this closed, already schema-validated caller diagnostic may use the
+    // name `authorization`; it is never an HTTP Authorization header or value.
+    let mut public_output = result.output.clone();
+    assert_eq!(
+        public_output
+            .as_object_mut()
+            .unwrap()
+            .remove("authorization"),
+        Some(json!({"credential_kind": "none", "granted_scopes": []}))
+    );
+    let serialized = serde_json::to_string(&public_output).unwrap();
+    // Other output must never contain secret-like field names.
     for forbidden in [
         "token",
         "WEBCODEX_TOKEN",

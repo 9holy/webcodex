@@ -2474,6 +2474,52 @@ fn mcp_execution_descriptions_share_canonical_source_across_surfaces() {
 }
 
 #[test]
+fn mcp_coding_agent_permission_guidance_survives_compact_discovery() {
+    let canonical = webcodex_tool_contracts::lookup_tool_definition("observe_coding_agent")
+        .unwrap()
+        .model_spec
+        .unwrap()
+        .description;
+    assert!(canonical.chars().count() <= crate::mcp::discovery::TOOL_DESCRIPTION_MAX_CHARS);
+    for app_only in [false, true] {
+        let mut descriptor = json!({
+            "name": "observe_coding_agent",
+            "description": canonical,
+            "inputSchema": webcodex_tool_contracts::input_schema_for_tool("observe_coding_agent"),
+        });
+        if app_only {
+            descriptor["_meta"] = json!({"ui": {"visibility": ["app"]}});
+        }
+        crate::mcp::discovery::compact_tool(&mut descriptor);
+        let description = descriptor["description"].as_str().unwrap();
+        if app_only {
+            assert!(description.len() <= 100);
+            for fact in [
+                "same Run",
+                "never redispatch",
+                "waiting_permission",
+                "no approval UI/API",
+                "ACP Cancelled",
+            ] {
+                assert!(description.contains(fact), "{fact}: {description}");
+            }
+            continue;
+        }
+        assert_eq!(description, canonical);
+        for fact in [
+            "waiting_permission",
+            "no WebCodex approval UI/API",
+            "answers ACP Cancelled",
+            "same Run",
+            "cancel_coding_agent",
+            "never starts, retries, resumes or approves",
+        ] {
+            assert!(description.contains(fact), "{fact}: {description}");
+        }
+    }
+}
+
+#[test]
 fn mcp_compact_descriptions_preserve_selection_and_schema_literals() {
     use crate::mcp::discovery::{
         bound_description, compact_tool, INPUT_DESCRIPTION_MAX_CHARS, TOOL_DESCRIPTION_MAX_CHARS,

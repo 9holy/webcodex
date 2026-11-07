@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -170,6 +171,32 @@ class NativeManifestCollectorTests(unittest.TestCase):
             self.assertEqual(collector.package.tree_digest(staged_bundle), collector.package.tree_digest(bundle))
             validated = collector.package.validate_manifest(manifest_path, output / "SHA256SUMS", output, "darwin-arm64")
             self.assertEqual(validated["desktop_payload"]["path"], manifest["desktop_payload"]["path"])
+
+    @unittest.skipUnless(shutil.which("bash") and shutil.which("shasum"), "macOS staging requires Bash and shasum")
+    def test_macos_workflow_stages_manifest_before_packager_creates_dist(self):
+        workflow = (SCRIPTS.parent / ".github/workflows/release-build.yml").read_text(encoding="utf-8")
+        macos = workflow.split("      - name: Collect and package macOS installer", 1)[1].split("      - name:", 1)[0]
+        # Run the actual staging commands after collection and before the
+        # packager (which also creates dist). A clean native job has no dist yet.
+        staging = macos.split("--output-dir unified-candidate\n", 1)[1].split("python3 scripts/package_unified_installer.py", 1)[0]
+        for platform in ("darwin-x64", "darwin-arm64"):
+            with self.subTest(platform=platform), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                candidate = root / "unified-candidate"
+                candidate.mkdir()
+                manifest = json.dumps({"source_sha": SOURCE, "platform": platform}).encode() + b"\n"
+                (candidate / "source-manifest.json").write_bytes(manifest)
+                self.assertFalse((root / "dist").exists())
+                result = subprocess.run(
+                    [shutil.which("bash"), "-c", "set -euo pipefail\n" + staging],
+                    cwd=root, input="", capture_output=True, text=True, timeout=5,
+                    env={"PATH": os.environ.get("PATH", ""), "VERSION": "0.9.0", "PLATFORM": platform},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                source_name = f"webcodex-source-v0.9.0-{platform}.json"
+                self.assertEqual((root / "dist" / source_name).read_bytes(), manifest)
+                checksum = (root / "dist" / f"{source_name}.sha256").read_text(encoding="utf-8")
+                self.assertEqual(checksum, f"{hashlib.sha256(manifest).hexdigest()}  dist/{source_name}\n")
 
     def test_windows_collection_preserves_exe_paths_for_core_preflight(self):
         with tempfile.TemporaryDirectory() as temp:

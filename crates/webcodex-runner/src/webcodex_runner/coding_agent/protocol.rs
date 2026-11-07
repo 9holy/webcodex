@@ -419,7 +419,10 @@ pub(super) fn permission_event(params: &Value) -> CodingAgentEvent {
     CodingAgentEvent {
         sequence: 0,
         kind: CodingAgentEventKind::PermissionRequest,
-        text: None,
+        text: Some(
+            "WebCodex has no approval UI/API for this ACP permission request. When the bounded deadline expires, the Runner answers ACP Cancelled. Observe this same Run for the provider's terminal outcome, or explicitly cancel_coding_agent; do not redispatch."
+                .to_string(),
+        ),
         label,
         status: Some(format!("pending:{count}_options")),
         usage: None,

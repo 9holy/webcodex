@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
 from scripts import prepare_server_deployment_assets as assets
+from scripts import verify_public_release as verifier
 
 ROOT = Path(__file__).resolve().parents[2]
 BOOTSTRAP = ROOT / "deploy" / "docker" / "bootstrap.sh"
@@ -80,6 +84,100 @@ class DeploymentAssetTests(unittest.TestCase):
                     output_dir=Path(temp) / "out",
                     digest="latest",
                 )
+
+    def test_fork_cli_bootstrap_matches_its_release_record(self) -> None:
+        for repo in ("9holy/webcodex", "Example-Owner/webcodex"):
+            with self.subTest(repo=repo), tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "out"
+                summary = Path(temp) / "summary.json"
+                completed = subprocess.run(
+                    [sys.executable, str(ROOT / "scripts/prepare_server_deployment_assets.py"),
+                     "--compose", str(COMPOSE), "--bootstrap", str(BOOTSTRAP),
+                     "--output-dir", str(output), "--digest", DIGEST, "--repo", repo,
+                     "--summary", str(summary)],
+                    input="", capture_output=True, text=True, timeout=5, check=True,
+                )
+                self.assertEqual(json.loads(completed.stdout), json.loads(summary.read_text()))
+                bootstrap = (output / assets.BOOTSTRAP_ASSET).read_bytes()
+                image = f"ghcr.io/{repo.split('/')[0].lower()}/webcodex-server"
+                metadata = {
+                    "schema_version": 1, "image": image, "tag": "v0.5.1", "version": "0.5.1",
+                    "image_tag": "v0.5.1", "deployment_source_sha": "1" * 40,
+                    "source_sha": "2" * 40, "created_at": "2026-11-07T00:00:00Z",
+                    "digest": DIGEST, "deployment_assets": json.loads(summary.read_text())["assets"],
+                    "platforms": {"linux/amd64": "sha256:" + "b" * 64,
+                                  "linux/arm64": "sha256:" + "c" * 64},
+                }
+                verifier.validate_server_image_release_record(metadata, "0.5.1", bootstrap, repo=repo)
+                self.assertIn(f"{image}@{DIGEST}", bootstrap.decode())
+                self.assertNotIn(f"{assets.SERVER_IMAGE}@", bootstrap.decode())
+                # A correct byte hash alone must not authorize another publisher.
+                with self.assertRaises(verifier.VerificationError):
+                    verifier.validate_server_image_release_record(metadata, "0.5.1", bootstrap)
+                subprocess.run(
+                    ["sh", "-n", output / assets.BOOTSTRAP_ASSET],
+                    stdin=subprocess.DEVNULL, capture_output=True, timeout=5, check=True,
+                )
+
+    def test_invalid_publisher_is_rejected_before_creating_assets(self) -> None:
+        for repo in ("", "https://github.com/9holy/webcodex", "9holy/webcodex/extra",
+                     "../webcodex", "9holy/..", "9holy/webcodex\n", "$(id)/webcodex",
+                     "9holy/webcodex:latest", "9holy/webcodex#comment"):
+            with self.subTest(repo=repo), tempfile.TemporaryDirectory() as temp:
+                output = Path(temp) / "out"
+                with self.assertRaisesRegex(ValueError, "invalid GitHub repository"):
+                    assets.prepare_assets(
+                        compose_path=COMPOSE, bootstrap_path=BOOTSTRAP,
+                        output_dir=output, digest=DIGEST, repo=repo,
+                    )
+                self.assertFalse(output.exists())
+
+    def test_publication_validates_generated_record_before_aliases_or_uploads(self) -> None:
+        workflow = (ROOT / ".github/workflows/release-image.yml").read_text(encoding="utf-8")
+        marker = 'python3 - "$metadata" "$deployment_summary" "$WORKFLOW_SHA" "$deployment_dir/$bootstrap_name" <<\'PY\''
+        script = textwrap.dedent(workflow.split(marker, 1)[1].split("          PY\n", 1)[0])
+        validation_position = workflow.index(marker)
+        self.assertLess(validation_position, workflow.index('docker buildx imagetools create -t "$numeric_ref"'))
+        self.assertLess(validation_position, workflow.index('docker buildx imagetools create -t "$IMAGE:latest"'))
+        self.assertLess(validation_position, workflow.index('gh release upload "$TAG" "$asset"'))
+
+        # Execute the checked-in publication adapter with a freshly rendered
+        # bootstrap and a deliberately mismatched publisher. It must leave the
+        # metadata unchanged, before any publication command can run.
+        for bootstrap_repo, accepted in (("9holy/webcodex", True), (assets.DEFAULT_REPOSITORY, False)):
+            with self.subTest(bootstrap_repo=bootstrap_repo), tempfile.TemporaryDirectory() as temp:
+                root = Path(temp)
+                output = root / "out"
+                generated = assets.prepare_assets(
+                    compose_path=COMPOSE, bootstrap_path=BOOTSTRAP,
+                    output_dir=output, digest=DIGEST, repo=bootstrap_repo,
+                )
+                summary = root / "summary.json"
+                summary.write_text(json.dumps({"assets": generated}), encoding="utf-8")
+                metadata = root / "metadata.json"
+                original = json.dumps({
+                    "schema_version": 1, "image": "ghcr.io/9holy/webcodex-server",
+                    "tag": "v0.5.1", "version": "0.5.1", "image_tag": "v0.5.1",
+                    "source_sha": "2" * 40, "created_at": "2026-11-07T00:00:00Z", "digest": DIGEST,
+                    "platforms": {"linux/amd64": "sha256:" + "b" * 64,
+                                  "linux/arm64": "sha256:" + "c" * 64},
+                })
+                metadata.write_text(original, encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, "-", str(metadata), str(summary), "1" * 40,
+                     str(output / assets.BOOTSTRAP_ASSET)],
+                    input=script, capture_output=True, text=True, timeout=5, cwd=ROOT,
+                    env={**os.environ, "GITHUB_REPOSITORY": "9holy/webcodex"},
+                )
+                self.assertEqual(result.returncode == 0, accepted, result.stderr)
+                if accepted:
+                    verified = json.loads(metadata.read_text())
+                    self.assertEqual(verified["deployment_assets"], generated)
+                    self.assertEqual(verified["deployment_source_sha"], "1" * 40)
+                else:
+                    self.assertIn("not pinned to the recorded image digest", result.stderr)
+                    self.assertEqual(metadata.read_text(), original)
+                    self.assertFalse(Path(str(metadata) + ".tmp").exists())
 
 
 class BootstrapTests(unittest.TestCase):

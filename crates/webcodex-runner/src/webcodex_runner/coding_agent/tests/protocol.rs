@@ -846,8 +846,25 @@ fn config_and_permission_paths_are_fail_closed() {
     assert_eq!(obs.run.state, CodingAgentRunState::Completed);
     let (_, _, permission) = run_scenario("permission", BTreeMap::new());
     assert_eq!(permission.run.state, CodingAgentRunState::Cancelled);
-    assert!(permission
+    let event = permission
         .events
         .iter()
-        .any(|e| e.kind == CodingAgentEventKind::PermissionRequest));
+        .find(|event| event.kind == CodingAgentEventKind::PermissionRequest)
+        .expect("the cancelled callback remains observable");
+    assert_eq!(event.label.as_deref(), Some("permission"));
+    assert_eq!(event.status.as_deref(), Some("pending:1_options"));
+    let text = event
+        .text
+        .as_deref()
+        .expect("permission limitation guidance");
+    for fact in [
+        "no approval UI/API",
+        "bounded deadline",
+        "answers ACP Cancelled",
+        "Observe this same Run",
+        "cancel_coding_agent",
+        "do not redispatch",
+    ] {
+        assert!(text.contains(fact), "{fact}: {text}");
+    }
 }
