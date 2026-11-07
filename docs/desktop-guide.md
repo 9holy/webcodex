@@ -135,9 +135,19 @@ Paths appear as individual rows. Pick a file or folder, or enter its full path. 
 
 Saving paths or registering a Plugin does not start it or silently restart the Runner. **Restart Desktop-owned Runner** explicitly applies saved configuration, interrupts its current work, and keeps Server and regular Tunnel processes. An independently managed Runner must be restarted by its actual owner.
 
+## Add an SSH server
+
+In **Extensions → SSH resources**, enter a resource name, host or IP, port (normally 22), username, and optional remote working directory. Choose the existing system authentication, a password, or a private-key file on the Runner machine; encrypted keys also accept a passphrase. The advanced alias option uses an existing OpenSSH configuration.
+
+Inspect the server's host-key fingerprint and confirm it against your server information, then choose **Test connection**. Save a successfully tested connection and apply the requested Runner restart. Changing the endpoint, authentication or host key invalidates the previous verification. A loaded resource means the configuration is available; the connection test establishes whether login works. Upgrade Desktop, Server and Runner together for this setup flow.
+
+Chat uses the saved resource name for remote shell commands, Jobs and persistent Shells. The password or passphrase stays in protected storage on the Runner machine and is not returned to Chat. Selecting an SSH resource does not move local Project files or change the target of file/Git/LSP tools; use the selected remote Shell for remote operations. See [Runner SSH resources](RUNNER.md) for the execution boundary.
+
 ## Configure Codex and review coding approvals
 
 In **Extensions → Coding agents**, choose **Configure Codex (experimental)**, then **Check and prepare**. Desktop finds the installed Python and Codex executables automatically. Python 3.10+ and an existing Codex login or API configuration are required. If detection fails, **Advanced** lets you select the executables; normal setup does not require editing TOML or entering launcher arguments.
+
+Select **Allow network access** during preparation when future Codex tasks need to download dependencies or contact a deployment service. The option is off by default and takes effect after saving, enabling the profile and restarting Runner. Project write roots and operation approvals remain separate; external services still use the credentials configured for the running account.
 
 After the compatibility check succeeds, choose **Save and enable Codex**. Desktop saves the checked configuration through the same ownership and revision checks as other coding agents. Then use **Restart Runner** in the apply bar. Preparation itself creates a disabled draft and never grants permissions, starts a Run, or restarts a service. Saving a replacement for an existing Desktop-managed Codex profile is explicit. Exact version, launcher and environment-variable names are available under **Details**. An incompatible Codex upgrade requires preparation again; see the [adapter guide](../integrations/codex_app_server/README.md).
 
@@ -146,6 +156,8 @@ Choose **Review approvals** in the same Coding agents page, or **Runtime → App
 Delegating work and deciding approval requests are separate permissions. The existing **Authorize Runner capabilities** action grants coding delegation and SSH resource access. **Authorize coding approvals** is a separate local operator action with an unchecked consent box; it grants only approval access, and existing delegation and Project write access are still required. This enables an approval capability for the trusted client, not proof of a human identity. Every client given the same credential shares its approval capability. Existing OAuth client grants are not widened automatically. A remote connection needs authorization from its Server operator.
 
 New installations wait up to five minutes for a permission response, subject to the Run's remaining deadline. An existing shorter saved timeout remains in force. You can change the timeout under a coding agent's **Advanced → Global settings**; supported values are 1–600 seconds.
+
+For deployments that need a process to continue after its launching call ends, use **Settings → Files & permissions → Long-running background processes**. This grants the separate `job:detach` capability to the displayed local connection. Chat using another OAuth client or token needs that connection's own grant. The OAuth configuration can explicitly include background processes, SSH and coding agents; replacing an existing client's credentials requires reconnecting with the new client information and authorizing it again. Merely reconnecting an unchanged client does not expand its scopes.
 
 ## macOS permission guidance
 

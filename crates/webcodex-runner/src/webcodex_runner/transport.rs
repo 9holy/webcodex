@@ -87,6 +87,14 @@ use websocket_connect::{
 pub(crate) const WS_OUTGOING_CAPACITY: usize = 64;
 /// WebSocket ping interval.
 const WS_PING_INTERVAL: Duration = Duration::from_secs(30);
+/// Three application ping periods, leaving one period beyond the Server's
+/// 60-second online window. Successful local writes do not prove peer liveness.
+const STREAM_PEER_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+/// A timed-out write may have sent a partial frame. Discard the whole connection
+/// and preserve uncertainty; never retry that frame or its operation here.
+const STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Registration writes need a bound too, before waiting for their acknowledgement.
+const STREAM_REGISTER_TIMEOUT: Duration = Duration::from_secs(10);
 /// Bounded reconnect backoff after a transport disconnect or transient error.
 const RECONNECT_BACKOFF_STEPS: [Duration; 5] = [
     Duration::from_secs(1),
@@ -255,8 +263,8 @@ use quic::{quic_session, run_quic_runner};
 #[cfg(test)]
 use stream::{finish_quic_writer, StreamRead};
 use stream::{
-    serve_registered_stream, wait_for_quic_peer_close, RegisteredStream, RunnerWebSocket,
-    StreamWriterExit,
+    serve_registered_stream, wait_for_quic_peer_close, write_stream_frame, RegisteredStream,
+    RunnerWebSocket, StreamWriterExit,
 };
 use stream_envelopes::{handle_stream_envelope, registered_ack};
 pub(crate) use supervisor::RunnerSessionExit;

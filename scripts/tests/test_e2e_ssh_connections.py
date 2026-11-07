@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import shutil
 import tempfile
@@ -9,7 +10,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
-from scripts.e2e_ssh_connections import ConnectionAcceptance, HostTools, SshFixture, channel_input, git_posix_tools
+from scripts.e2e_ssh_connections import ConnectionAcceptance, HostTools, SshFixture, acl_failure_details, channel_input, git_posix_tools, secure_fixture_path
 
 
 class Channel:
@@ -52,12 +53,39 @@ class SshFixtureInputTests(unittest.TestCase):
             root = Path(directory)
             fixture = SimpleNamespace(remote_cwd="/remote", port=1, user="fixture", password="fixture")
             tools = HostTools(Path("unused"), "fixture-path", {})
-            with mock.patch.dict(os.environ, {"APPDATA": "foreign-roaming", "LOCALAPPDATA": "foreign-local"}), \
+            ambient = {"APPDATA": root / "foreign-roaming", "LOCALAPPDATA": root / "foreign-local"}
+            for path in ambient.values():
+                path.mkdir()
+            with mock.patch.dict(os.environ, {name: str(path) for name, path in ambient.items()}), \
                     mock.patch("scripts.e2e_ssh_connections.SshFixture", return_value=fixture):
                 acceptance = ConnectionAcceptance(root, root, tools)
             for variable, name in [("APPDATA", "roaming"), ("LOCALAPPDATA", "local")]:
                 self.assertEqual(acceptance.env[variable], str(root / name))
                 self.assertTrue((root / name).is_dir())
+            # Exercise both DirectorySecurity and FileSecurity before expensive
+            # native builds, with only a newly created fixture-owned file.
+            private_file = root / "local" / "private-fixture"
+            private_file.write_bytes(b"owned fixture payload")
+            secure_fixture_path(private_file)
+            self.assertEqual(private_file.read_bytes(), b"owned fixture payload")
+
+    def test_acl_failure_reports_only_bounded_stage_and_os_error_metadata(self):
+        secret = "fixture-credential-and-private-path"
+        result = SimpleNamespace(returncode=1, stderr=secret.encode(), stdout=json.dumps({
+            "stage": "persist", "exception_type": "System.UnauthorizedAccessException",
+            "hresult": -2147024891, "native_code": 5, "message": secret, "path": secret,
+        }).encode())
+        details = acl_failure_details(result)
+        self.assertNotIn(secret, details)
+        self.assertEqual(json.loads(details), {
+            "stage": "persist", "exit_code": 1,
+            "exception_type": "System.UnauthorizedAccessException", "hresult": -2147024891, "native_code": 5,
+        })
+        for payload in [secret.encode(), b"x" * 4097, json.dumps({"stage": [secret]}).encode(), json.dumps({
+            "stage": secret, "exception_type": secret, "hresult": secret, "native_code": 2**40,
+        }).encode()]:
+            result.stdout = payload
+            self.assertEqual(json.loads(acl_failure_details(result)), {"stage": "powershell_start", "exit_code": 1})
 
     def test_git_remote_shell_is_resolved_from_powershell_and_git_bash_layouts(self):
         with tempfile.TemporaryDirectory(prefix="webcodex-ssh-tools-") as directory:

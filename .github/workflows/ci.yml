@@ -923,10 +923,25 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Native installer gate cannot skip without NSIS" }
           python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native -v
           if ($LASTEXITCODE -ne 0) { throw "Native installer directory/upgrade contracts failed" }
+      - name: Test native SSH acceptance fixture before compiling Desktop
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # Keep this Python environment outside the subsequently restored Rust cache.
+          $venv = Join-Path $env:RUNNER_TEMP "webcodex-ssh-acceptance-venv"
+          python -m venv $venv
+          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance virtual environment creation failed" }
+          $python = Join-Path $venv "Scripts\python.exe"
+          & $python -m pip install --disable-pip-version-check paramiko==4.0.0
+          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance dependencies failed" }
+          & $python -B -m unittest scripts.tests.test_e2e_ssh_connections -v
+          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance fixture regressions failed" }
+          "WEBCODEX_SSH_ACCEPTANCE_PYTHON=$python" >> $env:GITHUB_ENV
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: windows-desktop-ci
+          cache-on-failure: true
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -979,21 +994,6 @@ jobs:
           "short=$short" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "built_at=$builtAt" >> $env:GITHUB_OUTPUT
-      - name: Verify native Windows OpenSSH password onboarding and remote execution
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          python -m venv target/ssh-acceptance-venv
-          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance virtual environment creation failed" }
-          $python = Join-Path "target\ssh-acceptance-venv\Scripts" "python.exe"
-          & $python -m pip install --disable-pip-version-check paramiko==4.0.0
-          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance dependencies failed" }
-          & $python -B -m unittest scripts.tests.test_e2e_ssh_connections -v
-          if ($LASTEXITCODE -ne 0) { throw "SSH acceptance input/EOF regressions failed" }
-          # The script pins System32 OpenSSH and refuses Git's SSH client.
-          # Git Bash is only the Paramiko server's disposable remote shell.
-          & $python scripts/e2e_ssh_connections.py --bin-dir target/dogfood
-          if ($LASTEXITCODE -ne 0) { throw "Native Windows SSH authentication/remote execution failed" }
       - name: Stage exact runtime for Desktop bundle
         id: desktop_bundle
         shell: pwsh
@@ -1058,6 +1058,14 @@ jobs:
             -InstallDir (Join-Path $env:RUNNER_TEMP "WebCodex Upstream Upgrade") `
             -PreviousInstaller $previous `
             -PreviousInstallerSha256 "dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6"
+      - name: Verify native Windows OpenSSH password onboarding and remote execution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # The script pins System32 OpenSSH and refuses Git's SSH client.
+          # Git Bash is only the Paramiko server's disposable remote shell.
+          & $env:WEBCODEX_SSH_ACCEPTANCE_PYTHON scripts/e2e_ssh_connections.py --bin-dir target/dogfood
+          if ($LASTEXITCODE -ne 0) { throw "Native Windows SSH authentication/remote execution failed" }
 
   test-windows:
     needs: [contract, changes, test-windows-core, test-windows-runner, test-windows-package, test-windows-desktop]

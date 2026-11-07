@@ -546,6 +546,18 @@ Server 会把稳定的 Runner `client_id` 与当前 live process lease 分开。
 
 重连以短延迟自动进行。`auto` 降级到 polling 后不会永久停留：30 秒后，在没有未完成 HTTP dispatch 的安全边界重试首选流式传输（已配置的 QUIC，然后 WebSocket）。HTTP dispatch 忙时继续 polling，避免阻断存活检测和控制请求；正在运行的 Job 不等待结束、不重启。流式连接失败则继续 polling。网络超时、注册超时和退避也计入恢复耗时，因此 30 秒不是端到端恢复时限。显式 `polling` 仍保持 polling，显式 `websocket` 则持续重试 WebSocket。
 
+WebSocket 或 QUIC 流即使表面保持连接，也不能无限等待操作系统报告网络故障。
+已注册的 Runner 如果连续 90 秒（三个 30 秒 Ping 周期）未收到有效的应用层消息，
+会丢弃该连接，并保留同一 Runner 实例和 Job inventory 自动重连。正常 Pong 或
+其他合法入站消息会续期；本地成功发出 Ping 不算对端仍在响应。已注册连接的
+单帧发送上限为 30 秒；注册消息发送与等待注册确认分别限时 10 秒。这些期限
+只决定何时开始恢复，重新可用还取决于重连退避、网络和认证结果。
+
+重连不会重启 Job、更改 scope 或 policy，也不会重放命令。被取消的发送可能
+已经到达对端，因此普通请求如果丢失结果，仍保留不确定状态。Job 仅通过既有的
+inventory 与 update-sequence 机制协调恢复；绑定连接的 persistent shell 仍按
+原断连规则关闭，不会被悄悄重新创建。
+
 Runner 准入和 Server inventory 校验共用语义 shell 合同，包含 `python`，不接受 `python3` 等具体解释器名称作为语义身份。普通 Job 的开始、结束时间保证不早于因果上的前一个时间戳，覆盖启动、终态以及准入阶段直接拒绝；执行耗时仍独立测量，避免跨主机时钟偏差把正常执行后的 inventory 判为无效。
 
 注册明确返回 `job inventory shell is invalid` 或 `job inventory timestamps are inconsistent` 时，保留同一 Runner 实例和完整 Job inventory，以有界退避重试，不通过清空 active inventory 换取注册成功。持续拒绝仍需调查或更新有缺陷的组件；重试本身不代表已恢复。认证、身份/归属、协议及其他致命错误仍严格停止 Runner。操作系统 supervisor 应保持启用，但它重启进程不能代替同进程的 Job 恢复。
