@@ -2812,8 +2812,18 @@ async fn runtime_status_does_not_expose_tokens_or_secrets() {
     let runtime = runtime_with_info(info);
     let result = runtime.dispatch(runtime_status_call()).await;
     assert!(result.success);
-    let serialized = serde_json::to_string(&result.output).unwrap();
-    // The summary must never contain secret-like field names.
+    // Only this closed, already schema-validated caller diagnostic may use the
+    // name `authorization`; it is never an HTTP Authorization header or value.
+    let mut public_output = result.output.clone();
+    assert_eq!(
+        public_output
+            .as_object_mut()
+            .unwrap()
+            .remove("authorization"),
+        Some(json!({"credential_kind": "none", "granted_scopes": []}))
+    );
+    let serialized = serde_json::to_string(&public_output).unwrap();
+    // Other output must never contain secret-like field names.
     for forbidden in [
         "token",
         "WEBCODEX_TOKEN",

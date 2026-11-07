@@ -2492,7 +2492,20 @@ fn mcp_coding_agent_permission_guidance_survives_compact_discovery() {
         }
         crate::mcp::discovery::compact_tool(&mut descriptor);
         let description = descriptor["description"].as_str().unwrap();
-        assert_eq!(description, canonical, "app_only={app_only}");
+        if app_only {
+            assert!(description.len() <= 100);
+            for fact in [
+                "same Run",
+                "never redispatch",
+                "waiting_permission",
+                "no approval UI/API",
+                "ACP Cancelled",
+            ] {
+                assert!(description.contains(fact), "{fact}: {description}");
+            }
+            continue;
+        }
+        assert_eq!(description, canonical);
         for fact in [
             "waiting_permission",
             "no WebCodex approval UI/API",
