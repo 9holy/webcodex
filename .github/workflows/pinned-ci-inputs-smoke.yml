@@ -1,0 +1,312 @@
+name: Verify fixed public CI inputs
+run-name: Verify fixed CI inputs ${{ github.sha }}
+
+on:
+  push:
+    branches: [diagnostic/pinned-ci-inputs]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Fixed CI inputs (${{ matrix.platform }})
+    if: >-
+      github.event_name == 'push' &&
+      github.repository == '9holy/webcodex' &&
+      github.repository_id == '1404596174' &&
+      github.actor == '9holy' && github.actor_id == '45361924' &&
+      github.triggering_actor == '9holy' &&
+      github.ref == 'refs/heads/diagnostic/pinned-ci-inputs'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x64
+            runner: ubuntu-latest
+          - platform: win32-x64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the exact diagnostic commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        env:
+          # Verify the reviewed Git blob bytes on Windows as well as Linux.
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Test helpers and verify actual fixed inputs on this native runner
+        shell: python
+        env:
+          INPUT_SMOKE_PLATFORM: ${{ matrix.platform }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          import hashlib
+          import io
+          import json
+          import os
+          from pathlib import Path
+          import platform
+          import re
+          import shutil
+          import stat
+          import subprocess
+          import sys
+          import tempfile
+          import time
+          import unittest
+
+          workspace = Path(os.environ['GITHUB_WORKSPACE'])
+          sys.path.insert(0, str(workspace))
+          native_platform = os.environ['INPUT_SMOKE_PLATFORM']
+          source_parent = '24973246ffba787cec430aa165c6a61239305076'
+          expected_implementation = {
+              'scripts/download_pinned_ci_input.py': 'd6c36dde1ea844672570dd3cc8f4fcc437a84029c0a66fc78e5ec9ba3511437e',
+              'scripts/tests/test_download_pinned_ci_input.py': 'fc902e6bd5fe7b615d8e0c6d4dad11e2e2103793a6ab294057f2ae206945bc25',
+              'scripts/prepare_tauri_nsis_ci_tools.py': '7b3b760e8bcc45acf8a0468172410a0806abe96c19459b792421c5d24a8203ed',
+              'scripts/tests/test_prepare_tauri_nsis_ci_tools.py': 'b87a7045618d96843fb3f09adc97b1c587ae560be36616d11c968ef0e34a6355',
+          }
+          pins = {
+              'v8-linux-x64': (38519314, '8aed98637db7e77dc8bfb8bb4759ec5bde472d0bf7943f58e0e62a350945c559'),
+              'desktop-v050-x64': (33737558, 'dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6'),
+              'unified-v053-x64': (84239842, '7a43d294780f8af8a3e22853d81065ccca4546fda1e8316156a2dad9b9c812ab'),
+              'runtime-v053-x64': (41206322, '95cb8d1d9b3756e531a48f85032d7aeb0771fe141ec09940b308f25fdc6a1be6'),
+              'tauri-nsis': (2361546, 'c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1'),
+              'tauri-nsis-utils': (34304, '5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709'),
+          }
+          tauri_sha1 = {
+              'tauri-nsis': 'ef7ff767e5cbd9edd22add3a32c9b8f4500bb10d',
+              'tauri-nsis-utils': '75197fee3c6a814fe035788d1c34ead39349b860',
+          }
+          report_dir = Path(os.environ['RUNNER_TEMP']) / 'pinned-ci-inputs-report'
+          report_dir.mkdir(exist_ok=False)
+          report = {
+              'schema_version': 1, 'kind': 'pinned-ci-inputs-smoke',
+              'diagnostic_only': True, 'formal_acceptance': False,
+              'complete': False, 'phase': 'identity', 'platform': native_platform,
+              'repository': os.environ.get('GITHUB_REPOSITORY'),
+              'repository_id': os.environ.get('GITHUB_REPOSITORY_ID'),
+              'actor': os.environ.get('GITHUB_ACTOR'),
+              'actor_id': os.environ.get('GITHUB_ACTOR_ID'),
+              'triggering_actor': os.environ.get('GITHUB_TRIGGERING_ACTOR'),
+              'head_sha': os.environ.get('GITHUB_SHA'),
+              'workflow_sha': os.environ.get('GITHUB_WORKFLOW_SHA'),
+              'workflow_ref': os.environ.get('GITHUB_WORKFLOW_REF'),
+              'run_id': int(os.environ['GITHUB_RUN_ID']),
+              'run_attempt': int(os.environ['GITHUB_RUN_ATTEMPT']),
+              'source_parent_sha': source_parent,
+              'implementation_sha256': {}, 'tests': None, 'assets': {},
+              'nsis': None, 'cleanup_complete': False, 'failure_code': None,
+          }
+          owned = None
+          checks_complete = False
+          # Leave time for owned cleanup and the always-upload step within 10 min.
+          deadline = time.monotonic() + 500
+
+          class SmokeFailure(RuntimeError):
+              def __init__(self, code):
+                  self.code = code
+
+          def require(condition, code):
+              if not condition:
+                  raise SmokeFailure(code)
+
+          def command(argv, timeout, *, capture=False, capture_error=False):
+              require(time.monotonic() + timeout < deadline, 'command_time_budget')
+              return subprocess.run(
+                  argv, cwd=workspace, stdin=subprocess.DEVNULL,
+                  stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                  stderr=subprocess.PIPE if capture_error else subprocess.DEVNULL,
+                  timeout=timeout, check=False,
+                  shell=False,
+              )
+
+          def file_hash(path, expected_size):
+              info = path.lstat()
+              require(stat.S_ISREG(info.st_mode) and not path.is_symlink()
+                      and not getattr(info, 'st_file_attributes', 0) & 0x400
+                      and info.st_size == expected_size, 'independent_file_size')
+              count, sha256, sha1 = 0, hashlib.sha256(), hashlib.sha1()
+              with path.open('rb') as stream:
+                  while chunk := stream.read(1024 * 1024):
+                      count += len(chunk)
+                      require(count <= expected_size, 'independent_file_size')
+                      sha256.update(chunk)
+                      sha1.update(chunk)
+              require(count == expected_size, 'independent_file_size')
+              return sha256.hexdigest(), sha1.hexdigest()
+
+          def download_fixture(key):
+              report['phase'] = 'download_' + key
+              size, expected = pins[key]
+              entry = {'verified': False, 'expected_size': size,
+                       'expected_sha256': expected, 'download_exit_code': None}
+              report['assets'][key] = entry
+              destination = owned / key
+              result = command([sys.executable, '-B',
+                  str(workspace / 'scripts/download_pinned_ci_input.py'),
+                  '--asset', key, '--output', str(destination)], 190, capture_error=True)
+              entry['download_exit_code'] = result.returncode
+              if result.returncode != 0:
+                  # The frozen CLI emits a fixed error code. Never retain other
+                  # stderr, traceback text, redirect URLs, or response content.
+                  match = re.fullmatch(re.escape(key.encode('ascii'))
+                      + rb': download failed \(([a-z0-9_]{1,40})\)\r?\n',
+                      result.stderr) if len(result.stderr) <= 256 else None
+                  entry['download_failure_code'] = (match[1].decode('ascii')
+                      if match else 'unclassified_exit')
+              require(result.returncode == 0, 'asset_download')
+              report['phase'] = 'verify_' + key
+              actual, _ = file_hash(destination, size)
+              entry['actual_sha256'] = actual
+              require(actual == expected, 'independent_sha256')
+              entry['actual_size'] = size
+              entry['verified'] = True
+              return destination
+
+          try:
+              require(os.environ.get('GITHUB_EVENT_NAME') == 'push'
+                      and report['repository'] == '9holy/webcodex'
+                      and report['repository_id'] == '1404596174'
+                      and report['actor'] == report['triggering_actor'] == '9holy'
+                      and report['actor_id'] == '45361924'
+                      and os.environ.get('GITHUB_REF') == 'refs/heads/diagnostic/pinned-ci-inputs',
+                      'workflow_identity')
+              require(re.fullmatch('[0-9a-f]{40}', report['head_sha'] or '')
+                      and report['workflow_sha'] == report['head_sha']
+                      and report['workflow_ref'] == '9holy/webcodex/.github/workflows/pinned-ci-inputs-smoke.yml@refs/heads/diagnostic/pinned-ci-inputs'
+                      and report['run_id'] > 0 and report['run_attempt'] > 0,
+                      'workflow_identity')
+              head = command(['git', 'rev-parse', 'HEAD'], 10, capture=True)
+              parent = command(['git', 'rev-parse', 'HEAD^'], 10, capture=True)
+              require(head.returncode == parent.returncode == 0
+                      and head.stdout.decode('ascii').strip() == report['head_sha']
+                      and parent.stdout.decode('ascii').strip() == source_parent, 'checkout_identity')
+              require((native_platform == 'linux-x64' and sys.platform.startswith('linux')
+                       or native_platform == 'win32-x64' and os.name == 'nt')
+                      and platform.machine().lower() in ('amd64', 'x86_64'), 'native_platform')
+              for name, expected in expected_implementation.items():
+                  with (workspace / name).open('rb') as stream:
+                      raw = stream.read(128 * 1024 + 1)
+                  require(len(raw) <= 128 * 1024, 'implementation_size')
+                  actual = hashlib.sha256(raw).hexdigest()
+                  report['implementation_sha256'][name] = actual
+                  require(actual == expected, 'implementation_digest')
+              report['prefetch_sha256'] = report['implementation_sha256']['scripts/download_pinned_ci_input.py']
+              report['archive_helper_sha256'] = report['implementation_sha256']['scripts/prepare_tauri_nsis_ci_tools.py']
+
+              report['phase'] = 'unit_tests'
+              suite = unittest.defaultTestLoader.loadTestsFromNames([
+                  'scripts.tests.test_download_pinned_ci_input',
+                  'scripts.tests.test_prepare_tauri_nsis_ci_tools',
+              ])
+              result = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
+              report['tests'] = {'run': result.testsRun, 'failures': len(result.failures),
+                  'errors': len(result.errors), 'skipped': len(result.skipped),
+                  'successful': result.wasSuccessful()}
+              require(result.wasSuccessful() and result.testsRun > 0
+                      and not result.skipped, 'unit_tests')
+              owned = Path(tempfile.mkdtemp(prefix='pinned-ci-inputs-', dir=os.environ['RUNNER_TEMP']))
+
+              if native_platform == 'linux-x64':
+                  archive = download_fixture('v8-linux-x64')
+                  with archive.open('rb') as stream:
+                      require(stream.read(3) == b'\x1f\x8b\x08', 'v8_gzip_header')
+                  report['assets']['v8-linux-x64']['gzip_header_verified'] = True
+                  required_assets = {'v8-linux-x64'}
+              else:
+                  # Prepare the two small tool inputs first. The helper's two
+                  # bounded transfers fit this explicit 390-second reservation.
+                  report['phase'] = 'prepare_tauri_tools'
+                  tools_parent = owned / 'isolated-tauri-cache'
+                  prepared = command([sys.executable, '-B',
+                      str(workspace / 'scripts/prepare_tauri_nsis_ci_tools.py'),
+                      '--tools-directory', str(tools_parent)], 390, capture=True)
+                  require(len(prepared.stdout) <= 4096, 'tauri_report_size')
+                  preparation = json.loads(prepared.stdout.decode('utf-8'))
+                  report['nsis'] = {'helper_exit_code': prepared.returncode, 'version_verified': False}
+                  if isinstance(preparation, dict) and isinstance(preparation.get('code'), str):
+                      require(re.fullmatch('[a-z0-9_]{1,64}', preparation['code']), 'tauri_report_code')
+                      report['nsis']['helper_failure_code'] = preparation['code']
+                  require(prepared.returncode == 0 and isinstance(preparation, dict)
+                          and preparation.get('ok') is True and preparation.get('outcome') == 'created'
+                          and preparation.get('tauri_cli_version') == '2.11.4'
+                          and preparation.get('nsis_version') == '3.11'
+                          and preparation.get('required_files') == 13
+                          and type(preparation.get('verified_files')) is int
+                          and 13 <= preparation['verified_files'] <= 4097, 'tauri_preparation')
+                  for key, prefix in (('tauri-nsis', 'archive'), ('tauri-nsis-utils', 'plugin')):
+                      require(preparation.get(prefix + '_sha256') == pins[key][1]
+                              and preparation.get(prefix + '_sha1') == tauri_sha1[key], 'tauri_input_digest')
+                      report['assets'][key] = {'verified': True, 'expected_size': pins[key][0],
+                          'actual_sha256': preparation[prefix + '_sha256'],
+                          'actual_sha1': preparation[prefix + '_sha1'],
+                          'verified_by': 'pinned_downloader_and_archive_helper'}
+                  report['nsis']['verified_files'] = preparation['verified_files']
+                  report['nsis']['required_files'] = preparation['required_files']
+                  report['phase'] = 'verify_nsis_plugin'
+                  nsis_root = tools_parent / 'NSIS'
+                  plugin = nsis_root / 'Plugins/x86-unicode/additional/nsis_tauri_utils.dll'
+                  plugin_sha256, plugin_sha1 = file_hash(plugin, pins['tauri-nsis-utils'][0])
+                  require(plugin_sha256 == pins['tauri-nsis-utils'][1]
+                          and plugin_sha1 == tauri_sha1['tauri-nsis-utils'], 'independent_plugin_digest')
+                  report['nsis']['independent_plugin_sha1'] = plugin_sha1
+                  report['phase'] = 'execute_verified_nsis_version'
+                  executable = nsis_root / 'makensis.exe'
+                  version = command([str(executable), '/VERSION'], 15, capture=True)
+                  require(version.returncode == 0 and len(version.stdout) <= 128
+                          and version.stdout.decode('ascii').strip() == 'v3.11', 'nsis_version')
+                  report['nsis']['version_verified'] = True
+                  report['nsis']['version'] = 'v3.11'
+                  for key in ('desktop-v050-x64', 'unified-v053-x64', 'runtime-v053-x64'):
+                      download_fixture(key)
+                  required_assets = set(pins) - {'v8-linux-x64'}
+              require(set(report['assets']) == required_assets
+                      and all(entry.get('verified') is True for entry in report['assets'].values()),
+                      'required_inputs')
+              checks_complete = True
+          except SmokeFailure as error:
+              report['failure_code'] = error.code
+          except subprocess.TimeoutExpired:
+              report['failure_code'] = 'command_timeout'
+          except Exception:
+              report['failure_code'] = 'unexpected_error'
+          finally:
+              try:
+                  if owned is not None:
+                      shutil.rmtree(owned)
+                      require(not owned.exists(), 'cleanup')
+                  report['cleanup_complete'] = True
+              except Exception:
+                  report['failure_code'] = report['failure_code'] or 'cleanup'
+              report['complete'] = (checks_complete and report['cleanup_complete']
+                                    and report['failure_code'] is None)
+              if report['complete']:
+                  report['phase'] = 'complete'
+              payload = (json.dumps(report, sort_keys=True, indent=2) + '\n').encode('utf-8')
+              if len(payload) > 16 * 1024:
+                  report['assets'] = {}
+                  report['complete'] = False
+                  report['failure_code'] = 'report_size'
+                  payload = (json.dumps(report, sort_keys=True, indent=2) + '\n').encode('utf-8')
+              require(len(payload) <= 16 * 1024, 'report_size')
+              (report_dir / 'report.json').write_bytes(payload)
+          print('Fixed CI inputs: ' + ('verified' if report['complete'] else 'failed')
+                + ' at ' + report['phase'])
+          raise SystemExit(0 if report['complete'] else 1)
+      - name: Retain only the small fixed-input report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pinned-ci-inputs-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pinned-ci-inputs-report/report.json
+          if-no-files-found: error
+          retention-days: 7
