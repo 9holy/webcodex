@@ -249,6 +249,39 @@ class Coordinator {
         self.assertIn("classify_code=[installer_owner]", diagnostic)
         self.assertNotIn("private-fixture-value", diagnostic)
 
+    def test_real_cli_json_errors_show_only_a_fixed_safe_category(self):
+        # The actual --json CLI wraps SetupDiagnostic's Display value; the
+        # historical text-only NSIS fixture missed this v0.5.4 upgrade failure.
+        self.compile(self.source, "outer")
+        for code in ("installer_owner", "installer_registration",
+                     "installer_program_acl", "package_identity",
+                     "setup_busy", "state_io"):
+            with self.subTest(code=code):
+                self.env["WEBCODEX_NSIS_FIXTURE_CLASSIFY_ERROR"] = (
+                    '{"error":"' + code + ': private-fixture-value","ok":false}')
+                destination = self.root / ("existing-" + code)
+                self.assertNotEqual(self.run_installer(self.outer, destination).returncode, 0)
+                self.assertEqual(self.log.read_text().splitlines(), ["candidate:installer-classify"])
+                self.assertFalse((destination / "candidate-installed.txt").exists())
+                diagnostic = self.root / "fixture-failure.txt"
+                trace = diagnostic.read_text(encoding="utf-16le")
+                self.assertIn(f"classify_code=[{code}]", trace)
+                self.assertNotIn("private-fixture-value", trace)
+                diagnostic.unlink()
+                self.log.unlink()
+
+    def test_json_error_message_cannot_spoof_an_installer_code(self):
+        self.env["WEBCODEX_NSIS_FIXTURE_CLASSIFY_ERROR"] = (
+            '{"error":"unrecognized-private-value: installer_owner: private-fixture","ok":false}')
+        self.compile(self.source, "outer")
+        destination = self.root / "existing"
+        self.assertNotEqual(self.run_installer(self.outer, destination).returncode, 0)
+        self.assertEqual(self.log.read_text().splitlines(), ["candidate:installer-classify"])
+        self.assertFalse((destination / "candidate-installed.txt").exists())
+        trace = (self.root / "fixture-failure.txt").read_text(encoding="utf-16le")
+        self.assertIn("classify_code=[installer_classify_failed]", trace)
+        self.assertNotIn("private-fixture", trace)
+
     def test_unknown_classification_failure_uses_fixed_generic_code(self):
         self.env["WEBCODEX_NSIS_FIXTURE_CLASSIFY_ERROR"] = "unrecognized-private-value: installer_owner:"
         self.compile(self.source, "outer")
