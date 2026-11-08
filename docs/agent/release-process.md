@@ -255,12 +255,15 @@ prerelease assets remain unchanged. A corrected product requires a new version;
 its evidence cannot replace the retained v0.5.4 failure.
 
 The shared Windows worker selects a code-owned specification only for the exact
-`(v0.5.4, release-publish-v054.yml)` or `(v0.5.5, release-publish-v055.yml)`
+`(v0.5.4, release-publish-v054.yml)`, `(v0.5.5, release-publish-v055.yml)`, or
+`(v0.5.6, release-publish-v056.yml)`
 tag/controller-workflow pair. It then requires finalized pins and validates the
 complete request before downloads or installer execution. Unknown or crossed
 pairs have no fallback. The acceptance workflow, native x64/ARM64 matrix, fixed
-v0.5.0 and v0.5.3 comparison bytes, report schema, four-program hash checks,
-same-attempt proof binding, and same-Release promotion requirements are unchanged.
+v0.5.0 and v0.5.3 comparison bytes, four-program hash checks, same-attempt proof
+binding, and same-Release promotion requirements are unchanged. The v0.5.4 and
+v0.5.5 report contracts retain their original three scenarios; v0.5.6 adds the
+fixed v0.5.4 upgrade evidence described below.
 
 Prepare v0.5.5 source SHA/tree as explicit zero placeholders and CI/evidence run
 IDs as `1` until exact-source successful push proofs exist. The code specification
@@ -270,6 +273,51 @@ Tests construct their own unfinished specifications, so recording real pins does
 not remove rejection coverage. As with v0.5.4, the new fixed control files belong
 in a later reviewed control commit after the product source and evidence are
 frozen. Keep `main` at that control commit until required child dispatches finish.
+
+### Fixed v0.5.6 Windows delivery
+
+The v0.5.6 [fixed entry](../../scripts/release_github_actions_v056.py),
+[request](../../.github/release-requests/v0.5.6.json),
+[reviewed notes input](../../.github/release-requests/v0.5.6-notes.md), and
+[publisher](../../.github/workflows/release-publish-v056.yml) retain the staged
+controller and 28-checkpoint sequence with fixed `platform_scope: windows`.
+This is the user's explicitly requested Windows delivery scope, with no npm
+publication or non-Windows formal build and post-publication dispatches.
+Omitted scope keeps the existing full-platform contract and serialized fields;
+only the explicit Windows profile selects exactly x64 and ARM64 Runtime archives,
+standard Desktop installers, Full installers and source manifests (11 public
+assets including the two indexes and checksums). Missing platforms never select
+a scope implicitly. Build dispatch, retained state, bundle collection and public
+verification must all agree on the selected profile. The v0.5.5 module, request, notes, workflow,
+source tag, public prerelease bytes, and failed acceptance evidence remain
+unchanged. A v0.5.6 source or report cannot replace that earlier publication's
+identity or evidence.
+
+Prepare the v0.5.6 source SHA/tree as explicit 40-zero placeholders and the
+CI/evidence run IDs as `1`. Its finalization guard refuses unfinished authority
+before the authenticated dispatcher or Windows worker can execute. After the
+exact product source and successful push proofs are fixed, finalize only the six
+source/proof values and reviewed notes digest in both code and JSON. Keep these
+control changes in their own reviewed commit. Each native architecture must pass
+five real public-installer scenarios: fresh installation, unconfigured and
+configured upstream v0.5.0 upgrades, and unconfigured and configured fork v0.5.4
+upgrades. The v0.5.4 standard Desktop inputs are frozen by architecture, SHA-256
+and size. Its unconfigured upgrade reuses the real PowerShell helper and records
+successful exit plus its frozen inputs; its configured upgrade verifies the
+actual old four-program identity, runs Runtime, then checks candidate source,
+four-program hashes, preserved state, service restart and cleanup in the native
+report. Both native reports are required, and any failed or missing scenario
+blocks promotion. Same-attempt artifact binding and immutable assets remain
+required. Before preview publication the controller freezes the existing
+stable latest Release ID and tag. It promotes the same Windows Release with
+`prerelease: false, make_latest: false` only after all ten public-installer scenarios
+pass, and verifies the original latest remains unchanged before and after the
+mutation and on recovery. Users download this Windows version manually.
+Image and Intel DMG stages retain their checkpoints but record `not_applicable`
+without dispatching another workflow; final success still requires Windows
+public-byte verification. This delivery profile does not relax exact-source CI
+or source-evidence qualification. Notes describe the candidate until its evidence
+is complete, and no previous tag, Release or asset may be replaced.
 
 ### Failed pre-publication tag reclaim
 
