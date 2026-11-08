@@ -255,7 +255,9 @@ class Coordinator {
         self.compile(self.source, "outer")
         for code in ("installer_owner", "installer_registration",
                      "installer_program_acl", "package_identity",
-                     "setup_busy", "state_io"):
+                     "setup_busy", "state_io", "state_invalid", "state_path",
+                     "home_unavailable", "unsafe_path", "installer_targets",
+                     "installer_environment", "candidate_file"):
             with self.subTest(code=code):
                 self.env["WEBCODEX_NSIS_FIXTURE_CLASSIFY_ERROR"] = (
                     '{"error":"' + code + ': private-fixture-value","ok":false}')
