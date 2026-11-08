@@ -1,5 +1,81 @@
 use super::*;
 
+pub(super) fn report_restore_difference(
+    expected: &WindowsProgramSecurity,
+    actual: &WindowsProgramSecurity,
+) {
+    fn projection(snapshot: &WindowsProgramSecurity) -> SetupResultValue<serde_json::Value> {
+        let descriptor = decode(snapshot)?;
+        let mut control = 0;
+        let mut revision = 0;
+        let mut acl = null_mut();
+        let mut present = 0;
+        let mut defaulted = 0;
+        if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0
+            || unsafe {
+                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted)
+            } == 0
+            || present == 0
+            || acl.is_null()
+        {
+            return Err(invalid());
+        }
+        let current = current_account()?.identity;
+        let count = unsafe { (*acl).AceCount };
+        let mut aces = Vec::new();
+        for index in 0..count.min(32) {
+            let mut ace = null_mut();
+            if unsafe { GetAce(acl, u32::from(index), &mut ace) } == 0 || ace.is_null() {
+                return Err(invalid());
+            }
+            let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+            let mut mask = None;
+            let mut principal = "uninterpreted";
+            if matches!(
+                u32::from(header.AceType),
+                ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE
+            ) && (header.AceSize as usize) >= std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+            {
+                let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+                mask = Some(allowed.Mask);
+                let sid = sid_string(std::ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
+                principal = if sid == current {
+                    "user"
+                } else if sid == ADMINISTRATORS {
+                    "administrators"
+                } else if sid == "S-1-5-18" {
+                    "system"
+                } else {
+                    "other"
+                };
+            }
+            aces.push(serde_json::json!({
+                "type": header.AceType,
+                "flags": header.AceFlags,
+                "size": header.AceSize,
+                "mask": mask,
+                "principal": principal,
+            }));
+        }
+        Ok(serde_json::json!({
+            "dacl_protected": snapshot.dacl_protected,
+            "control_flags": control,
+            "ace_count": count,
+            "aces": aces,
+            "truncated": count > 32,
+        }))
+    }
+    eprintln!(
+        "{}",
+        serde_json::json!({
+            "test": "restore_program_security_difference",
+            "owner_equal": expected.owner_identity == actual.owner_identity,
+            "expected": projection(expected).ok(),
+            "actual": projection(actual).ok(),
+        })
+    );
+}
+
 #[test]
 fn native_sddl_buffer_capacity_is_not_the_string_length() {
     let expected = "O:BAD:P(A;;FA;;;BA)";

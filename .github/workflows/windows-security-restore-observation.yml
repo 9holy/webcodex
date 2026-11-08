@@ -1,0 +1,29 @@
+name: Windows security restore observation
+
+on:
+  push:
+    branches: ['diagnostic/windows-security-restore']
+    paths:
+      - '.github/workflows/windows-security-restore-observation.yml'
+      - 'crates/webcodex-environment/**'
+
+permissions:
+  contents: read
+
+jobs:
+  original-security:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: windows-core-ci
+      - name: Observe the exact original security restore boundary
+        shell: pwsh
+        run: |
+          cargo test --locked -p webcodex-environment --lib upgrade::windows_package::tests::windows_owners::registered_group_owned_installation_lifecycle -- --exact --ignored
+          if ($LASTEXITCODE -ne 0) { throw "Native security restore comparison failed; inspect the bounded structural observation" }

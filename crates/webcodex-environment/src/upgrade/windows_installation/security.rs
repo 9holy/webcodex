@@ -343,7 +343,10 @@ pub(super) fn restore(path: &Path, snapshot: &WindowsProgramSecurity) -> SetupRe
         return Err(invalid());
     }
     drop(file);
-    if capture(path)? != *snapshot {
+    let restored = capture(path)?;
+    if restored != *snapshot {
+        #[cfg(test)]
+        tests::report_restore_difference(snapshot, &restored);
         return Err(error(
             "upgrade_restore_security",
             "The original program security could not be restored",
