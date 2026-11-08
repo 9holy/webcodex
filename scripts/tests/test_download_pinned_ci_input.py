@@ -91,6 +91,42 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(opener.open.call_count, 1)
         self.assertEqual(self.output.read_bytes(), data)
 
+    def test_binary_asset_api_is_used_once_then_final_https_url_is_reused(self):
+        data = b"x" * download.CHUNK_BYTES + b"tail"
+        api = "https://api.github.com/repos/example/project/releases/assets/1"
+        binary = "https://release-assets.githubusercontent.com/fixed-input?fixture=opaque"
+        asset = replace(asset_for(data, sha1=True), api_url=api)
+        bounds = [(0, download.CHUNK_BYTES - 1), (download.CHUNK_BYTES, len(data) - 1)]
+        responses = [Response(data[a:b + 1], 206,
+            [("Content-Range", f"bytes {a}-{b}/{len(data)}")], url=binary) for a, b in bounds]
+        opener = self.transfer(asset, responses)
+        self.assertEqual(self.output.read_bytes(), data)
+        self.assertEqual(asset.url, URL)  # Canonical metadata is not rewritten.
+        self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list], [api, binary])
+        for call, (start, end) in zip(opener.open.call_args_list, bounds):
+            self.assertEqual(dict((k.lower(), v) for k, v in call.args[0].header_items()), {
+                "range": f"bytes={start}-{end}", "accept-encoding": "identity",
+                "accept": "application/octet-stream",
+            })
+
+    def test_binary_api_direct_200_must_be_the_complete_pinned_file(self):
+        data = b"x" * (download.CHUNK_BYTES + 1)
+        api = "https://api.github.com/repos/example/project/releases/assets/1"
+        asset = replace(asset_for(data), api_url=api)
+        opener = self.transfer(asset, [Response(data, 200, url=api)])
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertEqual(opener.open.call_args.args[0].full_url, api)
+        self.assertEqual(opener.open.call_args.args[0].get_header("Accept"), "application/octet-stream")
+        self.assertEqual(self.output.read_bytes(), data)
+
+    def test_partial_api_response_without_binary_redirect_cannot_repeat_api(self):
+        data = b"x" * (download.CHUNK_BYTES + 1)
+        api = "https://api.github.com/repos/example/project/releases/assets/1"
+        asset = replace(asset_for(data), api_url=api)
+        response = Response(data[:download.CHUNK_BYTES], 206,
+            [("Content-Range", f"bytes 0-{download.CHUNK_BYTES - 1}/{len(data)}")], url=api)
+        self.rejected(asset, [response], "api_redirect_required")
+
     def test_truncated_or_overlong_range_is_removed(self):
         data = b"expected"
         for body in (data[:-1], data + b"extra"):
@@ -315,9 +351,20 @@ class RequestBoundaryTests(unittest.TestCase):
             "tauri-nsis-utils": (34304, "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709", "75197FEE3C6A814FE035788D1C34EAD39349B860"),
         }
         self.assertEqual({key: (asset.size, asset.sha256, asset.sha1) for key, asset in download.ASSETS.items()}, expected)
-        for asset in download.ASSETS.values():
+        api_assets = {
+            "v8-linux-x64": ("denoland/rusty_v8", 429513990),
+            "desktop-v050-x64": ("yyjeqhc/webcodex", 698386647),
+            "unified-v053-x64": ("9holy/webcodex", 722008886),
+            "runtime-v053-x64": ("9holy/webcodex", 722009784),
+            "tauri-nsis": ("tauri-apps/binary-releases", 317051073),
+            "tauri-nsis-utils": ("tauri-apps/nsis-tauri-utils", 345882097),
+        }
+        for key, asset in download.ASSETS.items():
             self.assertTrue(asset.url.startswith("https://github.com/"))
             download._require_https(asset.url)
+            repo, asset_id = api_assets[key]
+            self.assertEqual(asset.api_url, f"https://api.github.com/repos/{repo}/releases/assets/{asset_id}")
+        self.assertIsNone(asset_for(b"fixture").api_url)
         with self.assertRaises(TypeError):
             download.ASSETS["new"] = asset_for(b"arbitrary")
         with self.assertRaisesRegex(download.DownloadError, "unknown_asset"):

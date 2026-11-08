@@ -2,7 +2,8 @@
 """Download fixed old CI inputs; this is not the public candidate release gate.
 
 Each request is anonymous and uses the runner's normal urllib network routing.
-There are no retries, API downloads, configurable URLs, or integrity overrides.
+Only the fixed public release-asset API endpoints below supply binary bytes.
+There are no retries, credentials, configurable URLs, or integrity overrides.
 A separate process bounds the complete transfer and verification on Windows too.
 Only a verified, complete file is published, without replacing an existing path.
 """
@@ -30,35 +31,42 @@ class PinnedAsset:
     size: int
     sha256: str
     sha1: str | None = None
+    api_url: str | None = None
 
 
 ASSETS = MappingProxyType({
     "v8-linux-x64": PinnedAsset(
         "https://github.com/denoland/rusty_v8/releases/download/v149.2.0/"
         "librusty_v8_release_x86_64-unknown-linux-gnu.a.gz",
-        38519314, "8aed98637db7e77dc8bfb8bb4759ec5bde472d0bf7943f58e0e62a350945c559"),
+        38519314, "8aed98637db7e77dc8bfb8bb4759ec5bde472d0bf7943f58e0e62a350945c559",
+        api_url="https://api.github.com/repos/denoland/rusty_v8/releases/assets/429513990"),
     "desktop-v050-x64": PinnedAsset(
         "https://github.com/yyjeqhc/webcodex/releases/download/v0.5.0/"
         "webcodex-desktop-v0.5.0-win32-x64-setup.exe",
-        33737558, "dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6"),
+        33737558, "dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6",
+        api_url="https://api.github.com/repos/yyjeqhc/webcodex/releases/assets/698386647"),
     "unified-v053-x64": PinnedAsset(
         "https://github.com/9holy/webcodex/releases/download/v0.5.3/"
         "webcodex-unified-v0.5.3-win32-x64.exe",
-        84239842, "7a43d294780f8af8a3e22853d81065ccca4546fda1e8316156a2dad9b9c812ab"),
+        84239842, "7a43d294780f8af8a3e22853d81065ccca4546fda1e8316156a2dad9b9c812ab",
+        api_url="https://api.github.com/repos/9holy/webcodex/releases/assets/722008886"),
     "runtime-v053-x64": PinnedAsset(
         "https://github.com/9holy/webcodex/releases/download/v0.5.3/"
         "webcodex-v0.5.3-win32-x64.tar.gz",
-        41206322, "95cb8d1d9b3756e531a48f85032d7aeb0771fe141ec09940b308f25fdc6a1be6"),
+        41206322, "95cb8d1d9b3756e531a48f85032d7aeb0771fe141ec09940b308f25fdc6a1be6",
+        api_url="https://api.github.com/repos/9holy/webcodex/releases/assets/722009784"),
     "tauri-nsis": PinnedAsset(
         "https://github.com/tauri-apps/binary-releases/releases/download/"
         "nsis-3.11/nsis-3.11.zip",
         2361546, "c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1",
-        "EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D"),
+        "EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D",
+        api_url="https://api.github.com/repos/tauri-apps/binary-releases/releases/assets/317051073"),
     "tauri-nsis-utils": PinnedAsset(
         "https://github.com/tauri-apps/nsis-tauri-utils/releases/download/"
         "nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll",
         34304, "5ba143b5db4a87d32d6e7802e033330aae56cbceabe0d1e3ba41948385ad4709",
-        "75197FEE3C6A814FE035788D1C34EAD39349B860"),
+        "75197FEE3C6A814FE035788D1C34EAD39349B860",
+        api_url="https://api.github.com/repos/tauri-apps/nsis-tauri-utils/releases/assets/345882097"),
 })
 
 CHUNK_BYTES = 1024 * 1024
@@ -69,7 +77,7 @@ _ERROR_CODES = frozenset({
     "unknown_asset", "https_required", "url_credentials", "http_status",
     "content_range", "content_length", "content_encoding", "chunk_length",
     "file_size", "sha256", "sha1", "transport", "io_error", "deadline",
-    "destination_exists", "destination_parent", "worker_failed",
+    "destination_exists", "destination_parent", "worker_failed", "api_redirect_required",
 })
 
 
@@ -123,6 +131,8 @@ def _copy_exact(response, output, length: int, sha256, sha1) -> None:
 def _download_to_staging(asset: PinnedAsset, destination: Path) -> None:
     """Internal worker: its parent enforces the whole-file wall-clock deadline."""
     _require_https(asset.url)
+    request_url = asset.api_url or asset.url
+    _require_https(request_url)
     # Preserve urllib's default proxy handling and the runner's network routing.
     opener = urllib.request.build_opener(HTTPSOnlyRedirectHandler())
     sha256 = hashlib.sha256()
@@ -134,12 +144,16 @@ def _download_to_staging(asset: PinnedAsset, destination: Path) -> None:
             total = 0
             for start in range(0, asset.size, CHUNK_BYTES):
                 end = min(start + CHUNK_BYTES, asset.size) - 1
-                request = urllib.request.Request(asset.url, headers={
+                headers = {
                     "Range": f"bytes={start}-{end}",
                     "Accept-Encoding": "identity",
-                })
+                }
+                if asset.api_url is not None:
+                    headers["Accept"] = "application/octet-stream"
+                request = urllib.request.Request(request_url, headers=headers)
                 with opener.open(request, timeout=SOCKET_TIMEOUT_SECONDS) as response:
-                    _require_https(response.geturl())
+                    final_url = response.geturl()
+                    _require_https(final_url)
                     encoding = _single_header(response.headers, "Content-Encoding", "content_encoding")
                     if encoding is not None and encoding.lower() != "identity":
                         raise DownloadError("content_encoding")
@@ -156,6 +170,9 @@ def _download_to_staging(asset: PinnedAsset, destination: Path) -> None:
                         length = asset.size
                     else:
                         raise DownloadError("http_status")
+                    if (asset.api_url is not None and start + length < asset.size
+                            and urllib.parse.urlsplit(final_url).hostname == "api.github.com"):
+                        raise DownloadError("api_redirect_required")
                     content_length = _single_header(response.headers, "Content-Length", "content_length")
                     if content_length is not None and content_length != str(length):
                         raise DownloadError("content_length")
@@ -163,6 +180,10 @@ def _download_to_staging(asset: PinnedAsset, destination: Path) -> None:
                     total += length
                     if response.status == 200:
                         break
+                    if asset.api_url is not None:
+                        # Reuse the verified HTTPS binary location, not the API,
+                        # for the remaining ranges. Never log this transient URL.
+                        request_url = final_url
             if total != asset.size:
                 raise DownloadError("file_size")
             if sha256.hexdigest() != asset.sha256:

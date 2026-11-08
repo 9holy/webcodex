@@ -66,10 +66,10 @@ jobs:
           workspace = Path(os.environ['GITHUB_WORKSPACE'])
           sys.path.insert(0, str(workspace))
           native_platform = os.environ['INPUT_SMOKE_PLATFORM']
-          source_parent = '9bcd2ca0ca8c671c8560d3f3ec625a0348690a7c'
+          source_parent = '3e57e48a1012224750c93594813d84e12c1ddd8b'
           expected_implementation = {
-              'scripts/download_pinned_ci_input.py': 'fc79ac3d9d98672df73b7439dfc22fc3e95d482a03dded922edfe1d182cd15c4',
-              'scripts/tests/test_download_pinned_ci_input.py': '2b53489729a10273a4203ec18dd701de0cc6bb1f8ac7adad9949bac3fb234328',
+              'scripts/download_pinned_ci_input.py': '718c6829c5ceea501b6be8695ac78ade62bb9b85965a17d1ec1e1079ecec673d',
+              'scripts/tests/test_download_pinned_ci_input.py': 'f64589fb2aa5ba0d4660cbf249330352875e518be1d9f7cfd892bec30cf04462',
               'scripts/prepare_tauri_nsis_ci_tools.py': '7b3b760e8bcc45acf8a0468172410a0806abe96c19459b792421c5d24a8203ed',
               'scripts/tests/test_prepare_tauri_nsis_ci_tools.py': '811ccc0bc6876afe1d34a4ee1a866fbf66dee1d8775de873dc4ec2dbc12e7c84',
           }
