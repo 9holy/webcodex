@@ -312,6 +312,14 @@ pub(super) fn check_writers(
         if sid == owner || sid == ADMINISTRATORS || sid == "S-1-5-18" {
             continue;
         }
+        if sid == "S-1-3-4"
+            && (snapshot.owner_identity == owner || snapshot.owner_identity == ADMINISTRATORS)
+        {
+            // OWNER RIGHTS names this object's owner, not an additional writer.
+            // Callers separately admit that owner, including the original
+            // registration and TokenOwner checks for Administrators ownership.
+            continue;
+        }
         if directory && u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 && sid == "S-1-3-0" {
             // CREATOR OWNER applies to the creator of a child, not to an
             // unrelated account. Actual child owners are checked separately.
