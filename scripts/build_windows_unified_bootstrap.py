@@ -81,14 +81,19 @@ def classification_diagnostic_lines() -> list[str]:
         '  StrCpy $WebCodexClassificationCode "installer_classify_failed"',
         '  StrCpy $WebCodexFailureReason "$(WebCodexClassifyUnknown)"',
     ])
+    # nsExec captures both stdout and stderr. With --json, the actual CLI
+    # wraps a diagnostic as {"error":"installer_owner: ...","ok":false};
+    # older native fixtures only emitted "installer_owner: ...". Recognize
+    # both fixed prefixes without disclosing any arbitrary diagnostic text.
     for code in CLASSIFICATION_DIAGNOSTICS:
-        lines.extend([
-            f'  StrCpy $R0 $1 {len(code) + 1}',
-            f'  ${{If}} $R0 == "{code}:"',
-            f'    StrCpy $WebCodexClassificationCode "{code}"',
-            f'    StrCpy $WebCodexFailureReason "$(WebCodexClassify_{code})"',
-            '  ${EndIf}',
-        ])
+        for prefix in (f"{code}:", f'{{"error":"{code}:'):
+            lines.extend([
+                f'  StrCpy $R0 $1 {len(prefix)}',
+                f"  ${{If}} $R0 == '{prefix}'",
+                f'    StrCpy $WebCodexClassificationCode "{code}"',
+                f'    StrCpy $WebCodexFailureReason "$(WebCodexClassify_{code})"',
+                '  ${EndIf}',
+            ])
     lines.extend([
         '  DetailPrint "WebCodex: $WebCodexClassificationCode"',
         '  MessageBox MB_ICONSTOP "$WebCodexFailureReason$\\r$\\n$\\r$\\n$(WebCodexClassifyStopped)" /SD IDOK',
