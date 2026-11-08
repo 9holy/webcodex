@@ -8,6 +8,8 @@ use std::collections::HashSet;
 
 mod connection;
 pub use connection::*;
+mod verification;
+pub use verification::*;
 
 pub const SSH_RESOURCE_NAME_MAX_BYTES: usize = 80;
 pub const SSH_RESOURCE_TARGET_MAX_BYTES: usize = 512;
@@ -84,6 +86,11 @@ pub struct SshResourceInventoryEntry {
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SshResourceRequest {
     List,
+    Status,
+    VerifySaved {
+        expected_revision: u64,
+        name: String,
+    },
     Inspect {
         expected_revision: u64,
         endpoint: SshEndpoint,
@@ -120,6 +127,8 @@ impl std::fmt::Debug for SshResourceRequest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let (action, name) = match self {
             Self::List => ("list", None),
+            Self::Status => ("status", None),
+            Self::VerifySaved { name, .. } => ("verify_saved", Some(name)),
             Self::Inspect { .. } => ("inspect", None),
             Self::Probe { .. } => ("probe", None),
             Self::RegisterConnection { name, .. } => ("register_connection", Some(name)),
@@ -137,7 +146,7 @@ impl std::fmt::Debug for SshResourceRequest {
 impl SshResourceRequest {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self {
-            Self::List => Ok(()),
+            Self::List | Self::Status => Ok(()),
             Self::Inspect { endpoint, .. } => endpoint.validate(),
             Self::Probe {
                 endpoint,
@@ -175,21 +184,42 @@ impl SshResourceRequest {
                 normalize_ssh_resource_default_cwd(default_cwd.as_deref())?;
                 Ok(())
             }
-            Self::Remove { name, .. } => validate_ssh_resource_name(name),
+            Self::Remove { name, .. } | Self::VerifySaved { name, .. } => {
+                validate_ssh_resource_name(name)
+            }
         }
     }
 
     pub fn requires_connection_setup(&self) -> bool {
         matches!(
             self,
-            Self::Inspect { .. } | Self::Probe { .. } | Self::RegisterConnection { .. }
+            Self::Inspect { .. }
+                | Self::Probe { .. }
+                | Self::RegisterConnection { .. }
+                | Self::VerifySaved { .. }
         )
+    }
+
+    pub fn requires_verification_history(&self) -> bool {
+        matches!(self, Self::Status | Self::VerifySaved { .. })
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SshResourceResponse {
+    Status {
+        revision: u64,
+        resources: Vec<SshResourceInventoryEntry>,
+        verifications: Vec<SshResourceVerificationEntry>,
+        verification_unavailable: bool,
+    },
+    VerifySaved {
+        revision: u64,
+        resource: String,
+        persisted: bool,
+        verification: SshVerification,
+    },
     Inspect {
         revision: u64,
         challenge_id: String,
@@ -278,6 +308,56 @@ pub fn validate_response_for_request(
     }
 
     match (request, response) {
+        (
+            SshResourceRequest::Status,
+            SshResourceResponse::Status {
+                resources,
+                verifications,
+                verification_unavailable,
+                ..
+            },
+        ) => {
+            validate_inventory(resources)?;
+            if verifications.len() > resources.len() {
+                return Err("ssh_resource_invalid");
+            }
+            let mut previous: Option<&str> = None;
+            for entry in verifications {
+                if previous.is_some_and(|name| name >= entry.name.as_str())
+                    || !resources.iter().any(|resource| {
+                        resource.name == entry.name && resource.source == SshResourceSource::Managed
+                    })
+                {
+                    return Err("ssh_resource_invalid");
+                }
+                if let Some(verification) = &entry.verification {
+                    if *verification_unavailable {
+                        return Err("ssh_resource_invalid");
+                    }
+                    verification.validate()?;
+                }
+                previous = Some(&entry.name);
+            }
+            Ok(())
+        }
+        (
+            SshResourceRequest::VerifySaved {
+                expected_revision,
+                name,
+            },
+            SshResourceResponse::VerifySaved {
+                revision,
+                resource,
+                persisted,
+                verification,
+            },
+        ) => {
+            validate_ssh_resource_name(resource)?;
+            if resource != name || !persisted || revision != expected_revision {
+                return Err("ssh_resource_invalid");
+            }
+            verification.validate()
+        }
         (
             SshResourceRequest::Inspect {
                 expected_revision, ..

@@ -207,6 +207,28 @@ jobs:
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: aarch64-pc-windows-msvc
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Prefetch pinned Windows NSIS inputs
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, os.environ['GITHUB_WORKSPACE'])
+          from scripts.download_pinned_ci_input import download_asset
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'webcodex-nsis-inputs'
+          root.mkdir(exist_ok=False)
+          download_asset('tauri-nsis', root / 'nsis-3.11.zip')
+          download_asset('tauri-nsis-utils', root / 'nsis_tauri_utils.dll')
+      - name: Test fixed native installer input helpers
+        shell: pwsh
+        run: |
+          python -m unittest scripts.tests.test_download_pinned_ci_input scripts.tests.test_prepare_tauri_nsis_ci_tools -v
+          if ($LASTEXITCODE -ne 0) { throw "Native installer input helper tests failed" }
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22
@@ -295,6 +317,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          python "$env:GITHUB_WORKSPACE\scripts\prepare_tauri_nsis_ci_tools.py" `
+            --tools-directory (Join-Path $env:LOCALAPPDATA 'tauri') `
+            --input-directory (Join-Path $env:RUNNER_TEMP 'webcodex-nsis-inputs')
+          if ($LASTEXITCODE -ne 0) { throw "Pinned Tauri NSIS tools preparation failed" }
           $env:CARGO_TARGET_DIR = Join-Path $env:RUNNER_TEMP "webcodex-extended-win32-arm64-tauri"
           node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --config "${{ steps.desktop_bundle.outputs.config }}" --ci --no-sign -- --locked
           if ($LASTEXITCODE -ne 0) { throw "Tauri Windows ARM64 NSIS build failed" }

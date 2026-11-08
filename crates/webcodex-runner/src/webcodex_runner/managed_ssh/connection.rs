@@ -64,6 +64,17 @@ impl ManagedSshResourceStore {
             return Err("ssh_connection_cancelled");
         }
         match request {
+            SshResourceRequest::VerifySaved {
+                expected_revision,
+                name,
+            } => self.verify_saved(
+                static_active,
+                expected_revision,
+                &name,
+                stop,
+                still_current,
+                probe_connection,
+            ),
             SshResourceRequest::Inspect {
                 expected_revision,
                 endpoint,
@@ -135,7 +146,7 @@ impl ManagedSshResourceStore {
                     authentication,
                     selected,
                 )?;
-                probe_connection(&candidate, stop)?;
+                probe_connection(&candidate.connection, stop)?;
                 self.check_revision(expected_revision, static_active)?;
                 if !still_current() {
                     return Err("ssh_host_key_stale");
@@ -171,7 +182,7 @@ impl ManagedSshResourceStore {
                     authentication,
                     selected,
                 )?;
-                probe_connection(&candidate, stop)?;
+                probe_connection(&candidate.connection, stop)?;
                 if !still_current() {
                     return Err("ssh_host_key_stale");
                 }
@@ -206,6 +217,18 @@ impl ManagedSshResourceStore {
                         default_cwd: normalize_ssh_resource_default_cwd(default_cwd.as_deref())?,
                         connection: Some(candidate.connection.stored.clone()),
                     };
+                    // Evidence is staged before the unchanged legacy registry.
+                    // A failed registration leaves at most a bounded, nonmatching
+                    // history entry; it can never create a resource or permission.
+                    let mut history = VerificationHistory::load(path)?;
+                    history.record(&registry, &name, &desired, Ok(()))?;
+                    history.write(path)?;
+                    if stop.is_some_and(|stop| stop.load(Ordering::SeqCst)) {
+                        return Err("ssh_connection_cancelled");
+                    }
+                    if !still_current() {
+                        return Err("ssh_host_key_stale");
+                    }
                     let active = self
                         .startup_managed
                         .resources
@@ -247,6 +270,97 @@ impl ManagedSshResourceStore {
             .and_then(|path| path.parent())
             .ok_or("ssh_resource_registry_unavailable")?
             .join("private"))
+    }
+
+    fn verify_saved(
+        &self,
+        static_active: &SshConfig,
+        expected_revision: u64,
+        name: &str,
+        stop: Option<&AtomicBool>,
+        still_current: &impl Fn() -> bool,
+        probe: impl FnOnce(&ManagedSshConnection, Option<&AtomicBool>) -> Result<(), &'static str>,
+    ) -> Result<SshResourceResponse, &'static str> {
+        let path = self
+            .path
+            .as_deref()
+            .ok_or("ssh_resource_registry_unavailable")?;
+        let lock = self
+            .lock_path
+            .as_deref()
+            .ok_or("ssh_resource_registry_unavailable")?;
+        let (binding, connection) = with_registry_lock(lock, || {
+            let registry = load_registry(path)?;
+            ensure_no_static_collision(&registry, static_active)?;
+            if registry.revision != expected_revision {
+                return Err("ssh_resource_registry_stale");
+            }
+            if static_active.resources.contains_key(name) {
+                return Err("ssh_resource_static_read_only");
+            }
+            let resource = registry
+                .resources
+                .get(name)
+                .ok_or("ssh_resource_not_found")?;
+            VerificationHistory::load(path)?;
+            let stored = resource
+                .connection
+                .clone()
+                .ok_or("ssh_connection_setup_unsupported")?;
+            // Acquire the existing independent credential lease under the registry
+            // lock, then release the lock before bounded network/process work.
+            Ok((
+                VerificationHistory::binding(name, resource)?,
+                ManagedSshConnection::load(stored, self.private_root()?),
+            ))
+        })?;
+        if !still_current() {
+            return Err("ssh_resource_registry_stale");
+        }
+        if stop.is_some_and(|stop| stop.load(Ordering::SeqCst)) {
+            return Err("ssh_connection_cancelled");
+        }
+        let result = match &connection {
+            Ok(connection) => probe(connection, stop),
+            Err(code) => Err(*code),
+        };
+        // Cancellation/replacement is not a failed login observation for the
+        // newly current Runner. Never attach late evidence to another resource.
+        with_registry_lock(lock, || {
+            if stop.is_some_and(|stop| stop.load(Ordering::SeqCst)) {
+                return Err("ssh_connection_cancelled");
+            }
+            if !still_current() {
+                return Err("ssh_resource_registry_stale");
+            }
+            let registry = load_registry(path)?;
+            ensure_no_static_collision(&registry, static_active)?;
+            if registry.revision != expected_revision {
+                return Err("ssh_resource_registry_stale");
+            }
+            let resource = registry
+                .resources
+                .get(name)
+                .ok_or("ssh_resource_not_found")?;
+            if VerificationHistory::binding(name, resource)? != binding {
+                return Err("ssh_resource_registry_stale");
+            }
+            let mut history = VerificationHistory::load(path)?;
+            let verification = history.record(&registry, name, resource, result)?;
+            if stop.is_some_and(|stop| stop.load(Ordering::SeqCst)) {
+                return Err("ssh_connection_cancelled");
+            }
+            if !still_current() {
+                return Err("ssh_resource_registry_stale");
+            }
+            history.write(path)?;
+            Ok(SshResourceResponse::VerifySaved {
+                revision: registry.revision,
+                resource: name.to_string(),
+                persisted: true,
+                verification,
+            })
+        })
     }
 
     fn create_candidate(
@@ -379,10 +493,10 @@ fn probe_command(
 }
 
 fn probe_connection(
-    candidate: &ConnectionCandidate,
+    connection: &ManagedSshConnection,
     stop: Option<&AtomicBool>,
 ) -> Result<(), &'static str> {
-    let (mut command, _lease) = probe_command(&candidate.connection)?;
+    let (mut command, _lease) = probe_command(connection)?;
     let output = bounded_output(&mut command, stop)?;
     if output.success
         && String::from_utf8_lossy(&output.stdout)

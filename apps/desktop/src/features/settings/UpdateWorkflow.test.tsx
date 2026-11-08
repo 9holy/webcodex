@@ -8,6 +8,7 @@ import { PRODUCT_LOCALES, productText } from "../../i18n/product";
 import { LocaleProvider } from "../../i18n/locale";
 import { AboutPanel, UpdateBanner } from "./AboutPanel";
 import { UpdateWorkflow } from "./UpdateWorkflow";
+import { UpdateComponents } from "./UpdateComponents";
 
 const api = vi.hoisted(() => ({
   localUpdateStatus: vi.fn(), checkForUpdates: vi.fn(), updateDownloadState: vi.fn(), downloadUpdate: vi.fn(), cancelUpdateDownload: vi.fn(),
@@ -37,6 +38,58 @@ function updates(value = download()): RuntimeUpdates {
     install: vi.fn().mockResolvedValue(undefined), remindLater: vi.fn().mockResolvedValue(undefined) };
 }
 const wrap = (value: React.ReactNode) => <LocaleProvider>{value}</LocaleProvider>;
+
+describe("local component observations", () => {
+  it("distinguishes missing update plans from uninspected or unavailable installed versions", () => {
+    const value = local(download({ phase: "idle", version: null }));
+    value.view.candidate = null;
+    const ui = render(wrap(<UpdateComponents local={value} />));
+    expect(screen.getAllByText("No pending update")).toHaveLength(4);
+    expect(screen.getAllByText("No update planned")).toHaveLength(4);
+    expect(screen.getAllByText("Not inspected")).toHaveLength(4);
+    expect(screen.queryByText("File scope unknown")).not.toBeInTheDocument();
+    value.installed_observed = true;
+    ui.rerender(wrap(<UpdateComponents local={value} />));
+    expect(screen.getAllByText("Version unavailable")).toHaveLength(4);
+    expect(screen.queryByText("Not inspected")).not.toBeInTheDocument();
+  });
+
+  it("keeps a pending unverified package distinct from installed components", () => {
+    const value = local(download({ phase: "verifying" }));
+    value.view.candidate = null;
+    render(wrap(<UpdateComponents local={value} />));
+    expect(screen.getAllByText("Update not yet verified")).toHaveLength(4);
+    expect(screen.getAllByText("Update scope awaits verification")).toHaveLength(4);
+    expect(screen.queryByText("No pending update")).not.toBeInTheDocument();
+    expect(screen.queryByText("No update planned")).not.toBeInTheDocument();
+  });
+
+  it("shows a Desktop-owned running process without inventing a service or build version", () => {
+    const value = local();
+    value.running = [{ binary: "webcodex-runner", state: "running", service_state: "desktop_managed", version: null, git_commit: null, git_dirty: null }];
+    value.observation_error = true;
+    render(wrap(<UpdateComponents local={value} />));
+    const row = screen.getByRole("row", { name: /^runner / });
+    expect(within(row).getByText("Running; version unavailable")).toBeInTheDocument();
+    expect(within(row).getByText("Desktop-managed process")).toBeInTheDocument();
+    expect(within(row).queryByText("Service running")).not.toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Local runtime observation failed");
+  });
+
+  it("keeps the explicit component check busy until its one observation finishes", async () => {
+    const value = updates();
+    let finish!: () => void;
+    value.refreshLocal = vi.fn(() => new Promise<undefined>(resolve => { finish = () => resolve(undefined); }));
+    render(wrap(<AboutPanel state={aboutState} updates={value} />));
+    fireEvent.click(screen.getByRole("button", { name: "Inspect installed files" }));
+    const busy = screen.getByRole("button", { name: "Inspecting local components…" });
+    expect(busy).toBeDisabled();
+    fireEvent.click(busy);
+    expect(value.refreshLocal).toHaveBeenCalledExactlyOnceWith(true);
+    await act(async () => { finish(); });
+    expect(screen.getByRole("button", { name: "Inspect installed files" })).toBeEnabled();
+  });
+});
 
 beforeEach(() => {
   vi.resetAllMocks(); localStorage.setItem("webcodex.desktop.locale", "en-US");

@@ -13,8 +13,8 @@ use webcodex_core::ssh_resource::{
     normalize_ssh_resource_default_cwd, normalize_ssh_resource_target,
     validate_response_for_request, validate_ssh_resource_name, SshAuthentication, SshEndpoint,
     SshHostKeyCandidate, SshHostKeyTrust, SshOperatorConnection, SshResourceInventoryEntry,
-    SshResourceRequest, SshResourceResponse, SshResourceSource, SSH_RESOURCE_REQUEST_MAX_BYTES,
-    SSH_RESOURCE_RESPONSE_MAX_BYTES,
+    SshResourceRequest, SshResourceResponse, SshResourceSource, SshResourceVerificationEntry,
+    SshVerification, SSH_RESOURCE_REQUEST_MAX_BYTES, SSH_RESOURCE_RESPONSE_MAX_BYTES,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -89,6 +89,9 @@ pub struct SshResourcesSnapshot {
     pub runner: String,
     pub available: bool,
     pub setup_supported: bool,
+    pub verification_supported: bool,
+    pub verification_unavailable: bool,
+    pub verifications: Vec<SshResourceVerificationEntry>,
     pub observation_id: Option<String>,
     pub resources: Vec<SshResourceInventoryEntry>,
     pub error_kind: Option<SshResourceError>,
@@ -174,6 +177,9 @@ pub struct SshRemoveRequest {
 }
 
 pub(crate) enum Mutation {
+    VerifySaved {
+        name: String,
+    },
     Register {
         name: String,
         connection: SshOperatorConnection,
@@ -187,13 +193,18 @@ pub(crate) enum Mutation {
 impl Mutation {
     fn name(&self) -> &str {
         match self {
-            Self::Register { name, .. } | Self::Remove { name } => name,
+            Self::Register { name, .. } | Self::Remove { name } | Self::VerifySaved { name } => {
+                name
+            }
         }
     }
     fn arguments(self, binding: String) -> Result<Value, SshResourceError> {
         validate_ssh_resource_name(self.name())
             .map_err(|_| SshResourceError::SshResourceInvalid)?;
         Ok(match self {
+            Self::VerifySaved { name } => {
+                json!({"action":"verify_saved", "binding":binding, "name":name})
+            }
             Self::Register {
                 name,
                 connection,
@@ -260,6 +271,8 @@ struct Observation {
     binding: String,
     resources: Vec<SshResourceInventoryEntry>,
     setup_supported: bool,
+    verification_supported: bool,
+    verifications: Vec<SshResourceVerificationEntry>,
 }
 
 #[derive(Default)]
@@ -290,10 +303,23 @@ impl SshResourcesManager {
         let result = if identity.runner.is_empty() || identity.runner.len() > 128 {
             Err(SshResourceError::SshResourceRegistryUnavailable)
         } else {
-            gateway
-                .call(runtime, json!({"action":"list", "runner":identity.runner}))
-                .await
-                .and_then(|output| decode_list(output, &identity.runner))
+            let result = gateway
+                .call(
+                    runtime,
+                    json!({"action":"status", "runner":identity.runner}),
+                )
+                .await;
+            // A published older Server has no status route. Only an explicit
+            // unsupported read permits the old list; auth and transient errors do not.
+            let result = match result {
+                Err(SshResourceError::SshConnectionSetupUnsupported) => {
+                    gateway
+                        .call(runtime, json!({"action":"list", "runner":identity.runner}))
+                        .await
+                }
+                result => result,
+            };
+            result.and_then(|output| decode_list(output, &identity.runner))
         };
         match result {
             Ok(output) => {
@@ -302,6 +328,9 @@ impl SshResourcesManager {
                     runner: identity.runner.clone(),
                     available: true,
                     setup_supported: output.setup_supported,
+                    verification_supported: output.verification_supported,
+                    verification_unavailable: output.verification_unavailable,
+                    verifications: output.verifications.clone(),
                     observation_id: Some(id.clone()),
                     resources: output.resources.clone(),
                     error_kind: None,
@@ -312,6 +341,8 @@ impl SshResourcesManager {
                     binding: output.binding,
                     resources: output.resources,
                     setup_supported: output.setup_supported,
+                    verification_supported: output.verification_supported,
+                    verifications: output.verifications,
                 });
                 snapshot
             }
@@ -319,6 +350,9 @@ impl SshResourcesManager {
                 runner: identity.runner,
                 available: false,
                 setup_supported: false,
+                verification_supported: false,
+                verification_unavailable: false,
+                verifications: Vec::new(),
                 observation_id: None,
                 resources: Vec::new(),
                 error_kind: Some(error),
@@ -354,7 +388,10 @@ impl SshResourcesManager {
                 return Err(SshResourceError::SshConnectionSetupUnsupported);
             }
             let name = mutation.name().to_owned();
-            if matches!(mutation, Mutation::Remove { .. }) {
+            if matches!(
+                mutation,
+                Mutation::Remove { .. } | Mutation::VerifySaved { .. }
+            ) {
                 match observed
                     .resources
                     .iter()
@@ -367,9 +404,33 @@ impl SshResourcesManager {
                     None => return Err(SshResourceError::SshResourceNotFound),
                 }
             }
+            let verify_saved = matches!(mutation, Mutation::VerifySaved { .. });
+            if verify_saved
+                && (!observed.verification_supported
+                    || !observed
+                        .verifications
+                        .iter()
+                        .any(|entry| entry.name == name))
+            {
+                return Err(SshResourceError::SshConnectionSetupUnsupported);
+            }
             let remove = matches!(mutation, Mutation::Remove { .. });
             let arguments = mutation.arguments(observed.binding)?;
             let output = gateway.call(runtime, arguments).await?;
+            if verify_saved {
+                let response: VerificationOutput = serde_json::from_value(output)
+                    .map_err(|_| SshResourceError::SshResourceOutcomeUnknown)?;
+                if response.resource != name
+                    || !response.persisted
+                    || response.verification.validate().is_err()
+                {
+                    return Err(SshResourceError::SshResourceOutcomeUnknown);
+                }
+                if let Some(error) = response.verification.error_kind {
+                    return Err(SshResourceError::from_code(Some(error.code()), true));
+                }
+                return Ok(false);
+            }
             let response: MutationOutput = serde_json::from_value(output)
                 .map_err(|_| SshResourceError::SshResourceOutcomeUnknown)?;
             if response.resource != name
@@ -496,6 +557,19 @@ struct ListOutput {
     resources: Vec<SshResourceInventoryEntry>,
     #[serde(default)]
     setup_supported: bool,
+    #[serde(default)]
+    verification_supported: bool,
+    #[serde(default)]
+    verification_unavailable: bool,
+    #[serde(default)]
+    verifications: Vec<SshResourceVerificationEntry>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct VerificationOutput {
+    resource: String,
+    persisted: bool,
+    verification: SshVerification,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -517,11 +591,16 @@ fn decode_list(output: Value, runner: &str) -> Result<ListOutput, SshResourceErr
     }
     // Reuse the canonical inventory validator. The revision is a validation-only
     // placeholder; Desktop never sees or invents the binding's actual revision.
+    if !output.verification_supported && !output.verifications.is_empty() {
+        return Err(SshResourceError::SshResourceRegistryUnavailable);
+    }
     validate_response_for_request(
-        &SshResourceRequest::List,
-        &SshResourceResponse::List {
+        &SshResourceRequest::Status,
+        &SshResourceResponse::Status {
             revision: 0,
             resources: output.resources.clone(),
+            verifications: output.verifications.clone(),
+            verification_unavailable: output.verification_unavailable,
         },
     )
     .map_err(|_| SshResourceError::SshResourceRegistryUnavailable)?;
@@ -541,12 +620,18 @@ impl Gateway for HttpGateway {
             .filter(|action| {
                 matches!(
                     *action,
-                    "list" | "inspect" | "probe" | "register" | "remove"
+                    "list"
+                        | "status"
+                        | "verify_saved"
+                        | "inspect"
+                        | "probe"
+                        | "register"
+                        | "remove"
                 )
             })
             .ok_or(SshResourceError::SshResourceInvalid)?
             .to_owned();
-        let mutation = matches!(action.as_str(), "register" | "remove");
+        let mutation = matches!(action.as_str(), "register" | "remove" | "verify_saved");
         let unavailable = || SshResourceError::SshResourceRegistryUnavailable;
         let uncertain = || SshResourceError::unconfirmed(mutation);
         let mut url = url::Url::parse(&runtime.server_url).map_err(|_| unavailable())?;
@@ -606,6 +691,9 @@ impl Gateway for HttpGateway {
         let mut response = response.map_err(|_| uncertain())?;
         let status = response.status().as_u16();
         if matches!(status, 404 | 405 | 501) {
+            if action == "status" && status != 404 {
+                return Err(unavailable());
+            }
             return Err(SshResourceError::SshConnectionSetupUnsupported);
         }
         if status == 403 {

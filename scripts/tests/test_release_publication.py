@@ -823,10 +823,10 @@ class WorkflowContractTests(unittest.TestCase):
     def test_release_build_stages_desktop_candidates_in_workspace_dist(self) -> None:
         workflow = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
 
-        self.assertIn('Get-Content -LiteralPath "apps/desktop/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json', workflow)
-        self.assertIn('$tauriConfig.mainBinaryName', workflow)
-        self.assertIn('(\"release\\{0}.exe\" -f $tauriConfig.mainBinaryName)', workflow)
-        self.assertNotIn('"release\\webcodex-desktop.exe"', workflow)
+        self.assertIn('-CaptureDirectory $capture', workflow)
+        self.assertIn('$inputRoot = $env:UNIFIED_INSTALLED_INPUT', workflow)
+        self.assertIn('--webcodex-desktop WebCodex.exe', workflow)
+        self.assertNotIn('$desktopExe = Join-Path $env:DESKTOP_TAURI_TARGET', workflow)
 
         self.assertIn('desktop_dist="$GITHUB_WORKSPACE/dist"', workflow)
         self.assertIn('desktop="$desktop_dist/${{ steps.desktop_bundle.outputs.desktop_name }}"', workflow)
@@ -906,6 +906,84 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn('$expected = "$name $version (commit $source, dirty=false, built_at=$builtAt)"', ci)
         self.assertNotIn('expected="$name $version (commit $short_source, dirty=false, built_at=$built_at)"', ci)
         self.assertNotIn('$expected = "$name $version (commit $short, dirty=false, built_at=$builtAt)"', ci)
+
+    def test_windows_outer_reuses_the_manifest_checked_standard_installer(self) -> None:
+        workflow = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
+        windows = workflow.split("  windows:", 1)[1].split("\n  runtime-native:", 1)[0]
+        capture_at = windows.index("      - name: Capture installed Windows programs from the standard NSIS")
+        collect_at = windows.index("      - name: Collect native Windows unified installer inputs")
+        smoke_at = windows.index("      - name: Smoke native Windows Desktop NSIS candidate")
+        outer_at = windows.index("      - name: Build native Tauri payload and outer Windows bootstrap")
+        upload_at = windows.index("      - name: Upload Windows unified installer and provenance")
+        self.assertLess(capture_at, collect_at)
+        self.assertLess(collect_at, smoke_at)
+        self.assertLess(smoke_at, outer_at)
+        self.assertLess(outer_at, upload_at)
+        self.assertEqual(windows.count("node node_modules/@tauri-apps/cli/tauri.js build"), 1)
+        self.assertEqual(windows.count("& .\\scripts\\desktop_install_windows_smoke.ps1"), 2)
+        self.assertNotIn("UNIFIED_TAURI_CONFIG", windows)
+        self.assertNotIn("target\\unified-", windows)
+
+        capture = windows[capture_at:collect_at]
+        self.assertIn("if: inputs.include_unified_installers", capture)
+        self.assertIn('$capture = Join-Path $env:RUNNER_TEMP ("unified-installed-" + [Guid]::NewGuid()', capture)
+        self.assertIn('$installDir = Join-Path $env:LOCALAPPDATA ("WebCodex Payload Capture " + [Guid]::NewGuid()', capture)
+        self.assertIn("-Installer $env:DESKTOP_INSTALLER_PATH", capture)
+        self.assertIn("-InstallDir $installDir", capture)
+        self.assertIn("-CaptureDirectory $capture", capture)
+        self.assertIn('$env:DESKTOP_INSTALLER_SHA256 -cnotmatch \'^[0-9a-f]{64}$\'', capture)
+        self.assertIn("$hash -cne $env:DESKTOP_INSTALLER_SHA256", capture)
+        self.assertIn(".Hash.ToLowerInvariant() -cne $hash", capture)
+        self.assertLess(capture.index("& .\\scripts\\desktop_install_windows_smoke.ps1"),
+                        capture.index('"UNIFIED_INSTALLED_INPUT=$capture" >> $env:GITHUB_ENV'))
+        self.assertLess(capture.index(".Hash.ToLowerInvariant() -cne $hash"),
+                        capture.index('"UNIFIED_INSTALLED_INPUT=$capture" >> $env:GITHUB_ENV'))
+
+        collect = windows[collect_at:smoke_at]
+        self.assertIn("if: inputs.include_unified_installers", collect)
+        self.assertIn("$inputRoot = $env:UNIFIED_INSTALLED_INPUT", collect)
+        self.assertIn("if (-not $inputRoot -or -not (Test-Path", collect)
+        for option in ("--webcodex webcodex-runtime/webcodex.exe",
+                       "--webcodex-server webcodex-runtime/webcodex-server.exe",
+                       "--webcodex-runner webcodex-runtime/webcodex-runner.exe",
+                       "--webcodex-desktop WebCodex.exe", "--desktop-payload WebCodex.exe",
+                       "--desktop-executable WebCodex.exe"):
+            self.assertIn(option, collect)
+        self.assertNotIn("DESKTOP_TAURI_TARGET", collect)
+        self.assertNotIn("$binDir", collect)
+        self.assertNotIn("Copy-Item", collect)
+        self.assertIn('(Join-Path $candidate "source-manifest.json") -Raw | ConvertFrom-Json', collect)
+        self.assertIn('@("webcodex", "webcodex-server", "webcodex-runner", "webcodex-desktop")', collect)
+        self.assertIn("$programHashes[$name] = $manifest.artifacts.$name.sha256", collect)
+        self.assertIn('"UNIFIED_EXPECTED_PROGRAM_HASHES=$expectedProgramHashes" >> $env:GITHUB_ENV', collect)
+
+        smoke = windows[smoke_at:windows.index("      - name: Install NSIS compiler for the outer bootstrap")]
+        # Core-only builds still run the same single smoke without requiring a
+        # unified candidate; unified builds cannot silently omit the hash gate.
+        self.assertNotIn("\n        if:", smoke)
+        self.assertIn("INCLUDE_UNIFIED_INSTALLERS: ${{ inputs.include_unified_installers }}", smoke)
+        self.assertIn("$smokeOptions = @{}", smoke)
+        self.assertIn('if ($env:INCLUDE_UNIFIED_INSTALLERS -eq "true")', smoke)
+        self.assertIn("if (-not $env:UNIFIED_EXPECTED_PROGRAM_HASHES -or -not (Test-Path", smoke)
+        self.assertIn("$smokeOptions.ExpectedProgramHashes = $env:UNIFIED_EXPECTED_PROGRAM_HASHES", smoke)
+        self.assertIn("$smokeOptions.InstallDir = Join-Path $env:LOCALAPPDATA", smoke)
+        self.assertIn("-Installer $env:DESKTOP_INSTALLER_PATH", smoke)
+        self.assertIn("-Platform $env:WEBCODEX_RELEASE_PLATFORM @smokeOptions", smoke)
+        self.assertIn('$env:DESKTOP_INSTALLER_SHA256 -cnotmatch \'^[0-9a-f]{64}$\'', smoke)
+        self.assertIn("$hash -cne $env:DESKTOP_INSTALLER_SHA256", smoke)
+        self.assertIn(".Hash.ToLowerInvariant() -cne $hash", smoke)
+        self.assertLess(smoke.index("& .\\scripts\\desktop_install_windows_smoke.ps1"),
+                        smoke.index('"VERIFIED_DESKTOP_INSTALLER_SHA256=$hash" >> $env:GITHUB_ENV'))
+
+        outer = windows[outer_at:upload_at]
+        self.assertIn("$inner = $env:DESKTOP_INSTALLER_PATH", outer)
+        self.assertIn("Get-FileHash -LiteralPath $inner -Algorithm SHA256", outer)
+        self.assertIn('$env:VERIFIED_DESKTOP_INSTALLER_SHA256 -cnotmatch \'^[0-9a-f]{64}$\'', outer)
+        self.assertIn("$innerHash -cne $env:VERIFIED_DESKTOP_INSTALLER_SHA256", outer)
+        self.assertLess(outer.index("$innerHash -cne $env:VERIFIED_DESKTOP_INSTALLER_SHA256"),
+                        outer.index("build_windows_unified_bootstrap.py"))
+        self.assertIn("--inner-installer $inner", outer)
+        self.assertNotIn("Copy-Item -LiteralPath $built", outer)
 
     def test_server_image_publication_is_separate_and_multi_arch(self) -> None:
         candidate = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")

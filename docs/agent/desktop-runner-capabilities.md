@@ -41,8 +41,10 @@ Desktop-managed row is shown as Active.
 ### SSH Resources
 
 The inventory always comes from the exact Desktop Runner's canonical
-`manage_ssh_resource` gateway. It shows only name, Managed/Static source, active state,
-and pending-restart state. Static resources have no Remove action.
+`manage_ssh_resource` gateway. Its legacy list still shows only name, Managed/Static
+source, active state, and pending-restart state. The first-party status route also
+projects the latest saved direct-connection check (time and a closed result code).
+Static resources have no Remove action.
 
 **Add SSH resource** defaults to a direct connection: resource name, host/IP,
 port (22 by default), username, authentication method, and optional remote
@@ -67,19 +69,42 @@ It retains the Runner's existing OpenSSH configuration. Desktop does not import
 `~/.ssh/config` or copy a local key to a different Runner.
 
 After submission, connection fields and secrets are cleared from the transient
-form. Inventory still returns logical names and lifecycle state only. Credentials
+form. Inventory returns logical names, lifecycle state, and safe verification
+metadata only. Credentials
 are stored in private, owner-checked files on the Runner, separately from the
 managed registry; they are not an operating-system encrypted password vault.
 They do not enter model tool arguments, Workflow Session history, or full tool
-traces. There is no Desktop connection-history database. To change a saved
+traces. There is no Desktop connection-history database. An optional, bounded history file in the Runner's existing private store records
+only its most recent verification per resource, bound to the name, exact saved
+configuration and credential UUID. The canonical resource registry format is
+unchanged, so older Runners and rollback can still read it. History never grants
+resource or credential authority, and missing or corrupt history cannot prevent
+canonical resource loading. Corrupt/unreadable history is shown explicitly while
+its check results remain unknown. Missing old/imported records or
+changed bindings remain unverified; a prior successful timestamp is never invented.
+To change a saved
 connection, remove its managed resource and add it again. Removing the reference
 does not remove files on the remote machine.
 
 **Loaded** means the running Runner loaded that configuration; it is not a live
-connection or a successful login assertion. A successful connection test is
-evidence about that form's endpoint, key, and credentials at that moment. Saving
-still stages desired state and explicitly restarting the Runner applies it.
+connection or a successful login assertion. **Last connection check succeeded**
+or **failed** includes the time of that check and survives refresh, navigation,
+and Runner restart. It describes the saved configuration at that moment, not
+continuous availability. Saving a direct connection records its real final
+authentication probe. **Verify connection again** performs one explicit bounded
+check using the same saved host-key trust and private credential lease; neither
+refresh nor restart runs a probe. Saved checks are restricted to managed direct
+connections, not static resources or advanced aliases with inherited SSH settings.
+Saving still stages desired state and explicitly restarting the Runner applies it.
 Chat can then select the active logical resource without receiving its password.
+
+The additive `ssh_verification_history` capability gates the new status and saved
+probe wire operations at enqueue and dispatch. Older Runners keep their existing
+list/setup functions. Desktop falls back to the older Server list only for an
+explicit unsupported status route; authorization or transient errors remain errors.
+Both new operator routes retain the first-party `ssh:local` authority gate. A saved
+check consumes its observation once, rechecks the registry revision, connection
+binding and Runner generation before committing its result, and then re-lists.
 
 Every mutation consumes a fresh observation and immediately re-lists. An uncertain
 result remains explicitly uncertain even when the subsequent list succeeds.

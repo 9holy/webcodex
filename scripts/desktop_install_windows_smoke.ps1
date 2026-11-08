@@ -11,7 +11,8 @@ param(
     [string]$InstallDir,
     [string]$PreviousInstaller,
     [string]$PreviousInstallerSha256,
-    [string]$ExpectedProgramHashes
+    [string]$ExpectedProgramHashes,
+    [string]$CaptureDirectory
 )
 
 $ErrorActionPreference = "Stop"
@@ -49,19 +50,78 @@ function Read-ExpectedProgramHashes([string]$Path) {
     }
 }
 
-function Assert-ExpectedProgramHashes([string]$InstalledDir, [hashtable]$Expected) {
-    if ($null -eq $Expected) { return }
-    $paths = @{
+function Get-InstalledProgramPaths {
+    return [ordered]@{
         "webcodex" = "webcodex-runtime/webcodex.exe"
         "webcodex-server" = "webcodex-runtime/webcodex-server.exe"
         "webcodex-runner" = "webcodex-runtime/webcodex-runner.exe"
         "webcodex-desktop" = "WebCodex.exe"
     }
+}
+
+function Assert-ExpectedProgramHashes([string]$InstalledDir, [hashtable]$Expected) {
+    if ($null -eq $Expected) { return }
+    $paths = Get-InstalledProgramPaths
     foreach ($name in $paths.Keys) {
         $path = Join-Path $InstalledDir $paths[$name]
         if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
             (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $Expected[$name].ToUpperInvariant()) {
             throw "installed $name bytes differ from the frozen public source manifest"
+        }
+    }
+}
+
+function Assert-NewCaptureDirectory([string]$Path) {
+    $resolved = Resolve-InputPath $Path
+    if ($null -ne (Get-Item -LiteralPath $resolved -Force -ErrorAction SilentlyContinue)) {
+        throw "refusing installed-program capture because its output already exists"
+    }
+    $parent = Get-Item -LiteralPath (Split-Path -Parent $resolved) -Force -ErrorAction Stop
+    if (-not $parent.PSIsContainer) { throw "installed-program capture parent must be a directory" }
+    while ($null -ne $parent) {
+        if (($parent.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "installed-program capture must not traverse a reparse point"
+        }
+        $parent = $parent.Parent
+    }
+    return $resolved
+}
+
+function Export-InstalledPrograms([string]$InstalledDir, [string]$Directory) {
+    $capture = Assert-NewCaptureDirectory $Directory
+    foreach ($path in @($InstalledDir, (Join-Path $InstalledDir "webcodex-runtime"))) {
+        $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+        if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "installed-program capture requires regular installation directories"
+        }
+    }
+    $paths = Get-InstalledProgramPaths
+    $before = @{}
+    foreach ($name in $paths.Keys) {
+        $source = Join-Path $InstalledDir $paths[$name]
+        $item = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+        if ($item.PSIsContainer -or $item.Length -le 0 -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "installed $name capture requires a nonempty regular file"
+        }
+        $before[$name] = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash
+    }
+    # Never merge into an existing directory or copy an uninstaller/user data.
+    # The caller adopts these four files only after the finally block has also
+    # completed the normal uninstall and registry/payload cleanup checks.
+    New-Item -ItemType Directory -Path $capture -ErrorAction Stop | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $capture "webcodex-runtime") -ErrorAction Stop | Out-Null
+    foreach ($name in $paths.Keys) {
+        $source = Join-Path $InstalledDir $paths[$name]
+        $destination = Join-Path $capture $paths[$name]
+        [IO.File]::Copy($source, $destination, $false)
+        $sourceItem = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+        $destinationItem = Get-Item -LiteralPath $destination -Force -ErrorAction Stop
+        if (($sourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            ($destinationItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne $before[$name] -or
+            (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -cne $before[$name]) {
+            throw "installed $name bytes changed during capture"
         }
     }
 }
@@ -83,6 +143,12 @@ if ($InstallDir) {
     if (Test-Path -LiteralPath $requestedInstallDir) {
         throw "refusing custom-directory smoke because the requested install directory already exists: $requestedInstallDir"
     }
+}
+if ($CaptureDirectory) {
+    if (-not $requestedInstallDir -or $PreviousInstaller) {
+        throw "installed-program capture requires one fresh isolated InstallDir"
+    }
+    $CaptureDirectory = Assert-NewCaptureDirectory $CaptureDirectory
 }
 if ([bool]$PreviousInstaller -ne [bool]$PreviousInstallerSha256) {
     throw "PreviousInstaller and its pinned SHA-256 must be supplied together"
@@ -344,6 +410,9 @@ try {
     }
 
     Assert-ExpectedProgramHashes $installedDir $expectedHashes
+    if ($CaptureDirectory) {
+        Export-InstalledPrograms $installedDir $CaptureDirectory
+    }
     if ($PreviousInstaller) {
         Write-Output "Pinned upstream-to-candidate upgrade passed: original folder, Desktop data and unrelated process preserved"
     }

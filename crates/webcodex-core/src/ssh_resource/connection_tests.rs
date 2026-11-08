@@ -30,6 +30,88 @@ fn probe() -> SshResourceRequest {
 }
 
 #[test]
+fn saved_verification_contract_is_bounded_and_separate_from_legacy_list() {
+    use crate::ssh_resource::{
+        SshResourceInventoryEntry, SshResourceSource, SshResourceVerificationEntry, SshVerification,
+    };
+    let resources = vec![SshResourceInventoryEntry {
+        name: "saved".into(),
+        source: SshResourceSource::Managed,
+        active: true,
+        pending_restart: false,
+    }];
+    let record = SshVerification {
+        checked_at: 1_700_000_000,
+        error_kind: None,
+    };
+    let response = SshResourceResponse::Status {
+        revision: 7,
+        resources: resources.clone(),
+        verification_unavailable: false,
+        verifications: vec![SshResourceVerificationEntry {
+            name: "saved".into(),
+            verification: Some(record.clone()),
+        }],
+    };
+    assert!(validate_response_for_request(&SshResourceRequest::Status, &response).is_ok());
+    assert!(validate_response_for_request(&SshResourceRequest::List, &response).is_err());
+    let mut unavailable = response.clone();
+    if let SshResourceResponse::Status {
+        verification_unavailable,
+        ..
+    } = &mut unavailable
+    {
+        *verification_unavailable = true;
+    }
+    assert!(validate_response_for_request(&SshResourceRequest::Status, &unavailable).is_err());
+    let mut foreign = response.clone();
+    if let SshResourceResponse::Status { verifications, .. } = &mut foreign {
+        verifications[0].name = "not-in-canonical-registry".into();
+    }
+    assert!(validate_response_for_request(&SshResourceRequest::Status, &foreign).is_err());
+    let legacy = serde_json::to_value(SshResourceResponse::List {
+        revision: 7,
+        resources,
+    })
+    .unwrap();
+    assert_eq!(legacy["resources"][0].as_object().unwrap().len(), 4);
+    assert!(legacy.get("verifications").is_none());
+    let request = SshResourceRequest::VerifySaved {
+        expected_revision: 7,
+        name: "saved".into(),
+    };
+    assert!(request.requires_verification_history());
+    assert!(request.requires_connection_setup());
+    for (revision, name, persisted, checked_at, expected) in [
+        (7, "saved", true, 1, true),
+        (8, "saved", true, 1, false),
+        (9, "saved", true, 1, false),
+        (7, "other", true, 1, false),
+        (7, "saved", false, 1, false),
+        (7, "saved", true, 0, false),
+        (7, "saved", true, 253_402_300_800, false),
+    ] {
+        let response = SshResourceResponse::VerifySaved {
+            revision,
+            resource: name.into(),
+            persisted,
+            verification: SshVerification {
+                checked_at,
+                error_kind: None,
+            },
+        };
+        assert_eq!(
+            validate_response_for_request(&request, &response).is_ok(),
+            expected
+        );
+    }
+    assert!(serde_json::from_value::<SshVerification>(
+        serde_json::json!({"checked_at":1,"error_kind":"private-untrusted-output"})
+    )
+    .is_err());
+}
+
+#[test]
 fn ssh_connection_secret_roundtrips_only_on_transport_and_never_in_debug() {
     let request = probe();
     let json = serde_json::to_string(&request).unwrap();

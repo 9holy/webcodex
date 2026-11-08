@@ -157,9 +157,21 @@ pub struct PreparedCodex {
 
 fn preparation_error(kind: &str) -> SetupDiagnostic {
     let (code, message, recovery) = match kind {
-        "codex_not_found" | "codex_requires_native_executable" => (
-            "codex_not_found", "A native Codex executable was not found",
-            "Install Codex CLI or select its native executable; Windows command wrappers require the native executable or an explicit Node launcher"),
+        "codex_not_found" => (
+            "codex_not_found", "Codex CLI was not found",
+            "Install Codex CLI for this OS account or select the intended executable, then prepare again"),
+        "codex_requires_native_executable" => (
+            "codex_requires_native_executable", "This Codex command wrapper is not supported",
+            "Select a native Codex executable or a standard npm Codex launcher; custom wrappers require an explicit native Node executable and absolute launcher script"),
+        "codex_npm_layout_invalid" => (
+            "codex_npm_layout_invalid", "The selected npm Codex installation is incomplete or unsupported",
+            "Repair the selected Codex installation or select its native executable; no other installation was selected"),
+        "codex_node_not_found" => (
+            "codex_node_not_found", "The npm Codex launcher requires a native Node.js executable",
+            "Make node.exe available on PATH or beside the npm launcher, or select a native Node executable and absolute Codex script explicitly"),
+        "codex_launcher_arguments_invalid" => (
+            "codex_launcher_arguments_invalid", "The Codex launcher arguments exceed the supported limits",
+            "Use at most eight fixed arguments; an automatically selected npm launcher script occupies one argument"),
         "codex_version_mismatch" | "codex_changed_during_prepare" => (
             "codex_version_mismatch", "The installed Codex does not match the requested version",
             "Select the intended installation and prepare it again; no provider was enabled"),

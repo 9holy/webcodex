@@ -41,6 +41,16 @@ pub(super) async fn list(req: &mut Request, depot: &mut Depot) -> ConsoleResult 
 }
 
 #[handler]
+pub(super) async fn status(req: &mut Request, depot: &mut Depot) -> ConsoleResult {
+    call::<operator::ListInput>(req, depot, OperatorRequest::Status).await
+}
+
+#[handler]
+pub(super) async fn verify_saved(req: &mut Request, depot: &mut Depot) -> ConsoleResult {
+    call::<operator::RemoveInput>(req, depot, OperatorRequest::VerifySaved).await
+}
+
+#[handler]
 pub(super) async fn inspect(req: &mut Request, depot: &mut Depot) -> ConsoleResult {
     call::<operator::InspectInput>(req, depot, OperatorRequest::Inspect).await
 }

@@ -152,6 +152,7 @@ fn desktop_builder() -> tauri::Builder<tauri::Wry> {
             commands::ssh_resource_list,
             commands::ssh_connection_inspect,
             commands::ssh_connection_probe,
+            commands::ssh_resource_verify_saved,
             commands::ssh_resource_register,
             commands::ssh_resource_remove,
             commands::authorize_runner_capabilities,

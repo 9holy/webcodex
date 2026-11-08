@@ -75,9 +75,22 @@ export interface SshResourcesSnapshot {
   runner: string;
   available: boolean;
   setup_supported?: boolean;
+  verification_supported?: boolean;
+  verification_unavailable?: boolean;
+  verifications?: SshResourceVerificationEntry[];
   observation_id: string | null;
   resources: SshResource[];
   error_kind: SshResourceError | null;
+}
+export interface SshVerification {
+  checked_at: number;
+  error_kind: Extract<SshResourceError, "ssh_connection_failed" | "ssh_authentication_failed" | "ssh_host_key_changed"
+    | "ssh_program_unavailable" | "ssh_connection_timeout" | "ssh_identity_file_invalid"
+    | "ssh_credentials_unavailable" | "ssh_client_permission_denied"> | null;
+}
+export interface SshResourceVerificationEntry {
+  name: string;
+  verification: SshVerification | null;
 }
 export interface SshMutationResult {
   success: boolean;

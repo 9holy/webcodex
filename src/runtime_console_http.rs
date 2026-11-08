@@ -105,6 +105,14 @@ pub(crate) fn routes() -> Router {
                 .post(ssh_resources::list),
         )
         .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleSshResourcesStatus))
+                .post(ssh_resources::status),
+        )
+        .push(
+            Router::with_path(api_path(RouteId::RuntimeConsoleSshResourcesVerifySaved))
+                .post(ssh_resources::verify_saved),
+        )
+        .push(
             Router::with_path(api_path(RouteId::RuntimeConsoleSshResourcesInspect))
                 .post(ssh_resources::inspect),
         )

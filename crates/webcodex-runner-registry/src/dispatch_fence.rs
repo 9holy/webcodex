@@ -282,6 +282,19 @@ impl PendingDispatchFence {
                     } else {
                         None
                     }
+                }).or_else(|| {
+                    if matches!(operation, RunnerOperation::SshResource(request) if request.requires_verification_history()) {
+                        control_rejection(
+                            runner,
+                            runner_instance_id,
+                            RunnerFeature::SshVerificationHistory,
+                            "saved SSH verification",
+                            "ssh_connection_setup_unsupported",
+                            "Saved SSH verification capability changed before dispatch",
+                        )
+                    } else {
+                        None
+                    }
                 })
             }
         }

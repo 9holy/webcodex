@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 import urllib.error
 from pathlib import Path
+from unittest import mock
 
 from scripts import collect_release_bundle as collector
 from scripts import release_readiness as readiness
@@ -350,7 +355,230 @@ class DispatchClassificationTests(unittest.TestCase):
             readiness._post_dispatch(client, SOURCE_REF, SOURCE, REQUEST, 777, 2)
 
 
+class V8WorkflowInputTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.workspace = self.root / "workspace"
+        self.workspace.mkdir()
+        self.runner_temp = self.root / "runner-temp"
+        self.runner_temp.mkdir()
+        self.environment_file = self.root / "github-env"
+        workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        step = workflow.split("      - name: Prepare pinned V8 archive for Linux server experiments\n", 1)[1]
+        step = step.split("      - name: Run experimental Code Mode and receipt tests\n", 1)[0]
+        self.assertIn("if: matrix.shard == 'server'", step)
+        self.code = compile(textwrap.dedent(step.split("        run: |\n", 1)[1]), "<actual V8 workflow step>", "exec")
+        self.commands = []
+        self.downloads = []
+
+    def execute(self, *, system="Linux", machine="x86_64", host="x86_64-unknown-linux-gnu",
+                version="149.2.0", features="default,use_custom_libcxx", overrides=None,
+                download_failure=False) -> None:
+        from scripts import download_pinned_ci_input as downloader
+
+        (self.workspace / "Cargo.lock").write_text(
+            '[[package]]\nname = "v8"\nversion = "' + version + '"\n'
+            'source = "registry+https://github.com/rust-lang/crates.io-index"\n', encoding="utf-8")
+        self.environment_file.write_text("KEEP=original\n", encoding="utf-8")
+        environment = {"GITHUB_WORKSPACE": str(self.workspace), "RUNNER_TEMP": str(self.runner_temp),
+                       "GITHUB_ENV": str(self.environment_file), **(overrides or {})}
+        self.commands.clear()
+        self.downloads.clear()
+
+        def run(command, **kwargs):
+            self.commands.append(command)
+            if command == ["rustc", "-vV"]:
+                stdout = f"rustc fixture\nhost: {host}\n"
+            elif command[:2] == ["cargo", "tree"]:
+                stdout = f"v8 v149.2.0|{features}\n"
+            else:
+                self.fail(f"unexpected subprocess in archive guard: {command}")
+            self.assertTrue(kwargs["check"])
+            self.assertEqual(kwargs["cwd"], self.workspace.resolve())
+            return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+        def download(key, destination):
+            self.downloads.append((key, destination))
+            self.assertEqual(key, "v8-linux-x64")
+            self.assertFalse(destination.exists())
+            if download_failure:
+                raise RuntimeError("bounded transport failure")
+            destination.write_bytes(b"verified archive fixture")
+            return destination.resolve(strict=True)
+
+        with mock.patch.dict(os.environ, environment, clear=True), \
+             mock.patch.object(sys, "path", list(sys.path)), \
+             mock.patch("platform.system", return_value=system), \
+             mock.patch("platform.machine", return_value=machine), \
+             mock.patch("subprocess.run", side_effect=run), \
+             mock.patch.object(downloader, "download_asset", side_effect=download):
+            exec(self.code, {"__name__": "__main__"})
+
+    def assert_rejected(self, **options) -> None:
+        with self.assertRaises(SystemExit):
+            self.execute(**options)
+        self.assertEqual(self.downloads, [])
+        self.assertEqual(self.environment_file.read_text(encoding="utf-8"), "KEEP=original\n")
+
+    def test_matching_native_archive_exports_only_the_completed_absolute_path(self) -> None:
+        self.execute()
+        self.assertEqual(len(self.downloads), 1)
+        archive = self.downloads[0][1].resolve()
+        self.assertTrue(archive.is_absolute())
+        self.assertEqual(self.environment_file.read_text(encoding="utf-8"),
+                         f"KEEP=original\nRUSTY_V8_ARCHIVE={archive}\n")
+        tree = self.commands[-1]
+        self.assertEqual(tree[tree.index("-p") + 1], "webcodex")
+        self.assertEqual(tree[tree.index("--target") + 1], "x86_64-unknown-linux-gnu")
+        self.assertEqual(tree[tree.index("--features") + 1], "experimental-code-mode")
+        self.assertIn("--locked", tree)
+
+    def test_wrong_os_architecture_or_rust_host_rejects_before_download(self) -> None:
+        for options in ({"system": "Windows"}, {"machine": "aarch64"},
+                        {"host": "x86_64-unknown-linux-musl"}):
+            with self.subTest(options=options):
+                self.assert_rejected(**options)
+
+    def test_wrong_locked_v8_version_rejects_before_download(self) -> None:
+        self.assert_rejected(version="149.3.0")
+
+    def test_incompatible_v8_features_reject_before_download(self) -> None:
+        for extra in ("v8_enable_pointer_compression", "v8_enable_sandbox", "simdutf", "v8_enable_v8_checks"):
+            with self.subTest(feature=extra):
+                self.assert_rejected(features=f"default,use_custom_libcxx,{extra}")
+        self.assert_rejected(features="default")
+
+    def test_archive_debug_source_mirror_flags_and_target_overrides_reject(self) -> None:
+        for name, value in {"V8_FORCE_DEBUG": "1", "V8_FROM_SOURCE": "1", "RUSTY_V8_ARCHIVE": "",
+                            "RUSTY_V8_MIRROR": "https://other.invalid", "RUSTY_V8_SRC_BINDING_PATH": "/other",
+                            "RUSTFLAGS": "-Zsanitizer=address", "CARGO_FEATURE_SIMDUTF": "1",
+                            "CARGO_BUILD_TARGET": "aarch64-unknown-linux-gnu"}.items():
+            with self.subTest(override=name):
+                self.assert_rejected(overrides={name: value})
+
+    def test_download_failure_does_not_export_an_archive(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "bounded transport failure"):
+            self.execute(download_failure=True)
+        self.assertEqual(len(self.downloads), 1)
+        self.assertEqual(self.environment_file.read_text(encoding="utf-8"), "KEEP=original\n")
+
+
+class NsisInputPrefetchTests(unittest.TestCase):
+    workflows = ("ci.yml", "extended-native.yml", "release-build.yml")
+
+    def execute(self, workflow: str, temporary: Path, download) -> None:
+        from scripts import download_pinned_ci_input as downloader
+
+        text = (Path(".github/workflows") / workflow).read_text(encoding="utf-8")
+        step = text.split("      - name: Prefetch pinned Windows NSIS inputs\n", 1)[1]
+        step = step.split("\n      - ", 1)[0]
+        code = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        with mock.patch.dict(os.environ, {"GITHUB_WORKSPACE": str(Path.cwd()),
+                                          "RUNNER_TEMP": str(temporary)}, clear=True), \
+             mock.patch.object(sys, "path", list(sys.path)), \
+             mock.patch.object(downloader, "download_asset", side_effect=download):
+            exec(code, {"__name__": "__main__"})
+
+    def test_each_workflow_downloads_only_the_two_fixed_inputs_to_a_new_directory(self) -> None:
+        for workflow in self.workflows:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "webcodex-nsis-inputs"
+                calls = []
+
+                def download(key, destination):
+                    calls.append((key, destination))
+                    with destination.open("xb") as output:
+                        output.write(b"verified input fixture")
+                    return destination
+
+                self.execute(workflow, Path(temporary), download)
+                self.assertEqual(calls, [("tauri-nsis", root / "nsis-3.11.zip"),
+                                         ("tauri-nsis-utils", root / "nsis_tauri_utils.dll")])
+                self.assertEqual(sorted(path.name for path in root.iterdir()),
+                                 ["nsis-3.11.zip", "nsis_tauri_utils.dll"])
+
+    def test_existing_input_directory_is_not_reused_or_overwritten(self) -> None:
+        for workflow in self.workflows:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "webcodex-nsis-inputs"
+                root.mkdir()
+                sentinel = root / "existing"
+                sentinel.write_bytes(b"keep")
+                download = mock.Mock()
+                with self.assertRaises(FileExistsError):
+                    self.execute(workflow, Path(temporary), download)
+                download.assert_not_called()
+                self.assertEqual(list(root.iterdir()), [sentinel])
+                self.assertEqual(sentinel.read_bytes(), b"keep")
+
+    def test_failed_second_input_propagates_without_fallback_or_an_accepted_plugin(self) -> None:
+        for workflow in self.workflows:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as temporary:
+                calls = []
+
+                def download(key, destination):
+                    calls.append(key)
+                    if key == "tauri-nsis-utils":
+                        raise RuntimeError("bounded input failure")
+                    destination.write_bytes(b"verified archive fixture")
+                    return destination
+
+                with self.assertRaisesRegex(RuntimeError, "bounded input failure"):
+                    self.execute(workflow, Path(temporary), download)
+                self.assertEqual(calls, ["tauri-nsis", "tauri-nsis-utils"])
+                root = Path(temporary) / "webcodex-nsis-inputs"
+                self.assertEqual([path.name for path in root.iterdir()], ["nsis-3.11.zip"])
+
+
 class WorkflowContractTests(unittest.TestCase):
+    def test_fixed_ci_inputs_preserve_native_build_and_test_boundaries(self) -> None:
+        ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+        extended = Path(".github/workflows/extended-native.yml").read_text(encoding="utf-8")
+        release = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
+        for workflow, job_name, first_build, step_name, build in (
+            (ci, "test-windows-desktop", "Check Desktop frontend", "Build unsigned NSIS installer", "npm exec tauri -- build"),
+            (extended, "windows-arm64", "Verify native Windows ARM64 host and runtime surfaces", "Build unsigned Windows ARM64 Desktop NSIS candidate", "tauri.js build"),
+            (release, "windows", "Build and verify native Windows candidate", "Build unsigned native Windows Desktop NSIS candidate", "tauri.js build"),
+        ):
+            with self.subTest(step=step_name):
+                job = workflow.split(f"  {job_name}:\n", 1)[1]
+                prefetch_name = "      - name: Prefetch pinned Windows NSIS inputs\n"
+                self.assertEqual(workflow.count(prefetch_name), 1)
+                prefetch = job.split(prefetch_name, 1)[1].split("\n      - ", 1)[0]
+                self.assertIn("shell: python", prefetch)
+                self.assertNotIn("if:", prefetch)
+                self.assertNotIn("continue-on-error:", prefetch)
+                self.assertLess(job.index("actions/setup-python@"), job.index(prefetch_name))
+                self.assertLess(job.index(prefetch_name), job.index(f"      - name: {first_build}\n"))
+                step = job.split(f"      - name: {step_name}\n", 1)[1].split("\n      - ", 1)[0]
+                self.assertIn('python "$env:GITHUB_WORKSPACE\\scripts\\prepare_tauri_nsis_ci_tools.py"', step)
+                self.assertIn("--tools-directory (Join-Path $env:LOCALAPPDATA 'tauri')", step)
+                self.assertIn("--input-directory (Join-Path $env:RUNNER_TEMP 'webcodex-nsis-inputs')", step)
+                self.assertIn('if ($LASTEXITCODE -ne 0) { throw "Pinned Tauri NSIS tools preparation failed" }', step)
+                self.assertNotIn("continue-on-error:", step)
+                self.assertLess(step.index("prepare_tauri_nsis_ci_tools.py"), step.index(build))
+        for workflow in (ci, extended):
+            self.assertIn("scripts.tests.test_download_pinned_ci_input scripts.tests.test_prepare_tauri_nsis_ci_tools", workflow)
+        fixture = ci.split("      - name: Download pinned real Windows installer fixtures\n", 1)[1]
+        fixture = fixture.split("\n      - name:", 1)[0]
+        self.assertIn("sys.path.insert(0, os.environ['GITHUB_WORKSPACE'])", fixture)
+        self.assertIn("download_asset(asset_keys[key], destination)", fixture)
+        self.assertIn("actual != expected", fixture)
+        self.assertNotIn("urlopen", fixture)
+        windows_desktop = ci.split("  test-windows-desktop:\n", 1)[1]
+        self.assertLess(windows_desktop.index("Download pinned real Windows installer fixtures"),
+                        windows_desktop.index("Check Desktop frontend"))
+        self.assertLess(windows_desktop.index("Download pinned real Windows installer fixtures"),
+                        windows_desktop.index("Check Desktop Rust"))
+        self.assertIn("$previous = $env:PREVIOUS_INSTALLER", ci)
+        experiments = ci.split("      - name: Run experimental Code Mode and receipt tests\n", 1)[1]
+        experiments = experiments.split("\n      - name:", 1)[0]
+        self.assertEqual(experiments.count("--target x86_64-unknown-linux-gnu -p webcodex --features experimental-code-mode"), 2)
+        self.assertIn("code_mode", experiments)
+        self.assertIn("receipt_tests", experiments)
+
     def test_release_build_preflight_provisions_inventory_dependency(self) -> None:
         workflow = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
         preflight = workflow.split("  preflight:\n", 1)[1].split("\n  prepare:\n", 1)[0]

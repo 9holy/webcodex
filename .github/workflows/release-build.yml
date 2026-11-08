@@ -682,6 +682,26 @@ jobs:
           fetch-tags: true
           persist-credentials: false
           ref: refs/tags/${{ inputs.tag }}
+      - name: Install Python for Windows installer inputs
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Prefetch pinned Windows NSIS inputs
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, os.environ['GITHUB_WORKSPACE'])
+          from scripts.download_pinned_ci_input import download_asset
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'webcodex-nsis-inputs'
+          root.mkdir(exist_ok=False)
+          download_asset('tauri-nsis', root / 'nsis-3.11.zip')
+          download_asset('tauri-nsis-utils', root / 'nsis_tauri_utils.dll')
+
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.rust_target }}
@@ -811,6 +831,10 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          python "$env:GITHUB_WORKSPACE\scripts\prepare_tauri_nsis_ci_tools.py" `
+            --tools-directory (Join-Path $env:LOCALAPPDATA 'tauri') `
+            --input-directory (Join-Path $env:RUNNER_TEMP 'webcodex-nsis-inputs')
+          if ($LASTEXITCODE -ne 0) { throw "Pinned Tauri NSIS tools preparation failed" }
           $env:CARGO_TARGET_DIR = $env:DESKTOP_TAURI_TARGET
           node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --config $env:DESKTOP_TAURI_CONFIG --ci --no-sign -- --locked
           if ($LASTEXITCODE -ne 0) { throw "Tauri NSIS build failed" }
@@ -825,70 +849,100 @@ jobs:
             "$hash  $env:DESKTOP_INSTALLER_NAME`n",
             [System.Text.Encoding]::ASCII
           )
+          "DESKTOP_INSTALLER_SHA256=$hash" >> $env:GITHUB_ENV
 
-      - name: Smoke native Windows Desktop NSIS candidate
+      - name: Capture installed Windows programs from the standard NSIS
+        if: inputs.include_unified_installers
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          $hash = (Get-FileHash -LiteralPath $env:DESKTOP_INSTALLER_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($env:DESKTOP_INSTALLER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $hash -cne $env:DESKTOP_INSTALLER_SHA256) {
+            throw "Desktop NSIS candidate changed before installed-program capture"
+          }
+          $capture = Join-Path $env:RUNNER_TEMP ("unified-installed-" + [Guid]::NewGuid().ToString("N"))
+          $installDir = Join-Path $env:LOCALAPPDATA ("WebCodex Payload Capture " + [Guid]::NewGuid().ToString("N"))
           & .\scripts\desktop_install_windows_smoke.ps1 `
             -Installer $env:DESKTOP_INSTALLER_PATH `
             -Version $env:VERSION `
             -SourceSha $env:SOURCE_SHA `
             -BuiltAt ([Int64]$env:WEBCODEX_BUILT_AT) `
-            -Platform $env:WEBCODEX_RELEASE_PLATFORM
-
-      - name: Install Python for Windows unified installer provenance
-        if: inputs.include_unified_installers
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
+            -Platform $env:WEBCODEX_RELEASE_PLATFORM `
+            -InstallDir $installDir `
+            -CaptureDirectory $capture
+          if ((Get-FileHash -LiteralPath $env:DESKTOP_INSTALLER_PATH -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash) {
+            throw "Desktop NSIS candidate changed during installed-program capture"
+          }
+          "UNIFIED_INSTALLED_INPUT=$capture" >> $env:GITHUB_ENV
 
       - name: Collect native Windows unified installer inputs
         if: inputs.include_unified_installers
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $binDir = Join-Path "target" (Join-Path $env:RUST_TARGET "release")
-          $tauriConfig = Get-Content -LiteralPath "apps/desktop/src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
-          if (-not $tauriConfig.mainBinaryName) { throw "Tauri mainBinaryName is missing" }
-          $desktopExe = Join-Path $env:DESKTOP_TAURI_TARGET ("release\{0}.exe" -f $tauriConfig.mainBinaryName)
-          if (-not (Test-Path -LiteralPath $desktopExe -PathType Leaf)) {
-            throw "Native Desktop executable missing: $desktopExe"
+          # Tauri patches its main executable for NSIS, then restores target/.
+          # Only the real installed bytes describe the payload in this NSIS.
+          $inputRoot = $env:UNIFIED_INSTALLED_INPUT
+          if (-not $inputRoot -or -not (Test-Path -LiteralPath $inputRoot -PathType Container)) {
+            throw "Native Windows collection requires the captured installed programs"
           }
-          $inputRoot = Join-Path $env:RUNNER_TEMP "unified-input-$env:WEBCODEX_RELEASE_PLATFORM"
-          $binInput = Join-Path $inputRoot "artifacts\bin"
-          New-Item -ItemType Directory -Force -Path $binInput | Out-Null
-          foreach ($name in @("webcodex", "webcodex-server", "webcodex-runner")) {
-            Copy-Item -LiteralPath (Join-Path $binDir "$name.exe") -Destination (Join-Path $binInput "$name.exe")
-          }
-          Copy-Item -LiteralPath $desktopExe -Destination (Join-Path $binInput "webcodex-desktop.exe")
           $candidate = Join-Path $env:RUNNER_TEMP "unified-candidate-$env:WEBCODEX_RELEASE_PLATFORM"
           python scripts\collect_unified_installer_inputs.py `
             --platform $env:WEBCODEX_RELEASE_PLATFORM `
             --input-root $inputRoot `
-            --webcodex artifacts/bin/webcodex.exe `
-            --webcodex-server artifacts/bin/webcodex-server.exe `
-            --webcodex-runner artifacts/bin/webcodex-runner.exe `
-            --webcodex-desktop artifacts/bin/webcodex-desktop.exe `
-            --desktop-payload artifacts/bin/webcodex-desktop.exe `
-            --desktop-executable webcodex-desktop.exe `
+            --webcodex webcodex-runtime/webcodex.exe `
+            --webcodex-server webcodex-runtime/webcodex-server.exe `
+            --webcodex-runner webcodex-runtime/webcodex-runner.exe `
+            --webcodex-desktop WebCodex.exe `
+            --desktop-payload WebCodex.exe `
+            --desktop-executable WebCodex.exe `
             --version $env:VERSION `
             --source-sha $env:SOURCE_SHA `
             --workflow-run-id $env:GITHUB_RUN_ID `
             --workflow-ref $env:GITHUB_WORKFLOW_REF `
             --output-dir $candidate
           if ($LASTEXITCODE -ne 0) { throw "Native Windows provenance collection failed" }
-          $prepared = Join-Path $env:RUNNER_TEMP "unified-nsis-$env:WEBCODEX_RELEASE_PLATFORM"
-          python scripts\prepare_windows_unified_installer.py `
-            --candidate-dir $candidate `
-            --platform $env:WEBCODEX_RELEASE_PLATFORM `
-            --output-dir $prepared
-          if ($LASTEXITCODE -ne 0) { throw "Windows unified NSIS staging failed" }
+          $manifest = Get-Content -LiteralPath (Join-Path $candidate "source-manifest.json") -Raw | ConvertFrom-Json
+          $programHashes = [ordered]@{}
+          foreach ($name in @("webcodex", "webcodex-server", "webcodex-runner", "webcodex-desktop")) {
+            $programHashes[$name] = $manifest.artifacts.$name.sha256
+          }
+          $expectedProgramHashes = Join-Path $env:RUNNER_TEMP "unified-program-hashes-$env:WEBCODEX_RELEASE_PLATFORM.json"
+          [System.IO.File]::WriteAllText($expectedProgramHashes, ($programHashes | ConvertTo-Json -Compress) + "`n", [System.Text.Encoding]::ASCII)
           "UNIFIED_CANDIDATE=$candidate" >> $env:GITHUB_ENV
-          "UNIFIED_TAURI_CONFIG=$(Join-Path $prepared 'tauri.unified-installer.conf.json')" >> $env:GITHUB_ENV
+          "UNIFIED_EXPECTED_PROGRAM_HASHES=$expectedProgramHashes" >> $env:GITHUB_ENV
           $installerName = "webcodex-unified-v$env:VERSION-$env:WEBCODEX_RELEASE_PLATFORM.exe"
           "UNIFIED_INSTALLER_NAME=$installerName" >> $env:GITHUB_ENV
           "UNIFIED_INSTALLER_PATH=$(Join-Path $env:GITHUB_WORKSPACE (Join-Path 'dist' $installerName))" >> $env:GITHUB_ENV
+
+      - name: Smoke native Windows Desktop NSIS candidate
+        shell: pwsh
+        env:
+          INCLUDE_UNIFIED_INSTALLERS: ${{ inputs.include_unified_installers }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $hash = (Get-FileHash -LiteralPath $env:DESKTOP_INSTALLER_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($env:DESKTOP_INSTALLER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $hash -cne $env:DESKTOP_INSTALLER_SHA256) {
+            throw "Desktop NSIS candidate changed before native smoke"
+          }
+          $smokeOptions = @{}
+          if ($env:INCLUDE_UNIFIED_INSTALLERS -eq "true") {
+            if (-not $env:UNIFIED_EXPECTED_PROGRAM_HASHES -or -not (Test-Path -LiteralPath $env:UNIFIED_EXPECTED_PROGRAM_HASHES -PathType Leaf)) {
+              throw "Unified Windows smoke requires the collected four-program hashes"
+            }
+            $smokeOptions.ExpectedProgramHashes = $env:UNIFIED_EXPECTED_PROGRAM_HASHES
+            $smokeOptions.InstallDir = Join-Path $env:LOCALAPPDATA ("WebCodex Payload Smoke " + [Guid]::NewGuid().ToString("N"))
+          }
+          & .\scripts\desktop_install_windows_smoke.ps1 `
+            -Installer $env:DESKTOP_INSTALLER_PATH `
+            -Version $env:VERSION `
+            -SourceSha $env:SOURCE_SHA `
+            -BuiltAt ([Int64]$env:WEBCODEX_BUILT_AT) `
+            -Platform $env:WEBCODEX_RELEASE_PLATFORM @smokeOptions
+          if ((Get-FileHash -LiteralPath $env:DESKTOP_INSTALLER_PATH -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash) {
+            throw "Desktop NSIS candidate changed during native smoke"
+          }
+          "VERIFIED_DESKTOP_INSTALLER_SHA256=$hash" >> $env:GITHUB_ENV
 
       - name: Install NSIS compiler for the outer bootstrap
         if: inputs.include_unified_installers
@@ -910,14 +964,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE "target\unified-$env:WEBCODEX_RELEASE_PLATFORM-release-tauri"
-          node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --config $env:UNIFIED_TAURI_CONFIG --ci --no-sign -- --locked
-          if ($LASTEXITCODE -ne 0) { throw "Unified Tauri payload NSIS build failed" }
-          $bundleDir = Join-Path $env:CARGO_TARGET_DIR "release\bundle\nsis"
-          $built = @(Get-ChildItem -LiteralPath $bundleDir -Filter "*-setup.exe" -File)
-          if ($built.Count -ne 1) { throw "Expected exactly one inner Tauri installer, found $($built.Count)" }
-          $inner = Join-Path $env:RUNNER_TEMP "webcodex-tauri-inner-$env:WEBCODEX_RELEASE_PLATFORM.exe"
-          Copy-Item -LiteralPath $built[0].FullName -Destination $inner
+          # The standard NSIS already contains the exact Desktop and Runtime
+          # bytes collected above. Rebuilding Desktop here would invalidate
+          # that manifest even when its source and version were unchanged.
+          $inner = $env:DESKTOP_INSTALLER_PATH
+          $innerHash = (Get-FileHash -LiteralPath $inner -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($env:VERIFIED_DESKTOP_INSTALLER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $innerHash -cne $env:VERIFIED_DESKTOP_INSTALLER_SHA256) {
+            throw "Verified Desktop NSIS candidate changed before outer packaging"
+          }
           $sourceManifest = Join-Path $env:GITHUB_WORKSPACE "dist\webcodex-unified-v$env:VERSION-$env:WEBCODEX_RELEASE_PLATFORM.source-manifest.json"
           $publicSourceManifest = Join-Path $env:GITHUB_WORKSPACE "dist\webcodex-source-v$env:VERSION-$env:WEBCODEX_RELEASE_PLATFORM.json"
           $candidateSums = Join-Path $env:GITHUB_WORKSPACE "dist\webcodex-unified-v$env:VERSION-$env:WEBCODEX_RELEASE_PLATFORM.candidate-SHA256SUMS"

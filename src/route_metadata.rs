@@ -89,6 +89,8 @@ pub(crate) enum RouteId {
     RuntimeConsoleRunner,
     RuntimeConsoleCodingAgentRuns,
     RuntimeConsoleSshResourcesList,
+    RuntimeConsoleSshResourcesStatus,
+    RuntimeConsoleSshResourcesVerifySaved,
     RuntimeConsoleSshResourcesInspect,
     RuntimeConsoleSshResourcesProbe,
     RuntimeConsoleSshResourcesRegister,

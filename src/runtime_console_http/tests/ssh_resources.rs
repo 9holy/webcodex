@@ -24,6 +24,14 @@ fn service(runtime: Arc<ToolRuntime>, auth: AuthContext) -> Service {
                     .post(crate::runtime_console_http::ssh_resources::list),
             )
             .push(
+                Router::with_path("api/runtime-console/ssh-resources/status")
+                    .post(crate::runtime_console_http::ssh_resources::status),
+            )
+            .push(
+                Router::with_path("api/runtime-console/ssh-resources/verify_saved")
+                    .post(crate::runtime_console_http::ssh_resources::verify_saved),
+            )
+            .push(
                 Router::with_path("api/runtime-console/ssh-resources/inspect")
                     .post(crate::runtime_console_http::ssh_resources::inspect),
             )
@@ -47,6 +55,10 @@ fn url(action: &str) -> String {
 }
 
 async fn register_runner(runtime: &ToolRuntime, setup: bool) {
+    register_runner_with_verification(runtime, setup, false).await;
+}
+
+async fn register_runner_with_verification(runtime: &ToolRuntime, setup: bool, verification: bool) {
     runtime
         .runner_registry
         .register(crate::test_support::current_runner_registration(
@@ -57,6 +69,7 @@ async fn register_runner(runtime: &ToolRuntime, setup: bool) {
                 capabilities: RunnerCapabilities {
                     managed_ssh_resources: true,
                     ssh_connection_setup: setup,
+                    ssh_verification_history: verification,
                     ..Default::default()
                 },
                 runner_protocol_generation: crate::runner_protocol::RUNNER_PROTOCOL_GENERATION_V2,
@@ -167,7 +180,15 @@ async fn ssh_operator_endpoints_reject_delegated_credentials_before_parsing_secr
         let mut auth = operator_auth();
         auth.kind = kind;
         let service = service(runtime.clone(), auth);
-        for action in ["list", "inspect", "probe", "register", "remove"] {
+        for action in [
+            "list",
+            "status",
+            "verify_saved",
+            "inspect",
+            "probe",
+            "register",
+            "remove",
+        ] {
             let mut response = TestClient::post(url(action))
                 .json(&json!({"password":"private-secret-sentinel"}))
                 .send(&service)
@@ -377,6 +398,8 @@ fn ssh_operator_route_metadata_preserves_first_party_and_independent_ssh_scope()
     use crate::route_metadata::RouteId::*;
     for route in [
         RuntimeConsoleSshResourcesList,
+        RuntimeConsoleSshResourcesStatus,
+        RuntimeConsoleSshResourcesVerifySaved,
         RuntimeConsoleSshResourcesInspect,
         RuntimeConsoleSshResourcesProbe,
         RuntimeConsoleSshResourcesRegister,
@@ -389,4 +412,135 @@ fn ssh_operator_route_metadata_preserves_first_party_and_independent_ssh_scope()
             )
         );
     }
+}
+
+#[tokio::test]
+async fn ssh_status_uses_legacy_list_for_old_runner_without_sending_new_wire() {
+    let runtime = test_runtime();
+    register_runner(&runtime, true).await;
+    let service = service(runtime.clone(), operator_auth());
+    let (status, operation) = exchange(
+        &runtime,
+        &service,
+        "status",
+        json!({"runner":"ssh-operator-runner"}),
+        SshResourceResponse::List {
+            revision: 4,
+            resources: Vec::new(),
+        },
+    )
+    .await;
+    assert_eq!(operation, SshResourceRequest::List);
+    assert_eq!(status["output"]["verification_supported"], false);
+    assert_eq!(status["output"]["verifications"], json!([]));
+    let mut rejected = TestClient::post(url("verify_saved"))
+        .json(&json!({
+            "binding":status["output"]["binding"],"name":"saved"
+        }))
+        .send(&service)
+        .await;
+    let result = rejected.take_json::<Value>().await.unwrap();
+    assert_eq!(
+        result["output"]["error_kind"],
+        "ssh_connection_setup_unsupported"
+    );
+    assert!(runtime
+        .runner_registry
+        .poll(RunnerPollRequest {
+            client_id: "ssh-operator-runner".into(),
+            runner_instance_id: "ssh-instance".into()
+        })
+        .await
+        .unwrap()
+        .is_none());
+}
+
+#[tokio::test]
+async fn ssh_saved_verification_preserves_binding_and_persists_failure_without_replay() {
+    use webcodex_core::ssh_resource::{
+        SshResourceInventoryEntry, SshResourceSource, SshResourceVerificationEntry,
+        SshVerification, SshVerificationError,
+    };
+    let runtime = test_runtime();
+    register_runner_with_verification(&runtime, true, true).await;
+    let service = service(runtime.clone(), operator_auth());
+    let (status, operation) = exchange(
+        &runtime,
+        &service,
+        "status",
+        json!({"runner":"ssh-operator-runner"}),
+        SshResourceResponse::Status {
+            revision: 4,
+            verification_unavailable: false,
+            resources: vec![SshResourceInventoryEntry {
+                name: "saved".into(),
+                source: SshResourceSource::Managed,
+                active: true,
+                pending_restart: false,
+            }],
+            verifications: vec![SshResourceVerificationEntry {
+                name: "saved".into(),
+                verification: None,
+            }],
+        },
+    )
+    .await;
+    assert_eq!(operation, SshResourceRequest::Status);
+    assert_eq!(status["output"]["verification_supported"], true);
+    let body = json!({"binding":status["output"]["binding"],"name":"saved"});
+    let (checked, operation) = exchange(
+        &runtime,
+        &service,
+        "verify_saved",
+        body.clone(),
+        SshResourceResponse::VerifySaved {
+            revision: 4,
+            resource: "saved".into(),
+            persisted: true,
+            verification: SshVerification {
+                checked_at: 1700000000,
+                error_kind: Some(SshVerificationError::SshAuthenticationFailed),
+            },
+        },
+    )
+    .await;
+    assert_eq!(
+        operation,
+        SshResourceRequest::VerifySaved {
+            expected_revision: 4,
+            name: "saved".into()
+        }
+    );
+    assert_eq!(
+        checked["output"]["verification"]["error_kind"],
+        "ssh_authentication_failed"
+    );
+    assert_eq!(checked["output"]["persisted"], true);
+    for secret in [
+        "binding",
+        "endpoint",
+        "authentication",
+        "credential",
+        "host_key",
+    ] {
+        assert!(checked["output"].get(secret).is_none());
+    }
+    let mut replay = TestClient::post(url("verify_saved"))
+        .json(&body)
+        .send(&service)
+        .await;
+    let result = replay.take_json::<Value>().await.unwrap();
+    assert_eq!(
+        result["output"]["error_kind"],
+        "ssh_resource_binding_required"
+    );
+    assert!(runtime
+        .runner_registry
+        .poll(RunnerPollRequest {
+            client_id: "ssh-operator-runner".into(),
+            runner_instance_id: "ssh-instance".into()
+        })
+        .await
+        .unwrap()
+        .is_none());
 }

@@ -88,6 +88,14 @@ pub async fn ssh_connection_inspect(
 }
 
 #[tauri::command]
+pub async fn ssh_resource_verify_saved(
+    state: State<'_, AppState>,
+    request: crate::ssh_resources::SshRemoveRequest,
+) -> DesktopResult<crate::ssh_resources::SshMutationResult> {
+    state.ssh_resource_verify_saved(request).await
+}
+
+#[tauri::command]
 pub async fn ssh_connection_probe(
     state: State<'_, AppState>,
     request: crate::ssh_resources::SshProbeRequest,
