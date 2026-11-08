@@ -115,6 +115,114 @@ fn native_private_file_and_directory_security_round_trip() {
 }
 
 #[test]
+fn native_file_creation_with_original_security_keeps_snapshot() {
+    use std::io::Write;
+    use std::os::windows::{ffi::OsStrExt, io::FromRawHandle};
+    use windows_sys::Win32::Foundation::{GENERIC_WRITE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::{CreateFileW, CREATE_NEW, FILE_ATTRIBUTE_NORMAL};
+
+    let directory = std::env::var_os("LOCALAPPDATA").expect("native per-user directory");
+    let temp = tempfile::Builder::new()
+        .prefix("webcodex-native-security-create-")
+        .tempdir_in(directory)
+        .unwrap();
+    let user = current_account().unwrap().identity;
+    let default_owner = token_owner().unwrap();
+    let owner_class = |owner: &str| {
+        if owner == ADMINISTRATORS {
+            "administrators"
+        } else if owner == user {
+            "user"
+        } else {
+            "other"
+        }
+    };
+    let mut mismatches = Vec::new();
+    for protected in [false, true] {
+        let original = temp.path().join(format!("original-{protected}.exe"));
+        std::fs::write(&original, b"original program bytes").unwrap();
+        if protected {
+            crate::storage::secure_windows_path(&original).unwrap();
+        }
+        let snapshot = capture(&original).unwrap();
+        assert_eq!(snapshot.dacl_protected, protected);
+        if protected {
+            assert_eq!(snapshot.owner_identity, user);
+        } else {
+            assert_eq!(snapshot.owner_identity, default_owner);
+        }
+        let descriptor = decode(&snapshot).unwrap();
+        let mut control = 0;
+        let mut revision = 0;
+        assert_ne!(
+            unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) },
+            0
+        );
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        let destination = temp
+            .path()
+            .join(format!("recovery-{}.exe", uuid::Uuid::new_v4()));
+        let wide: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let handle = unsafe {
+            CreateFileW(
+                wide.as_ptr(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                null_mut(),
+            )
+        };
+        assert_ne!(
+            handle,
+            INVALID_HANDLE_VALUE,
+            "{}",
+            std::io::Error::last_os_error()
+        );
+        let mut file = unsafe { File::from_raw_handle(handle.cast()) };
+        file.write_all(b"original program bytes").unwrap();
+        file.sync_all().unwrap();
+        drop(file);
+        let created = capture(&destination).unwrap();
+        let exact = created == snapshot;
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "test": "native_create_with_original_security",
+                "token_owner": owner_class(&default_owner),
+                "original_owner": owner_class(&snapshot.owner_identity),
+                "original_protected": protected,
+                "original_control_flags": control,
+                "exact_snapshot": exact,
+            })
+        );
+        if !exact {
+            report_restore_difference(&snapshot, &created);
+            mismatches.push(protected);
+        }
+        assert_eq!(capture(&original).unwrap(), snapshot);
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            b"original program bytes"
+        );
+    }
+    assert!(
+        mismatches.is_empty(),
+        "native creation changed original protection cases: {mismatches:?}"
+    );
+}
+
+#[test]
 fn writer_policy_understands_inheritance_and_rejects_uninterpreted_allow_aces() {
     let owner = current_account().unwrap().identity;
     let snapshot = |extra: &str| WindowsProgramSecurity {

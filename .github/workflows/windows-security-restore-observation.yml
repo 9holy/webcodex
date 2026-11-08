@@ -22,8 +22,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: windows-core-ci
-      - name: Observe the exact original security restore boundary
+      - name: Verify file creation with the exact original security descriptor
         shell: pwsh
         run: |
-          cargo test --locked -p webcodex-environment --lib upgrade::windows_package::tests::windows_owners::registered_group_owned_installation_lifecycle -- --exact --ignored
-          if ($LASTEXITCODE -ne 0) { throw "Native security restore comparison failed; inspect the bounded structural observation" }
+          cargo test --locked -p webcodex-environment --lib upgrade::windows_installation::security::tests::native_file_creation_with_original_security_keeps_snapshot -- --exact --nocapture
+          if ($LASTEXITCODE -ne 0) { throw "Native file creation did not preserve the exact original security descriptor" }
