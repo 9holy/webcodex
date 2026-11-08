@@ -77,6 +77,10 @@ class UpdaterPublicationTests(unittest.TestCase):
             token.assert_not_called(); execute.assert_not_called()
             self.assertFalse((root / "stage").exists())
 
+    # Exercise inherited release options in ordinary CI as well as release preflight.
+    @mock.patch.dict("os.environ", {
+        "RELEASE_PLATFORM_SCOPE": "windows", "INCLUDE_RUNTIME_INSTALLERS": "true",
+    })
     def test_workflow_gate_respects_explicit_core_or_unified_selection(self):
         import os, subprocess, textwrap
         repository = Path(__file__).resolve().parents[2]
@@ -96,7 +100,8 @@ class UpdaterPublicationTests(unittest.TestCase):
                 env = {**os.environ, "PYTHONPATH": str(repository),
                        "GITHUB_REPOSITORY": verifier.REPO, "GITHUB_RUN_ID": str(RUN_ID),
                        "SOURCE_SHA": SOURCE_SHA, "INPUT_TAG": tag, "ARCHIVE_STEM": stem,
-                       "INCLUDE_UNIFIED_INSTALLERS": str(include).lower()}
+                       "INCLUDE_UNIFIED_INSTALLERS": str(include).lower(),
+                       "RELEASE_PLATFORM_SCOPE": "all", "INCLUDE_RUNTIME_INSTALLERS": "false"}
                 result = subprocess.run(["bash", "-euc", script], cwd=root, env=env,
                                         capture_output=True, text=True, input="", timeout=30)
                 if unified or not include:
