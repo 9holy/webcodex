@@ -1,0 +1,420 @@
+name: Observe retained Windows installer payload bytes
+run-name: Observe retained v0.5.4 payload ${{ github.sha }}
+
+on:
+  push:
+    branches: [diagnostic/windows-payload-artifact]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  observe:
+    name: Observe retained payload (${{ matrix.platform }})
+    if: >-
+      github.repository == '9holy/webcodex' &&
+      github.repository_id == '1404596174' &&
+      github.ref == 'refs/heads/diagnostic/windows-payload-artifact'
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [win32-x64, win32-arm64]
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout the fixed publication helpers
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 7041854bd3cb4df8f5298cbd732ba251237dd590
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Compare retained artifact bytes without executing Windows programs
+        id: observe
+        shell: python
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OBSERVATION_PLATFORM: ${{ matrix.platform }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import shutil
+          import subprocess
+          import sys
+          import tempfile
+          import threading
+          import time
+          import urllib.error
+          import zipfile
+
+          sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
+          from scripts import collect_release_bundle as collector
+          from scripts import package_unified_installer as packaging
+          from scripts import runtime_installer_manifest as contract
+          from scripts import windows_unified_upgrade_smoke as smoke
+
+          CM = "7041854bd3cb4df8f5298cbd732ba251237dd590"
+          SOURCE = "1af9bb5321edcdc16a4f1a5be65d0611ef19964a"
+          BUILD_RUN = 42459872642
+          WORKFLOW_REF = "9holy/webcodex/.github/workflows/release-build.yml@refs/tags/v0.5.4"
+          MIB = 1024 * 1024
+          MAX_FILE = 128 * MIB
+          MAX_EXTRACTED = 768 * MIB
+          PROGRAMS = {
+              "webcodex": "webcodex-runtime/webcodex.exe",
+              "webcodex-server": "webcodex-runtime/webcodex-server.exe",
+              "webcodex-runner": "webcodex-runtime/webcodex-runner.exe",
+              "webcodex-desktop": "WebCodex.exe",
+          }
+          PINS = {
+              "win32-x64": {
+                  "unified": (13608914604, 84368670, "0fcb049cd0b3d8c7c0422b294278c257bfbceb898eaedf83df64094ac8231d94"),
+                  "standard": (13609985962, 34433590, "f5dcfe06ff4810a78aa48217e2f41d60c19020e8e58f2ec87579fcc497bdbd1f"),
+                  "installer_sha256": "2789df1af9be713530840b5a9a3a7579e40f9dd36b820c06ea4cbc9c3382af27",
+                  "manifest_sha256": "432e17cef296ca19f92fbea2b6464d16685317b93f3002545bd57c72417308fd",
+                  "standard_sha256": "6dbaa9075541d44a2c4f22075409abdb43f25a0a41f50aa26fc73cc137f9cc8e",
+              },
+              "win32-arm64": {
+                  "unified": (13609672779, 77359898, "e917331b03d07ef9235dfd5832d122ee4e4ae7d18aa0cbeb29a471f5b04b3337"),
+                  "standard": (13610400862, 30389085, "a1a48ade7a09ad57dcd5ecf63b2952922f75a40a0eecd50f2b4fc0c4c5d8f5ba"),
+                  "installer_sha256": "b26d80456f18a03f905b23f62ea0231459ab10b471aaca2538f4a04a742b2907",
+                  "manifest_sha256": "def827c5da540391f35513ff39f0f541a01e61a41bb7cd1b9c0d5114bc56a71b",
+                  "standard_sha256": "b233872dc776d2a706235ac5fcc593b7949f7b38d878dd7de099ec7e513ad180",
+              },
+          }
+          platform = os.environ["OBSERVATION_PLATFORM"]
+          root = Path(tempfile.mkdtemp(prefix="webcodex-payload-artifact-", dir=os.environ["RUNNER_TEMP"]))
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"report_path={root / 'report.json'}\n")
+          report = {
+              "schema_version": 1, "kind": "windows-payload-artifact-observation",
+              "input_origin": "retained_formal_artifact", "diagnostic_only": True,
+              "formal_acceptance": False, "public_download_succeeded": False,
+              "windows_programs_executed": False, "installation_performed": False,
+              "platform": platform, "version": "0.5.4", "public_source_sha": SOURCE,
+              "formal_build_run_id": BUILD_RUN, "formal_build_run_attempt": 1,
+              "helper_source_sha": CM, "github_sha": os.environ.get("GITHUB_SHA"),
+              "workflow_sha": os.environ.get("GITHUB_WORKFLOW_SHA"),
+              "workflow_run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "workflow_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "phase": "identity", "observation_complete": False, "programs": [],
+          }
+          child_env = {key: value for key, value in os.environ.items() if key not in
+                       {"GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"}}
+          child_env["LC_ALL"] = "C.UTF-8"
+          deadline = time.monotonic() + 1200
+          extracted_bytes = 0
+          failed = True
+
+          class ObservationError(RuntimeError):
+              pass
+
+          def require(condition, code):
+              if not condition:
+                  raise ObservationError(code)
+
+          def remaining(maximum=120):
+              seconds = deadline - time.monotonic()
+              require(seconds > 0, "diagnostic_time_limit")
+              return min(maximum, seconds)
+
+          def text_command(argv):
+              result = smoke.run_command(argv, "bounded artifact observation", timeout=remaining(60), env=child_env)
+              report["last_command_exit_code"] = result.returncode
+              require(result.returncode == 0, "capability_command_failed")
+              return result.stdout.decode("utf-8")
+
+          def digest(path):
+              require(path.is_file() and not path.is_symlink() and path.stat().st_size <= MAX_FILE, "leaf_file_bound")
+              with path.open("rb") as stream:
+                  return hashlib.file_digest(stream, "sha256").hexdigest()
+
+          def read_json(path):
+              require(path.stat().st_size <= 128 * 1024, "json_file_bound")
+              return contract.parse(path.read_bytes())
+
+          def download_zip(client, artifact_id, size, expected, destination):
+              # Reuse the repository client's HTTPS redirect handler, which drops
+              # API credentials on cross-host redirects. Stop at the frozen size.
+              require(0 < size <= MAX_FILE, "artifact_zip_size_bound")
+              request = client._request(client.api_url(f"/actions/artifacts/{artifact_id}/zip"))
+              actual = hashlib.sha256()
+              count = 0
+              with client.opener.open(request, timeout=remaining(120)) as response, destination.open("xb") as output:
+                  length = response.headers.get("Content-Length")
+                  if length is not None:
+                      require(length.isascii() and length.isdigit() and int(length) == size, "artifact_content_length")
+                  while chunk := response.read(1024 * 1024):
+                      remaining()
+                      count += len(chunk)
+                      require(count <= size, "artifact_download_size_bound")
+                      output.write(chunk)
+                      actual.update(chunk)
+              require(count == size and actual.hexdigest() == expected, "artifact_zip_digest")
+
+          def unpack_zip(archive, destination, expected_names):
+              with zipfile.ZipFile(archive) as source:
+                  entries = source.infolist()
+                  require(0 < len(entries) <= 16 and len(entries) == len(expected_names)
+                          and {item.filename for item in entries} == expected_names, "artifact_zip_members")
+                  require(all(not item.is_dir() and not item.flag_bits & 1 and 0 <= item.file_size <= MAX_FILE
+                              for item in entries) and sum(item.file_size for item in entries) <= MAX_FILE,
+                          "artifact_zip_expansion_bound")
+              # This existing extractor rejects traversal, duplicates and non-regular
+              # entries and writes only flat leaf names into a new owned directory.
+              collector.safe_extract_zip(archive, destination)
+
+          def normalized_member(value):
+              require(isinstance(value, str) and 0 < len(value) <= 512 and not any(ord(c) < 32 for c in value),
+                      "nsis_member_name")
+              value = value.replace("\\", "/")
+              parts = value.split("/")
+              require(not value.startswith("/") and ":" not in value
+                      and all(part not in {"", ".", ".."} for part in parts), "nsis_member_path")
+              return value
+
+          def list_nsis(archive):
+              raw = text_command([tool, "l", "-slt", "-bd", "-sccUTF-8", "--", str(archive)]).replace("\r\n", "\n")
+              header, separator, body = raw.partition("\n----------\n")
+              require(separator and re.search(r"(?im)^Type = Nsis$", header), "capability_nsis_listing")
+              members = []
+              blocks = [block for block in body.strip("\n").split("\n\n") if block.strip()]
+              require(0 < len(blocks) <= 256, "nsis_member_count_bound")
+              for block in blocks:
+                  fields = {}
+                  for line in block.splitlines():
+                      require(" = " in line, "nsis_listing_format")
+                      key, value = line.split(" = ", 1)
+                      require(key not in fields, "nsis_listing_duplicate_field")
+                      fields[key] = value
+                  require("Path" in fields and not any(fields.get(key) for key in
+                          ("Symbolic Link", "Hard Link", "Reparse")) and fields.get("Encrypted") != "+",
+                          "nsis_member_kind")
+                  name = normalized_member(fields["Path"])
+                  # NSIS can expose estimated or undefined sizes. They are not an
+                  # exact-length contract; actual streamed bytes have hard limits.
+                  size = fields.get("Size", "")
+                  require(not size or (size.isascii() and size.isdigit() and int(size) <= MAX_EXTRACTED),
+                          "nsis_listing_size_bound")
+                  if fields.get("Folder") != "+":
+                      members.append({"raw": fields["Path"], "normalized": name})
+                  require(len(members) <= 256, "nsis_member_count_bound")
+              require(members, "nsis_no_files")
+              return members
+
+          def select_program(members, relative):
+              matches = []
+              for member in members:
+                  name = member["normalized"]
+                  if name.startswith("$INSTDIR/"):
+                      name = name[len("$INSTDIR/"):]
+                  if name.casefold() == relative.casefold():
+                      matches.append(member)
+              require(len(matches) == 1, "installed_program_path_ambiguous")
+              return matches[0]
+
+          def extract_member(archive, member, destination):
+              global extracted_bytes
+              limit = min(MAX_FILE, MAX_EXTRACTED - extracted_bytes)
+              require(limit > 0, "extracted_total_bound")
+              argv = [tool, "x", "-so", "-y", "-bd", "-spd", "--", str(archive), member["raw"]]
+              # No archive path is ever used as a filesystem destination, and no
+              # extracted PE/EXE is launched. -spd makes the member argument literal.
+              overflow = threading.Event()
+              totals = [0, 0]
+              actual = hashlib.sha256()
+              end = time.monotonic() + remaining(120)
+              with destination.open("xb") as output:
+                  process = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, env=child_env)
+                  def drain(stream, index):
+                      try:
+                          while chunk := stream.read(65536):
+                              totals[index] += len(chunk)
+                              if totals[index] > (limit if index == 0 else 64 * 1024):
+                                  overflow.set()
+                              elif index == 0:
+                                  output.write(chunk)
+                                  actual.update(chunk)
+                      except Exception:
+                          overflow.set()
+                      finally:
+                          stream.close()
+                  readers = [threading.Thread(target=drain, args=(stream, index), daemon=True)
+                             for index, stream in enumerate((process.stdout, process.stderr))]
+                  try:
+                      for reader in readers:
+                          reader.start()
+                      while process.poll() is None:
+                          if overflow.is_set() or time.monotonic() >= end:
+                              process.kill()  # Only the 7z child created by this invocation.
+                              process.wait(timeout=5)
+                              raise ObservationError("sevenzip_time_or_byte_bound")
+                          time.sleep(0.05)
+                      for reader in readers:
+                          reader.join(timeout=5)
+                      report["last_command_exit_code"] = process.returncode
+                      require(not overflow.is_set() and not any(reader.is_alive() for reader in readers)
+                              and process.returncode == 0 and totals[0] > 0, "sevenzip_extraction")
+                  finally:
+                      if process.poll() is None:
+                          process.kill()
+                          process.wait(timeout=5)
+                      for reader in readers:
+                          if reader.ident is not None:
+                              reader.join(timeout=5)
+              extracted_bytes += totals[0]
+              return actual.hexdigest()
+
+          try:
+              require(platform in PINS and sys.platform.startswith("linux"), "platform")
+              require(os.environ.get("GITHUB_REPOSITORY") == "9holy/webcodex"
+                      and os.environ.get("GITHUB_EVENT_NAME") == "push"
+                      and os.environ.get("GITHUB_REF") == "refs/heads/diagnostic/windows-payload-artifact"
+                      and re.fullmatch(r"[0-9a-f]{40}", report["github_sha"] or "")
+                      and report["github_sha"] == report["workflow_sha"], "workflow_identity")
+              require(text_command(["git", "rev-parse", "HEAD"]).strip() == CM, "helper_checkout")
+              tool = shutil.which("7zz") or shutil.which("7z")
+              require(tool is not None, "capability_7zip_missing")
+              report["sevenzip_tool"] = Path(tool).name
+              require(re.search(r"\bNsis\b", text_command([tool, "i"]), re.I), "capability_nsis_missing")
+              client = collector.GitHubClient("9holy/webcodex", os.environ["GH_TOKEN"], 120)
+              commit = client.fetch_json(f"/git/commits/{report['github_sha']}")
+              require([parent.get("sha") for parent in commit.get("parents", [])] == [CM], "diagnostic_parent")
+              build = client.fetch_json(f"/actions/runs/{BUILD_RUN}/attempts/1")
+              require(build.get("id") == BUILD_RUN and build.get("run_attempt") == 1
+                      and build.get("status") == "completed" and build.get("conclusion") == "success"
+                      and build.get("head_sha") == SOURCE and build.get("head_branch") == "v0.5.4"
+                      and build.get("path") == ".github/workflows/release-build.yml"
+                      and build.get("event") == "workflow_dispatch"
+                      and build.get("repository", {}).get("id") == 1404596174
+                      and build.get("head_repository", {}).get("id") == 1404596174, "formal_build_identity")
+              listing = client.fetch_json(f"/actions/runs/{BUILD_RUN}/artifacts?per_page=100")
+              require(type(listing.get("total_count")) is int and 0 < listing["total_count"] <= 100
+                      and len(listing.get("artifacts", [])) == listing["total_count"], "artifact_listing_bound")
+              pin = PINS[platform]
+              outer_name = f"webcodex-unified-v0.5.4-{platform}.exe"
+              source_name = f"webcodex-source-v0.5.4-{platform}.json"
+              standard_name = f"webcodex-desktop-v0.5.4-{platform}-setup.exe"
+              candidate_name = f"webcodex-unified-v0.5.4-{platform}.source-manifest.json"
+              expected_members = {
+                  "unified": {outer_name, outer_name + ".sha256", outer_name + ".provenance.json",
+                              source_name, source_name + ".sha256", candidate_name,
+                              f"webcodex-unified-v0.5.4-{platform}.candidate-SHA256SUMS"},
+                  "standard": {standard_name, standard_name + ".sha256"},
+              }
+              report["artifacts"] = {}
+              for kind in ("unified", "standard"):
+                  report.update(phase="artifact_download", artifact_kind=kind)
+                  artifact_id, size, zip_sha = pin[kind]
+                  matches = [item for item in listing["artifacts"] if item.get("id") == artifact_id]
+                  require(len(matches) == 1, "artifact_unique_id")
+                  item = matches[0]
+                  expected_name = f"webcodex-v0.5.4-{'unified' if kind == 'unified' else 'desktop'}-{platform}"
+                  origin = item.get("workflow_run", {})
+                  require(item.get("name") == expected_name and item.get("size_in_bytes") == size
+                          and item.get("digest") == "sha256:" + zip_sha and item.get("expired") is False
+                          and origin.get("id") == BUILD_RUN and origin.get("head_sha") == SOURCE
+                          and origin.get("head_branch") == "v0.5.4"
+                          and origin.get("repository_id") == 1404596174
+                          and origin.get("head_repository_id") == 1404596174, "artifact_metadata_identity")
+                  archive = root / f"{kind}.zip"
+                  download_zip(client, artifact_id, size, zip_sha, archive)
+                  unpack_zip(archive, root / kind, expected_members[kind])
+                  report["artifacts"][kind] = {"id": artifact_id, "name": expected_name,
+                                               "size": size, "zip_sha256": zip_sha, "verified": True}
+              report["phase"] = "frozen_leaf_bytes"
+              outer = root / "unified" / outer_name
+              standard = root / "standard" / standard_name
+              manifest_path = root / "unified" / source_name
+              require(digest(outer) == pin["installer_sha256"]
+                      and digest(standard) == pin["standard_sha256"]
+                      and digest(manifest_path) == pin["manifest_sha256"]
+                      and digest(root / "unified" / candidate_name) == pin["manifest_sha256"], "frozen_leaf_digest")
+              report["retained_files_match_public_sha256_pins"] = True
+              manifest = read_json(manifest_path)
+              _, target, architecture = smoke.PLATFORMS[platform]
+              identity = {"schema_version": 1, "version": "0.5.4", "source_sha": SOURCE,
+                          "source_workflow_run_id": BUILD_RUN, "source_workflow_ref": WORKFLOW_REF,
+                          "platform": platform, "target": target, "architecture": architecture}
+              require(isinstance(manifest, dict) and all(type(manifest.get(k)) is type(v) and manifest[k] == v
+                                                        for k, v in identity.items()), "manifest_identity")
+              records = manifest.get("artifacts")
+              require(isinstance(records, dict) and set(records) == set(PROGRAMS), "manifest_four_programs")
+              for name, item in records.items():
+                  require(isinstance(item, dict) and set(item) == {"path", "sha256", "build_info", "build_info_sha256", "probe"}
+                          and item["path"] == f"artifacts/bin/{name}.exe"
+                          and isinstance(item["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                          and item["probe"] == "native-build-job"
+                          and packaging.canonical_digest(item["build_info"]) == item["build_info_sha256"], "manifest_program")
+                  packaging.validate_build_info(item["build_info"], name, manifest)
+              provenance = read_json(root / "unified" / (outer_name + ".provenance.json"))
+              expected_provenance = {"schema_version": 1, "guarded_handoff_version": 1,
+                  "platform": platform, "version": "0.5.4", "source_sha": SOURCE,
+                  "workflow_run_id": BUILD_RUN, "workflow_ref": WORKFLOW_REF,
+                  "candidate_manifest_sha256": pin["manifest_sha256"], "installer_sha256": pin["installer_sha256"]}
+              require(isinstance(provenance, dict) and set(provenance) == set(expected_provenance) | {"inner_installer_sha256"}
+                      and all(type(provenance.get(k)) is type(v) and provenance[k] == v for k, v in expected_provenance.items())
+                      and isinstance(provenance["inner_installer_sha256"], str)
+                      and re.fullmatch(r"[0-9a-f]{64}", provenance["inner_installer_sha256"]), "provenance_identity")
+              report["phase"] = "outer_bytes"
+              outer_members = list_nsis(outer)
+              candidates = [member for member in outer_members if member["normalized"].casefold().endswith(".exe")]
+              require(0 < len(candidates) <= 12
+                      and len({member["normalized"].casefold() for member in candidates}) == len(candidates), "outer_exe_ambiguity")
+              matches = []
+              for index, member in enumerate(candidates):
+                  path = root / f"outer-member-{index}.exe"
+                  actual = extract_member(outer, member, path)
+                  if actual == provenance["inner_installer_sha256"]:
+                      matches.append(path)
+              require(len(matches) == 1, "provenance_inner_unique_digest")
+              report["inner_installer_sha256"] = provenance["inner_installer_sha256"]
+              report["outer_exe_candidates"] = len(candidates)
+              report["phase"] = "program_bytes"
+              inner = matches[0]
+              inner_members, standard_members = list_nsis(inner), list_nsis(standard)
+              for index, (name, relative) in enumerate(PROGRAMS.items()):
+                  report["program_in_progress"] = name
+                  inner_sha = extract_member(inner, select_program(inner_members, relative), root / f"inner-program-{index}.bin")
+                  standard_sha = extract_member(standard, select_program(standard_members, relative), root / f"standard-program-{index}.bin")
+                  expected = records[name]["sha256"]
+                  report["programs"].append({"name": name, "manifest_sha256": expected,
+                      "inner_sha256": inner_sha, "standard_sha256": standard_sha,
+                      "inner_matches_manifest": inner_sha == expected,
+                      "standard_matches_manifest": standard_sha == expected,
+                      "inner_matches_standard": inner_sha == standard_sha})
+              report["observation_complete"] = True
+              report["all_programs_equal"] = all(row["inner_matches_manifest"] and row["standard_matches_manifest"]
+                                                  for row in report["programs"])
+              report["streamed_extracted_bytes"] = extracted_bytes
+              report["phase"] = "complete"
+              failed = not report["all_programs_equal"]
+          except Exception as error:
+              report["failure_type"] = type(error).__name__
+              if isinstance(error, ObservationError):
+                  report["failure_code"] = str(error)
+              cause = error if isinstance(error, urllib.error.HTTPError) else error.__cause__
+              if isinstance(cause, urllib.error.HTTPError) and type(cause.code) is int and 100 <= cause.code <= 999:
+                  report["http_status"] = cause.code
+          finally:
+              encoded = json.dumps(report, sort_keys=True)
+              if len(encoded.encode("utf-8")) > 32 * 1024:
+                  raise SystemExit("diagnostic report exceeded its fixed bound")
+              (root / "report.json").write_text(encoded + "\n", encoding="utf-8")
+              print(encoded)  # Safe hashes/identities only; never raw command output or signed URLs.
+          raise SystemExit(1 if failed else 0)
+      - name: Retain the small byte observation report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-payload-artifact-observation-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.observe.outputs.report_path }}
+          if-no-files-found: error
+          retention-days: 30
