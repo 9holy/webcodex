@@ -383,6 +383,9 @@ class AdapterTests(unittest.TestCase):
         self.prompt()
         terminal, _ = self.terminal()
         self.assertEqual(terminal["error"]["data"]["kind"], "codex_interactive_request_unsupported")
+        # The ACP error can arrive before the native child records its reply.
+        # Shutdown waits for that child; inspect its trace only after it exits.
+        self.process.wait(timeout=5)
         self.assertTrue(any(frame.get("id") == 99 and frame.get("error", {}).get("code") == -32601 for frame in self.log()))
 
     def test_changed_version_requires_new_preparation(self):
