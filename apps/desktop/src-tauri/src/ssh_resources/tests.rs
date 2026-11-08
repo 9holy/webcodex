@@ -827,31 +827,118 @@ async fn ssh_old_server_returns_upgrade_required_without_retry_or_scope_claim() 
     tokio::fs::write(&token_path, "fixture-native-token")
         .await
         .unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let server = tokio::spawn(async move {
-        let (mut stream, _) = tokio::time::timeout(Duration::from_secs(10), listener.accept())
-            .await
-            .unwrap()
-            .unwrap();
-        let mut bytes = [0u8; 4096];
-        let count = stream.read(&mut bytes).await.unwrap();
-        assert!(String::from_utf8_lossy(&bytes[..count])
-            .starts_with("POST /api/runtime-console/ssh-resources/list HTTP/1.1"));
-        stream
-            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
-    });
-    let mut runtime = runtime();
-    runtime.server_url = format!("http://127.0.0.1:{port}");
-    runtime.user_token_file = Some(token_path);
-    let mut manager = SshResourcesManager::default();
-    let output = manager.list(&runtime, &HttpGateway).await;
-    assert!(!output.available && !output.setup_supported);
-    assert_eq!(
-        output.error_kind,
-        Some(SshResourceError::SshConnectionSetupUnsupported)
-    );
-    server.await.unwrap();
+    for (responses, expected_error) in [
+        (
+            vec![("status", 404), ("list", 404)],
+            SshResourceError::SshConnectionSetupUnsupported,
+        ),
+        (
+            vec![("status", 401)],
+            SshResourceError::AuthorizationUnavailable,
+        ),
+        (vec![("status", 403)], SshResourceError::InsufficientScope),
+        (
+            vec![("status", 405)],
+            SshResourceError::SshResourceRegistryUnavailable,
+        ),
+        (
+            vec![("status", 500)],
+            SshResourceError::SshResourceRegistryUnavailable,
+        ),
+        (
+            vec![("status", 501)],
+            SshResourceError::SshResourceRegistryUnavailable,
+        ),
+        (
+            vec![("status", 503)],
+            SshResourceError::SshResourceRegistryUnavailable,
+        ),
+        (
+            vec![("status", 404), ("list", 401)],
+            SshResourceError::AuthorizationUnavailable,
+        ),
+        (
+            vec![("status", 404), ("list", 403)],
+            SshResourceError::InsufficientScope,
+        ),
+        (
+            vec![("status", 404), ("list", 500)],
+            SshResourceError::SshResourceRegistryUnavailable,
+        ),
+    ] {
+        let expected_actions: Vec<_> = responses.iter().map(|(action, _)| *action).collect();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (finished, completion) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut calls = Vec::new();
+            for (action, status) in responses {
+                let (mut stream, _) =
+                    tokio::time::timeout(Duration::from_secs(10), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let body = tokio::time::timeout(Duration::from_secs(10), async {
+                    let mut bytes = Vec::new();
+                    let mut chunk = [0u8; 4096];
+                    let (header_end, length) = loop {
+                        let count = stream.read(&mut chunk).await.unwrap();
+                        assert!(count > 0);
+                        bytes.extend_from_slice(&chunk[..count]);
+                        assert!(bytes.len() <= 16384);
+                        if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                            let header = std::str::from_utf8(&bytes[..end]).unwrap();
+                            assert!(header.starts_with(&format!(
+                                "POST /api/runtime-console/ssh-resources/{action} HTTP/1.1"
+                            )));
+                            let length: usize = header
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length: ")
+                                        .map(|value| value.parse().unwrap())
+                                })
+                                .unwrap();
+                            assert!(length <= 16384 - (end + 4));
+                            break (end + 4, length);
+                        }
+                    };
+                    while bytes.len() < header_end + length {
+                        let count = stream.read(&mut chunk).await.unwrap();
+                        assert!(count > 0);
+                        bytes.extend_from_slice(&chunk[..count]);
+                        assert!(bytes.len() <= 16384);
+                    }
+                    serde_json::from_slice::<Value>(&bytes[header_end..header_end + length])
+                        .unwrap()
+                })
+                .await
+                .unwrap();
+                assert_eq!(body, json!({"runner":"mini"}));
+                calls.push(action);
+                stream
+                    .write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+            // Keep listening until the caller returns: an unexpected fallback
+            // must fail this fixture, not look like another unavailable Server.
+            tokio::select! {
+                biased;
+                _ = listener.accept() => panic!("unexpected SSH retry or probe"),
+                result = completion => result.unwrap(),
+            }
+            calls
+        });
+        let mut runtime = runtime();
+        runtime.server_url = format!("http://127.0.0.1:{port}");
+        runtime.user_token_file = Some(token_path.clone());
+        let mut manager = SshResourcesManager::default();
+        let output = manager.list(&runtime, &HttpGateway).await;
+        let _ = finished.send(());
+        assert_eq!(server.await.unwrap(), expected_actions);
+        assert!(!output.available && !output.setup_supported && !output.verification_supported);
+        assert!(output.observation_id.is_none());
+        assert_eq!(output.error_kind, Some(expected_error));
+    }
 }
