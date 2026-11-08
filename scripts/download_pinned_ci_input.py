@@ -137,7 +137,6 @@ def _download_to_staging(asset: PinnedAsset, destination: Path) -> None:
                 request = urllib.request.Request(asset.url, headers={
                     "Range": f"bytes={start}-{end}",
                     "Accept-Encoding": "identity",
-                    "User-Agent": "webcodex-pinned-ci-input/1",
                 })
                 with opener.open(request, timeout=SOCKET_TIMEOUT_SECONDS) as response:
                     _require_https(response.geturl())

@@ -81,7 +81,6 @@ class TransferTests(unittest.TestCase):
             self.assertEqual(request.full_url, URL)
             self.assertEqual(dict((k.lower(), v) for k, v in request.header_items()), {
                 "range": f"bytes={start}-{end}", "accept-encoding": "identity",
-                "user-agent": "webcodex-pinned-ci-input/1",
             })
             self.assertEqual(call.kwargs, {"timeout": download.SOCKET_TIMEOUT_SECONDS})
 

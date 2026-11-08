@@ -170,9 +170,20 @@ class TauriNsisCiToolsTests(unittest.TestCase):
             "nsis-3.11/trailing. ", "nsis-3.12/file", "nsis-3.11/Include/mui2.nsh",
             "nsis-3.11/makensis.exe", "nsis-3.11/makensis.exe/child", "nsis-3.11/" + tools.PLUGIN,
         )
-        for name in paths:
+        for index, name in enumerate(paths):
             with self.subTest(name=name):
-                self.set_archive(self.make_archive([(name, b"bad")]))
+                self.parent = self.root / f"unsafe-case-{index}" / "tauri"
+                # Windows ZipInfo normalizes backslashes before writing. Mutate
+                # both same-length ZIP header names so the fixture stays unsafe.
+                placeholder = name.replace("\\", "X")
+                raw = self.make_archive([(placeholder, b"bad")])
+                if placeholder != name:
+                    self.assertEqual(len(placeholder.encode()), len(name.encode()))
+                    self.assertEqual(raw.count(placeholder.encode()), 2)
+                    raw = raw.replace(placeholder.encode(), name.encode())
+                    with zipfile.ZipFile(io.BytesIO(raw)) as archive:
+                        self.assertEqual(sum(entry.orig_filename == name for entry in archive.infolist()), 1)
+                self.set_archive(raw)
                 with self.assertRaises(tools.PreparationError):
                     tools.prepare_tools(self.parent)
                 self.assertFalse((self.parent / "NSIS").exists())
