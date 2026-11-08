@@ -18,6 +18,11 @@ import subprocess
 import sys
 import tempfile
 
+if __package__:
+    from . import windows_v055_acl_observer as acl_observer
+else:
+    import windows_v055_acl_observer as acl_observer
+
 CONTROL_SHA = "fa9c6e329109e8a5acdea060b1f0f74764a556d2"
 SOURCE_SHA = "a596cec372232b1aa008cef676f61a8170fbf239"
 HELPER_SHA256 = "a4cff6bde7c24441b9a9e5289e0e47ad87a977d9a8ad350c76988b794e757d9d"
@@ -56,9 +61,9 @@ def read_request(path: Path = REQUEST_FILE) -> dict:
 # This child runs only after the candidate outer has returned nonzero, before
 # the original finally. It never performs prepare/finish/rollback. Classification
 # can open the existing setup store/lock, so this is not a pre-install probe.
-PROBE_SOURCE = r'''import hashlib,json,os,sys
+PROBE_SOURCE = r'''import hashlib,importlib.util,json,os,sys
 from pathlib import Path
-PREFIX = "WEBCODEX_V055_DIAG:classifier="
+PREFIX = "WEBCODEX_V055_DIAG:"
 try:
     context_path = Path(os.environ["WEBCODEX_DIAG_CONTEXT"])
     with context_path.open("rb") as stream:
@@ -73,6 +78,26 @@ try:
     with cli.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != context["cli_sha256"]:
             raise ValueError()
+    context_ready = True
+except Exception:
+    context_ready = False
+try:
+    if not context_ready:
+        raise ValueError()
+    observer_path = Path(context["observer"])
+    with observer_path.open("rb") as stream:
+        if hashlib.file_digest(stream, "sha256").hexdigest() != context["observer_sha256"]:
+            raise ValueError()
+    spec = importlib.util.spec_from_file_location("v055_native_acl_observer", observer_path)
+    observer = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(observer)
+    security = observer.observe(Path(runtime), Path(context["environment"]))
+except Exception:
+    security = {"error": "security_probe_failed"}
+print(PREFIX + "security=" + json.dumps(security, separators=(",", ":"), sort_keys=True), flush=True)
+try:
+    if not context_ready:
+        raise ValueError()
     sys.path.insert(0, context["control_root"])
     from scripts.windows_unified_upgrade_smoke import run_command, classification
     result = run_command([str(cli), "environment", "installer-classify",
@@ -82,7 +107,7 @@ try:
     value = {key: observed[key] for key in ("exit_code", "kind", "diagnostic_codes")}
 except Exception:
     value = {"error": "probe_failed"}
-print(PREFIX + json.dumps(value, separators=(",", ":"), sort_keys=True))
+print(PREFIX + "classifier=" + json.dumps(value, separators=(",", ":"), sort_keys=True))
 '''
 
 PROBE_FUNCTION = r'''
@@ -158,12 +183,13 @@ def project_helper(stdout: bytes, stderr: bytes, returncode: int, scenario: str)
     for line in stdout.decode("utf-8", errors="replace").splitlines():
         if not line.startswith(PREFIX):
             continue
-        require(len(line) <= 2048, "observation_line_bound")
         event = line[len(PREFIX):]
         name, _, value = event.partition("=")
+        require(len(line.encode("utf-8")) <= (acl_observer.MAX_OBSERVATION_BYTES + 64 if name == "security" else 2048),
+                "observation_line_bound")
         require(name not in seen, "observation_duplicate")
         seen.add(name)
-        require(len(seen) <= 7, "observation_count_bound")
+        require(len(seen) <= 8, "observation_count_bound")
         if name == "baseline_start":
             require(not value and scenario == "unconfigured" and not result["candidate_outer"]["started"]
                     and not result["cleanup"]["started"], "baseline_order")
@@ -184,6 +210,17 @@ def project_helper(stdout: bytes, stderr: bytes, returncode: int, scenario: str)
             code = int(value)
             require(exit_integer(code), "candidate_exit_bound")
             result["candidate_outer"]["exit_code"] = code
+        elif name == "security":
+            code = result["candidate_outer"]["exit_code"]
+            require(code is not None and code != 0 and "classifier" not in seen
+                    and not result["cleanup"]["started"], "security_order")
+            observed = json.loads(value)
+            if observed != {"error": "security_probe_failed"}:
+                try:
+                    acl_observer.project_observation(observed)
+                except ValueError:
+                    raise DiagnosticFailure("security_projection") from None
+            result["post_failure_security"] = observed
         elif name == "classifier":
             code = result["candidate_outer"]["exit_code"]
             require(code is not None and code != 0 and not result["cleanup"]["started"], "classifier_order")
@@ -315,6 +352,9 @@ def execute(args, report: dict) -> int:
     hashes.write_text(json.dumps({name: item["sha256"] for name, item in manifest["artifacts"].items()}), encoding="utf-8")
     probe = inputs / "post-failure-classifier.py"
     probe.write_text(PROBE_SOURCE, encoding="utf-8")
+    observer_path = Path(acl_observer.__file__).resolve()
+    observer_sha256 = hashlib.sha256(observer_path.read_bytes()).hexdigest()
+    report["security_observer_sha256"] = observer_sha256
     child_env.update(WEBCODEX_DIAG_PYTHON=sys.executable, WEBCODEX_DIAG_PROBE=str(probe))
     report["inputs_verified"] = {"request_sha256": REQUEST_SHA256, "source_sha": SOURCE_SHA,
         "release_id": request["release_id"], "build_run_id": request["build_run_id"], "build_run_attempt": request["build_run_attempt"],
@@ -330,7 +370,9 @@ def execute(args, report: dict) -> int:
         destination = install_root / (scenario + " Desktop")
         context = inputs / (scenario + "-classifier-context.json")
         context.write_text(json.dumps({"control_root": str(control_root), "runtime": str(destination / "webcodex-runtime"),
-            "cli": str(runtime / "webcodex.exe"), "cli_sha256": manifest["artifacts"]["webcodex"]["sha256"]}), encoding="utf-8")
+            "cli": str(runtime / "webcodex.exe"), "cli_sha256": manifest["artifacts"]["webcodex"]["sha256"],
+            "observer": str(observer_path), "observer_sha256": observer_sha256,
+            "environment": str(default_environment)}), encoding="utf-8")
         child_env["WEBCODEX_DIAG_CONTEXT"] = str(context)
         command = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(helper),
                    "-Installer", str(paths["installer"]), "-Version", "0.5.5", "-SourceSha", SOURCE_SHA,
@@ -370,7 +412,8 @@ def main(argv=None) -> int:
               "platform": args.platform, "mode": args.mode, "phase": "identity", "observation_complete": False,
               "workflow_run_id": int(os.environ.get("GITHUB_RUN_ID", "0")),
               "workflow_run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "0")),
-              "post_failure_classifier_is_outer_failure_evidence": False}
+              "post_failure_classifier_is_outer_failure_evidence": False,
+              "post_failure_security_is_outer_failure_evidence": False}
     exit_code = 1
     try:
         exit_code = execute(args, report)

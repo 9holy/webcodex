@@ -12,6 +12,7 @@ import unittest
 from unittest import mock
 
 from scripts.diagnostics import windows_v055_upgrade as diagnostic
+from scripts.tests.test_windows_v055_acl_observer import projected_fixture
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -53,6 +54,7 @@ class ObservationCopyTests(unittest.TestCase):
         self.assertLess(original_guard, cleanup)
         self.assertNotIn("package-upgrade-", diagnostic.PROBE_SOURCE)
         self.assertNotIn("upgrade-prepare", diagnostic.PROBE_SOURCE)
+        self.assertLess(diagnostic.PROBE_SOURCE.index("observer.observe("), diagnostic.PROBE_SOURCE.index("result = run_command("))
 
     @unittest.skipUnless(shutil.which("pwsh"), "PowerShell parser requires native pwsh")
     def test_observation_copy_is_valid_powershell(self):
@@ -93,6 +95,26 @@ class ProjectionTests(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(diagnostic.DiagnosticFailure):
                 diagnostic.project_helper(lines("candidate_start", "candidate_exit=1", "classifier=" + json.dumps(value)), b"", 1, "fresh")
 
+    def test_security_projection_is_only_post_failure_before_classifier_and_cleanup(self):
+        security = "security=" + json.dumps(projected_fixture())
+        classifier = 'classifier={"error":"probe_failed"}'
+        result = diagnostic.project_helper(lines("baseline_start", "baseline_exit=0", "candidate_start", "candidate_exit=1",
+            security, classifier, "cleanup_start", "cleanup_complete"), b"PRIVATE_OUTPUT", 1, "unconfigured")
+        self.assertEqual(len(result["post_failure_security"]["objects"]), 6)
+        self.assertEqual(result["helper_exit_code"], 1)
+        self.assertNotIn("PRIVATE", json.dumps(result))
+        for events in ((security,), ("candidate_start", "candidate_exit=0", security),
+                       ("candidate_start", "candidate_exit=1", classifier, security),
+                       ("candidate_start", "candidate_exit=1", "cleanup_start", security)):
+            with self.subTest(events=events), self.assertRaises(diagnostic.DiagnosticFailure):
+                diagnostic.project_helper(lines(*events), b"", 1, "fresh")
+
+    def test_security_private_fields_are_rejected_without_changing_failure_exit(self):
+        value = projected_fixture()
+        value["objects"][0]["sddl"] = "PRIVATE_SDDL"
+        with self.assertRaisesRegex(diagnostic.DiagnosticFailure, "security_projection"):
+            diagnostic.project_helper(lines("candidate_start", "candidate_exit=1", "security=" + json.dumps(value)), b"", 1, "fresh")
+
     def test_success_requires_original_cleanup_completion(self):
         with self.assertRaises(diagnostic.DiagnosticFailure):
             diagnostic.project_helper(lines("candidate_start", "candidate_exit=0", "cleanup_start"), b"", 0, "fresh")
@@ -131,6 +153,7 @@ class ProjectionTests(unittest.TestCase):
             report = json.loads(path.read_bytes())
             self.assertEqual(report["kind"], "windows-v055-upgrade-diagnostic")
             self.assertIs(report["formal_acceptance"], False)
+            self.assertIs(report["post_failure_security_is_outer_failure_evidence"], False)
             self.assertNotIn("passed", report)
 
 

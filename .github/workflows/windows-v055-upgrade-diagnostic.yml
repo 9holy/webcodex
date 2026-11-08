@@ -1,5 +1,5 @@
-name: Diagnose frozen v0.5.5 Windows upgrade
-run-name: Diagnose v0.5.5 upgrade ${{ github.sha }}
+name: Diagnose frozen v0.5.5 Windows upgrade ACL
+run-name: Diagnose v0.5.5 upgrade ACL ${{ github.sha }}
 
 on:
   push:
@@ -27,13 +27,7 @@ jobs:
         include:
           - platform: win32-x64
             runner: windows-latest
-            mode: sequence
-          - platform: win32-x64
-            runner: windows-latest
             mode: direct
-          - platform: win32-arm64
-            runner: windows-11-arm
-            mode: sequence
           - platform: win32-arm64
             runner: windows-11-arm
             mode: direct
@@ -71,7 +65,7 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
-          python -B -m unittest scripts.tests.test_windows_v055_upgrade_diagnostic -v
+          python -B -m unittest discover -s scripts/tests -p 'test_windows_v055_*.py' -v
           if ($LASTEXITCODE -ne 0) { throw "Diagnostic observation contracts failed" }
       - name: Observe the same public installer bytes on this fresh native runner
         shell: pwsh
