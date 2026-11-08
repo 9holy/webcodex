@@ -47,6 +47,7 @@ jobs:
           import re
           import sys
           import tempfile
+          import urllib.error
 
           sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
           from scripts import package_unified_installer as packaging
@@ -95,6 +96,32 @@ jobs:
               if not condition:
                   raise ObservationError(code)
 
+          def download_failure(error, limit):
+              cause = error.__cause__
+              cause_type = type(cause).__name__ if cause is not None else None
+              if cause_type is not None and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", cause_type) is None:
+                  cause_type = "OtherError"
+              detail = {"failure_code": "download_verification", "cause_type": cause_type,
+                        "http_status": None, "errno": None, "winerror": None}
+              # Match only the downloader's own size-limit prefix; never retain
+              # exception text, URLs, response bodies, or signed redirects.
+              if cause is None and str(error).startswith(f"download exceeds {limit} bytes: "):
+                  detail["failure_code"] = "download_size_limit"
+              if isinstance(cause, urllib.error.HTTPError):
+                  status = cause.code
+                  if type(status) is int and 100 <= status <= 999:
+                      detail["http_status"] = status
+              sources = [cause]
+              if isinstance(cause, urllib.error.URLError) and isinstance(cause.reason, OSError):
+                  sources.append(cause.reason)
+              for field in ("errno", "winerror"):
+                  for source in sources:
+                      value = getattr(source, field, None)
+                      if type(value) is int and -(2 ** 31) <= value <= 2 ** 32 - 1:
+                          detail[field] = value
+                          break
+              return detail
+
           try:
               require(platform in PINS, "platform")
               native = os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")
@@ -117,7 +144,12 @@ jobs:
               paths = [inputs / name for name in names]
               for label, name, path, expected, limit in zip(
                       ("installer", "manifest"), names, paths, PINS[platform], (128 * 1024 * 1024, 128 * 1024)):
-                  size, actual = public.download_file(f"{base}/{name}", path, limit, 120)
+                  report["download_context"] = {"label": label, "max_bytes": limit}
+                  try:
+                      size, actual = public.download_file(f"{base}/{name}", path, limit, 120)
+                  except public.VerificationError as error:
+                      report["download_context"].update(download_failure(error, limit))
+                      raise
                   require(size > 0 and actual == expected, "download_digest")
                   report[label] = {"sha256": actual, "size": size}
               report["phase"] = "manifest"
