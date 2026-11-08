@@ -6,6 +6,10 @@ never repairs installed-file ownership or replaces installer-classify with a stu
 Only the small allowlisted report is suitable for an Actions artifact. Environment
 files and subprocess output can contain generated private credentials and are not
 written to the report or printed.
+
+The default v0.5.0 fixture reproduces the published v0.5.3 rejection first. The
+explicit v0.5.4 fixture only accepts complete candidate verification and upgrades
+the real configured installation directly, without that unrelated reproduction.
 """
 from __future__ import annotations
 
@@ -37,6 +41,11 @@ UPSTREAM_SHA256 = {
     "win32-x64": "dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6",
     "win32-arm64": "9d3692b3d9309b82ec987565d140dd9226a6d1473d2e67e5f9d675a3250a52b2",
 }
+V054_SHA256 = {
+    "win32-x64": "6dbaa9075541d44a2c4f22075409abdb43f25a0a41f50aa26fc73cc137f9cc8e",
+    "win32-arm64": "b233872dc776d2a706235ac5fcc593b7949f7b38d878dd7de099ec7e513ad180",
+}
+V054_SOURCE = "1af9bb5321edcdc16a4f1a5be65d0611ef19964a"
 PLATFORMS = {
     "win32-x64": ("AMD64", "x86_64-pc-windows-msvc", "x86_64"),
     "win32-arm64": ("ARM64", "aarch64-pc-windows-msvc", "aarch64"),
@@ -448,9 +457,11 @@ class NativeSmoke:
     def __init__(self, args):
         self.args = args
         self.report = {"schema_version": 1, "scenario": "published-unified-verbatim-upgrade",
-                       "platform": args.platform, "published_source": PUBLISHED_SOURCE,
+                       "platform": args.platform,
                        "mode": "reproduce_only" if args.reproduce_only else "verify_candidate" if args.verify_candidate else "verify_classifier",
                        "phases": {}, "cleanup": {}}
+        if args.previous_version == "0.5.0":
+            self.report["published_source"] = PUBLISHED_SOURCE
         self.root: Path | None = None
         self.installed: Path | None = None
         self.environment: Path | None = None
@@ -513,6 +524,19 @@ class NativeSmoke:
             self.uncertain_installer = True
             raise
 
+    def observe_previous_runtime(self) -> None:
+        source = V054_SOURCE if self.args.previous_version == "0.5.4" else None
+        programs = PROGRAMS if source else ("webcodex", "webcodex-server", "webcodex-runner")
+        identities = []
+        for name in programs:
+            info = parse_json(run_command([str(self.installed / PROGRAMS[name]), "--build-info-json"],
+                "upstream build identity"), "upstream build identity")
+            identities.append(verify_build(info, binary=name, version=self.args.previous_version, source=source,
+                                           platform=self.args.platform, label="upstream installed runtime"))
+        if any(identity != identities[0] for identity in identities[1:]):
+            raise SmokeFailure("upstream runtime build identities disagree")
+        self.report["upstream_runtime"] = identities[0]
+
     def run(self) -> None:
         self.report["phase"] = "validate_inputs"
         native_arch = os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")
@@ -527,12 +551,15 @@ class NativeSmoke:
                 raise SmokeFailure("fixture loopback port 8080 is already in use") from error
         self.report["inputs"] = {
             "previous_installer_sha256": verify_input(self.args.previous_installer, self.args.previous_installer_sha256, "previous installer"),
-            "published_installer_sha256": verify_input(self.args.published_installer, self.args.published_installer_sha256, "published unified installer"),
-            "published_cli_sha256": digest(self.args.published_cli),
         }
-        build = parse_json(run_command([str(self.args.published_cli), "--build-info-json"], "published CLI identity"), "published CLI identity")
-        verify_build(build, binary="webcodex", version="0.5.3", source=PUBLISHED_SOURCE,
-                     platform=self.args.platform, label="published CLI")
+        if self.args.previous_version == "0.5.0":
+            self.report["inputs"].update({
+                "published_installer_sha256": verify_input(self.args.published_installer, self.args.published_installer_sha256, "published unified installer"),
+                "published_cli_sha256": digest(self.args.published_cli),
+            })
+            build = parse_json(run_command([str(self.args.published_cli), "--build-info-json"], "published CLI identity"), "published CLI identity")
+            verify_build(build, binary="webcodex", version="0.5.3", source=PUBLISHED_SOURCE,
+                         platform=self.args.platform, label="published CLI")
         if self.args.verify_candidate:
             self.report["inputs"]["candidate_installer_sha256"] = verify_input(
                 self.args.candidate_installer, self.args.candidate_installer_sha256, "candidate unified installer")
@@ -582,18 +609,12 @@ class NativeSmoke:
         self.report["installed_owners"] = owners
         if owners.get("helper_exit_code") != 0 or owners.get("failure"):
             raise SmokeFailure("read-only installed owner helper failed; inspect its fixed-stage diagnostic")
-        identities = []
-        for name in ("webcodex", "webcodex-server", "webcodex-runner"):
-            info = parse_json(run_command([str(self.installed / PROGRAMS[name]), "--build-info-json"], "upstream build identity"), "upstream build identity")
-            identities.append(verify_build(info, binary=name, version="0.5.0", source=None,
-                                           platform=self.args.platform, label="upstream installed runtime"))
-        if any(identity != identities[0] for identity in identities[1:]):
-            raise SmokeFailure("upstream runtime build identities disagree")
-        self.report["upstream_runtime"] = identities[0]
-        self.report["phase"] = "classify_real_unconfigured_upstream_installation"
-        self.report["unconfigured_classification"] = classification(self.cli(self.args.published_cli,
-            ["installer-classify", "--expected-runtime-dir", str(self.installed / "webcodex-runtime")],
-            "published unconfigured classification"))
+        self.observe_previous_runtime()
+        if self.args.previous_version == "0.5.0":
+            self.report["phase"] = "classify_real_unconfigured_upstream_installation"
+            self.report["unconfigured_classification"] = classification(self.cli(self.args.published_cli,
+                ["installer-classify", "--expected-runtime-dir", str(self.installed / "webcodex-runtime")],
+                "published unconfigured classification"))
         self.report["phase"] = "configure_real_upstream_environment"
         try:
             setup = self.cli(self.old_cli, ["configure", "--create", "--runner", "--no-project", "--scope", "user",
@@ -649,10 +670,13 @@ class NativeSmoke:
         self.unrelated = subprocess.Popen([str(unrelated), "/D", "/C", "set /p fixture="],
                                           stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         before = self.snapshot()
+        verbatim_runtime = str(Path(binaries["cli"]).parent)
+        if self.args.previous_version == "0.5.4":
+            self.verify_candidate(before, verbatim_runtime)
+            return
         self.report["phase"] = "classify_published_dos_and_verbatim_paths"
         dos = classification(self.cli(self.args.published_cli,
             ["installer-classify", "--expected-runtime-dir", str(self.installed / "webcodex-runtime")], "published DOS classification"))
-        verbatim_runtime = str(Path(binaries["cli"]).parent)
         verbatim = classification(self.cli(self.args.published_cli,
             ["installer-classify", "--expected-runtime-dir", verbatim_runtime], "published verbatim classification"))
         self.report["classification"] = {"dos": dos, "verbatim": verbatim}
@@ -807,11 +831,12 @@ def arguments(argv=None):
     mode.add_argument("--verify-classifier", action="store_true", help="real fixed CLI acceptance; does not install a candidate")
     mode.add_argument("--verify-candidate", action="store_true", help="upgrade with a genuine public release outer installer")
     parser.add_argument("--platform", choices=tuple(PLATFORMS), default="win32-x64")
+    parser.add_argument("--previous-version", choices=("0.5.0", "0.5.4"), default="0.5.0")
     parser.add_argument("--previous-installer", type=Path, required=True)
     parser.add_argument("--previous-installer-sha256", required=True)
-    parser.add_argument("--published-installer", type=Path, required=True)
-    parser.add_argument("--published-installer-sha256", required=True)
-    parser.add_argument("--published-cli", type=Path, required=True)
+    parser.add_argument("--published-installer", type=Path)
+    parser.add_argument("--published-installer-sha256")
+    parser.add_argument("--published-cli", type=Path)
     parser.add_argument("--candidate-cli", type=Path)
     parser.add_argument("--candidate-version")
     parser.add_argument("--candidate-source-sha")
@@ -822,8 +847,15 @@ def arguments(argv=None):
     parser.add_argument("--candidate-build-run-id", type=int)
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args(argv)
-    if args.previous_installer_sha256 != UPSTREAM_SHA256[args.platform]:
-        parser.error("the upstream v0.5.0 standard fixture must use its code-owned platform digest")
+    previous_digests = V054_SHA256 if args.previous_version == "0.5.4" else UPSTREAM_SHA256
+    if args.previous_installer_sha256 != previous_digests[args.platform]:
+        parser.error("the selected previous standard fixture must use its code-owned platform digest")
+    published_inputs = (args.published_installer, args.published_installer_sha256, args.published_cli)
+    if args.previous_version == "0.5.0":
+        if any(value is None for value in published_inputs):
+            parser.error("the v0.5.0 fixture requires the published v0.5.3 installer, digest and CLI")
+    elif not args.verify_candidate or any(value is not None for value in published_inputs):
+        parser.error("the v0.5.4 fixture requires --verify-candidate without published v0.5.3 reproduction inputs")
     if not args.reproduce_only and (not args.candidate_cli
             or not packaging.VERSION_RE.fullmatch(args.candidate_version or "")
             or not re.fullmatch(r"[0-9a-f]{40}", args.candidate_source_sha or "")):

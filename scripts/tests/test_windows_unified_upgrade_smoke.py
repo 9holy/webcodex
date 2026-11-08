@@ -98,6 +98,7 @@ class WindowsUnifiedUpgradeEvidenceTests(unittest.TestCase):
             "--candidate-cli", "candidate/webcodex.exe", "--candidate-version", "0.5.4", "--candidate-source-sha", "c" * 40]
         classifier = smoke.arguments(["--verify-classifier", *common])
         self.assertTrue(classifier.verify_classifier)
+        self.assertEqual(classifier.previous_version, "0.5.0")
         full = ["--candidate-installer", "candidate.exe", "--candidate-installer-sha256", "b" * 64,
             "--candidate-source-manifest", "manifest.json", "--candidate-source-manifest-sha256", "d" * 64,
             "--candidate-build-run-id", "123"]
@@ -106,6 +107,116 @@ class WindowsUnifiedUpgradeEvidenceTests(unittest.TestCase):
                          ["--verify-candidate", *common, *full[:-1], "0"]):
             with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
                 smoke.arguments(selected)
+
+    def v054_candidate_arguments(self, platform="win32-x64"):
+        return ["--verify-candidate", "--platform", platform, "--previous-version", "0.5.4",
+            "--previous-installer", "old.exe", "--previous-installer-sha256", smoke.V054_SHA256[platform],
+            "--candidate-cli", "candidate/webcodex.exe", "--candidate-version", "0.5.6",
+            "--candidate-source-sha", "c" * 40, "--candidate-installer", "candidate.exe",
+            "--candidate-installer-sha256", "b" * 64, "--candidate-source-manifest", "manifest.json",
+            "--candidate-source-manifest-sha256", "d" * 64, "--candidate-build-run-id", "123",
+            "--report", "report.json"]
+
+    def test_v054_uses_only_the_two_fixed_published_standard_installers(self):
+        self.assertEqual(smoke.V054_SOURCE, "1af9bb5321edcdc16a4f1a5be65d0611ef19964a")
+        self.assertEqual(smoke.V054_SHA256, {
+            "win32-x64": "6dbaa9075541d44a2c4f22075409abdb43f25a0a41f50aa26fc73cc137f9cc8e",
+            "win32-arm64": "b233872dc776d2a706235ac5fcc593b7949f7b38d878dd7de099ec7e513ad180",
+        })
+        for platform in smoke.PLATFORMS:
+            selected = self.v054_candidate_arguments(platform)
+            args = smoke.arguments(selected)
+            self.assertEqual((args.platform, args.previous_version), (platform, "0.5.4"))
+            self.assertTrue(args.verify_candidate)
+            self.assertIsNone(args.published_installer)
+            self.assertIsNone(args.published_installer_sha256)
+            self.assertIsNone(args.published_cli)
+            for digest in (smoke.UPSTREAM_SHA256[platform], "0" * 64,
+                           smoke.V054_SHA256[next(p for p in smoke.PLATFORMS if p != platform)]):
+                changed = selected.copy()
+                changed[changed.index("--previous-installer-sha256") + 1] = digest
+                with self.subTest(platform=platform, digest=digest), \
+                        mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+                    smoke.arguments(changed)
+
+    def test_v054_cannot_select_reproduction_classifier_or_partial_candidate_verification(self):
+        selected = self.v054_candidate_arguments()
+        invalid = [[mode, *selected[1:]] for mode in ("--reproduce-only", "--verify-classifier")]
+        for flag in ("--candidate-cli", "--candidate-version", "--candidate-source-sha",
+                     "--candidate-installer", "--candidate-installer-sha256", "--candidate-source-manifest",
+                     "--candidate-source-manifest-sha256", "--candidate-build-run-id"):
+            index = selected.index(flag)
+            invalid.append(selected[:index] + selected[index + 2:])
+        for flag in ("--published-installer", "--published-installer-sha256", "--published-cli",
+                     "--previous-source-sha"):
+            invalid.append([*selected, flag, "unexpected"])
+        for version in ("0.5.3", "0.5.5", "latest", "../../old"):
+            changed = selected.copy()
+            changed[changed.index("--previous-version") + 1] = version
+            invalid.append(changed)
+        # Duplicated options cannot select the legacy route with the v0.5.4 bytes.
+        invalid.append([*selected, "--previous-version", "0.5.0"])
+        for changed in invalid:
+            with self.subTest(arguments=changed), mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+                smoke.arguments(changed)
+
+    def test_default_v050_still_requires_the_complete_published_reproduction_inputs(self):
+        selected = ["--reproduce-only", "--previous-installer", "old.exe",
+            "--previous-installer-sha256", smoke.UPSTREAM_SHA256["win32-x64"],
+            "--published-installer", "published.exe", "--published-installer-sha256", "a" * 64,
+            "--published-cli", "published/webcodex.exe", "--report", "report.json"]
+        args = smoke.arguments(selected)
+        self.assertEqual(args.previous_version, "0.5.0")
+        self.assertTrue(args.reproduce_only)
+        self.assertEqual(smoke.NativeSmoke(args).report["published_source"], smoke.PUBLISHED_SOURCE)
+        for flag in ("--published-installer", "--published-installer-sha256", "--published-cli"):
+            index = selected.index(flag)
+            with self.subTest(flag=flag), mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+                smoke.arguments(selected[:index] + selected[index + 2:])
+
+    def test_previous_build_observation_checks_exact_v054_source_and_keeps_v050_behavior(self):
+        for previous in ("0.5.0", "0.5.4"):
+            for platform, (_, target, architecture) in smoke.PLATFORMS.items():
+                selected = self.v054_candidate_arguments(platform)
+                if previous == "0.5.0":
+                    selected[selected.index("--previous-version") + 1] = previous
+                    selected[selected.index("--previous-installer-sha256") + 1] = smoke.UPSTREAM_SHA256[platform]
+                    selected += ["--published-installer", "published.exe", "--published-installer-sha256", "a" * 64,
+                                 "--published-cli", "published/webcodex.exe"]
+                args = smoke.arguments(selected)
+                native = smoke.NativeSmoke(args)
+                native.installed = Path("isolated-desktop")
+                source = smoke.V054_SOURCE if previous == "0.5.4" else "e" * 40
+                identity = {"version": previous, "git_commit": source, "git_dirty": False,
+                            "target": target, "architecture": architecture}
+                programs = tuple(smoke.PROGRAMS) if previous == "0.5.4" else tuple(smoke.PROGRAMS)[:3]
+                results = [smoke.CommandResult(0, json.dumps({"binary": name, **identity}).encode(), b"")
+                           for name in programs]
+                with self.subTest(previous=previous, platform=platform), \
+                        mock.patch.object(smoke, "run_command", side_effect=results) as run:
+                    native.observe_previous_runtime()
+                self.assertEqual(native.report["upstream_runtime"], identity)
+                self.assertNotIn("previous_runtime", native.report)
+                self.assertEqual([call.args[0] for call in run.call_args_list], [
+                    [str(native.installed / smoke.PROGRAMS[name]), "--build-info-json"] for name in programs])
+                self.assertEqual("published_source" in native.report, previous == "0.5.0")
+
+    def test_each_v054_installed_program_must_have_the_pinned_clean_native_build_identity(self):
+        args = smoke.arguments(self.v054_candidate_arguments())
+        identity = {"version": "0.5.4", "git_commit": smoke.V054_SOURCE, "git_dirty": False,
+                    "target": "x86_64-pc-windows-msvc", "architecture": "x86_64"}
+        for rejected in smoke.PROGRAMS:
+            for change in ({"version": "0.5.0"}, {"git_commit": "e" * 40}, {"git_dirty": True},
+                           {"target": "aarch64-pc-windows-msvc"}, {"architecture": "aarch64"},
+                           {"binary": "different"}):
+                native = smoke.NativeSmoke(args)
+                native.installed = Path("isolated-desktop")
+                results = [smoke.CommandResult(0, json.dumps({"binary": name, **identity,
+                    **(change if name == rejected else {})}).encode(), b"") for name in smoke.PROGRAMS]
+                with self.subTest(program=rejected, change=change), \
+                        mock.patch.object(smoke, "run_command", side_effect=results), self.assertRaises(smoke.SmokeFailure):
+                    native.observe_previous_runtime()
+                self.assertNotIn("upstream_runtime", native.report)
 
     def test_read_only_owner_helper_preserves_failure_stage_and_uses_encoded_source(self):
         failure = {"exists": {"webcodex": True}, "failure": {
