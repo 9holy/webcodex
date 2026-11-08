@@ -1,0 +1,98 @@
+name: Windows unified installer reproduction
+
+on:
+  push:
+    branches: ['diagnostic/windows-unified-upgrade-paths']
+    paths:
+      - '.github/workflows/windows-unified-reproduction.yml'
+      - 'scripts/windows_unified_upgrade_smoke.py'
+      - 'scripts/tests/test_windows_unified_upgrade_smoke.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-unified-reproduction-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  reproduce:
+    if: github.repository == '9holy/webcodex'
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Check the bounded native harness
+        run: python -m unittest scripts.tests.test_windows_unified_upgrade_smoke -v
+      - name: Download exact published reproduction inputs
+        shell: python
+        run: |
+          import hashlib
+          import os
+          from pathlib import Path, PurePosixPath
+          import shutil
+          import tarfile
+          import urllib.request
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'webcodex-unified-reproduction-inputs'
+          root.mkdir(exist_ok=False)
+          assets = {
+              'PREVIOUS_INSTALLER': (
+                  'https://github.com/yyjeqhc/webcodex/releases/download/v0.5.0/webcodex-desktop-v0.5.0-win32-x64-setup.exe',
+                  'dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6'),
+              'PUBLISHED_INSTALLER': (
+                  'https://github.com/9holy/webcodex/releases/download/v0.5.3/webcodex-unified-v0.5.3-win32-x64.exe',
+                  '7a43d294780f8af8a3e22853d81065ccca4546fda1e8316156a2dad9b9c812ab'),
+              'PUBLISHED_RUNTIME': (
+                  'https://github.com/9holy/webcodex/releases/download/v0.5.3/webcodex-v0.5.3-win32-x64.tar.gz',
+                  '95cb8d1d9b3756e531a48f85032d7aeb0771fe141ec09940b308f25fdc6a1be6'),
+          }
+          paths = {}
+          for key, (url, expected) in assets.items():
+              destination = root / url.rsplit('/', 1)[1]
+              with urllib.request.urlopen(url, timeout=120) as response, destination.open('xb') as output:
+                  shutil.copyfileobj(response, output)
+              with destination.open('rb') as stream:
+                  actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+              if actual != expected:
+                  raise SystemExit(f'{key} did not match its pinned published digest')
+              paths[key] = destination
+              print(f'{key}: SHA-256 verified')
+          cli = root / 'published-cli' / 'webcodex.exe'
+          cli.parent.mkdir()
+          with tarfile.open(paths['PUBLISHED_RUNTIME'], 'r:gz') as archive:
+              members = [member for member in archive.getmembers()
+                         if PurePosixPath(member.name).name == 'webcodex.exe']
+              if len(members) != 1 or not members[0].isfile() or not (0 < members[0].size < 200_000_000):
+                  raise SystemExit('Published runtime must contain exactly one bounded regular CLI')
+              with archive.extractfile(members[0]) as source, cli.open('xb') as output:
+                  shutil.copyfileobj(source, output)
+          paths['PUBLISHED_CLI'] = cli
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              for key, path in paths.items():
+                  print(f'{key}={path}', file=output)
+      - name: Reproduce with real installed Runtime and services
+        shell: pwsh
+        run: |
+          python scripts/windows_unified_upgrade_smoke.py `
+            --reproduce-only `
+            --previous-installer "$env:PREVIOUS_INSTALLER" `
+            --previous-installer-sha256 dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6 `
+            --published-installer "$env:PUBLISHED_INSTALLER" `
+            --published-installer-sha256 7a43d294780f8af8a3e22853d81065ccca4546fda1e8316156a2dad9b9c812ab `
+            --published-cli "$env:PUBLISHED_CLI" `
+            --report "$env:RUNNER_TEMP/windows-unified-upgrade-report.json"
+      - name: Retain bounded reproduction evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-unified-reproduction-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-unified-upgrade-report.json
+          if-no-files-found: warn
+          retention-days: 7
