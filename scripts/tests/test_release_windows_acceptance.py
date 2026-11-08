@@ -1,11 +1,19 @@
 from __future__ import annotations
 
 import copy
+import contextlib
 import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import tempfile
 import unittest
+from unittest import mock
 
 from scripts import release_github_actions as base
 from scripts import release_github_actions_v054 as staged
+from scripts import release_github_actions_v055 as v055
 from scripts import release_windows_acceptance as worker
 from scripts import verify_public_release as public
 
@@ -117,6 +125,79 @@ class AcceptanceIdentityTests(unittest.TestCase):
             change(invalid)
             with self.subTest(report=invalid), self.assertRaises(base.ReleaseControlError):
                 worker.validate_report(invalid, req, "win32-x64", 456, 1)
+
+
+class FixedAuthoritySelectionTests(unittest.TestCase):
+    def finalized_spec(self, module):
+        return base.ReleaseSpec({**dict(module.SPEC.pinned_request), "source_sha": "c" * 40,
+            "source_tree": "d" * 40, "ci_run_id": 1001, "ci_run_attempt": 1,
+            "evidence_run_id": 1002, "evidence_run_attempt": 1},
+            module.SPEC.request_path, module.SPEC.workflow_path)
+
+    def fixed_request(self, spec):
+        value = request(spec)
+        value.update(tag=spec.pinned_request["tag"], assets=assets(spec.pinned_request["version"]))
+        return value
+
+    def test_exact_pairs_select_only_their_code_owned_specification(self):
+        for module in (staged, v055):
+            spec = self.finalized_spec(module)
+            with self.subTest(tag=spec.pinned_request["tag"]), mock.patch.object(module, "SPEC", spec):
+                self.assertIs(worker.select_release_spec(self.fixed_request(spec)), spec)
+
+    def test_unknown_crossed_or_missing_pairs_have_no_fallback(self):
+        spec = self.finalized_spec(v055)
+        for tag, workflow in (("v0.5.4", spec.workflow_path),
+                              ("v0.5.5", staged.SPEC.workflow_path),
+                              ("v0.5.6", ".github/workflows/release-publish-v056.yml"),
+                              ("v0.5.5", ".github/workflows/ci.yml"),
+                              (None, spec.workflow_path), ("v0.5.5", None)):
+            candidate = self.fixed_request(spec)
+            candidate.update(tag=tag, controller_workflow=workflow)
+            with self.subTest(tag=tag, workflow=workflow), self.assertRaises(base.ReleaseControlError):
+                worker.select_release_spec(candidate)
+
+    def test_selection_still_validates_the_complete_request(self):
+        spec = self.finalized_spec(v055)
+        for change in (lambda r: r.update(source_sha="f" * 40),
+                       lambda r: r.update(repo_id=999),
+                       lambda r: r.update(build_run_id=True),
+                       lambda r: r.update(skip_upgrade=True)):
+            candidate = self.fixed_request(spec)
+            change(candidate)
+            with mock.patch.object(v055, "SPEC", spec), self.assertRaises(base.ReleaseControlError):
+                worker.select_release_spec(candidate)
+
+    def assert_main_refuses_before_execution(self, raw):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            inputs = root / "inputs-never-created"
+            report_path = root / "report.json"
+            env = {"WEBCODEX_WINDOWS_ACCEPTANCE_REQUEST": raw, "GITHUB_RUN_ID": "456", "GITHUB_RUN_ATTEMPT": "1"}
+            with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(worker, "execute") as execute, \
+                    mock.patch.object(worker, "_download") as download, contextlib.redirect_stdout(io.StringIO()):
+                result = worker.main(["--platform", "win32-x64", "--inputs-root", str(inputs),
+                                      "--report", str(report_path)])
+            self.assertEqual(result, 1)
+            execute.assert_not_called()
+            download.assert_not_called()
+            self.assertFalse(inputs.exists())
+            self.assertIs(json.loads(report_path.read_bytes())["passed"], False)
+
+    def test_constructed_unfinalized_pins_refuse_before_worker_execution(self):
+        finalized = self.finalized_spec(v055)
+        for field, value in (("source_sha", "0" * 40), ("source_tree", "0" * 40),
+                             ("ci_run_id", 1), ("evidence_run_id", 1)):
+            spec = base.ReleaseSpec({**dict(finalized.pinned_request), field: value},
+                                    finalized.request_path, finalized.workflow_path)
+            with self.subTest(field=field), mock.patch.object(v055, "SPEC", spec):
+                self.assert_main_refuses_before_execution(base._json_bytes(self.fixed_request(spec)).decode())
+
+    def test_worker_bounds_and_duplicate_keys_precede_authority_selection(self):
+        for raw in (" " * (worker.MAX_REQUEST_BYTES + 1), '{"tag":"v0.5.4","tag":"v0.5.5"}'):
+            with mock.patch.object(worker, "select_release_spec") as select:
+                self.assert_main_refuses_before_execution(raw)
+            select.assert_not_called()
 
 
 if __name__ == "__main__":
