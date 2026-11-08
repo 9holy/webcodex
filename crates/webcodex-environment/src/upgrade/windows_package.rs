@@ -25,6 +25,8 @@ struct PackageJournal {
     candidate: UpgradeCandidate,
     phase: Phase,
     programs: Vec<ProgramBackup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_installation: Option<WindowsInstallationBinding>,
 }
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,18 +72,41 @@ fn targets(runtime: &Path) -> SetupResultValue<BTreeMap<String, PathBuf>> {
     Ok(targets)
 }
 
+#[cfg(not(windows))]
 fn owner_path(path: &Path, owner: &str) -> SetupResultValue<()> {
     verify_installed_target_path(path)?;
-    #[cfg(windows)]
-    if crate::storage::windows_path_owner(path)? != owner {
-        return Err(error(
-            "installer_owner",
-            "The installed program belongs to another Windows account",
-        ));
-    }
-    #[cfg(not(windows))]
     let _ = owner;
     Ok(())
+}
+
+#[cfg(windows)]
+fn sealed_authority(
+    journal: &PackageJournal,
+    recovery: bool,
+) -> SetupResultValue<windows_installation::ProgramAuthority> {
+    let authority = windows_installation::ProgramAuthority::new(
+        &journal.owner_identity,
+        &journal.runtime_dir,
+        journal.windows_installation.as_ref(),
+        if recovery {
+            windows_installation::Purpose::Recovery
+        } else {
+            windows_installation::Purpose::Sealed
+        },
+    )?;
+    for program in &journal.programs {
+        match &program.windows_security {
+            Some(snapshot) => authority.validate_snapshot(snapshot)?,
+            None if journal.windows_installation.is_some() => {
+                return Err(error(
+                    "upgrade_restore_security",
+                    "The original program security snapshot is missing",
+                ));
+            }
+            None => {}
+        }
+    }
+    Ok(authority)
 }
 
 fn no_environment(store: &EnvironmentStore) -> SetupResultValue<()> {
@@ -176,7 +201,16 @@ async fn classify_inner(
                 "The installed Environment owner or runtime target differs",
             ));
         }
+        #[cfg(windows)]
+        let mut authority = windows_installation::ProgramAuthority::for_record(
+            &record,
+            None,
+            windows_installation::Purpose::Admission,
+        )?;
         for path in files.values() {
+            #[cfg(windows)]
+            authority.authorize(path, false)?;
+            #[cfg(not(windows))]
             owner_path(path, &owner)?;
         }
         for (saved, name) in [
@@ -184,6 +218,9 @@ async fn classify_inner(
             (&record.request.binaries.server, "webcodex-server"),
             (&record.request.binaries.runner, "webcodex-runner"),
         ] {
+            #[cfg(windows)]
+            authority.authorize(saved, false)?;
+            #[cfg(not(windows))]
             owner_path(saved, &owner)?;
             if !installed_paths::same_location(saved, &files[name])? {
                 return Err(error(
@@ -221,7 +258,17 @@ async fn classify_inner(
             "The old Windows package is incomplete; repair it before upgrading",
         ));
     }
+    #[cfg(windows)]
+    let mut authority = windows_installation::ProgramAuthority::new(
+        &owner,
+        runtime,
+        None,
+        windows_installation::Purpose::Admission,
+    )?;
     for path in files.values() {
+        #[cfg(windows)]
+        authority.authorize(path, false)?;
+        #[cfg(not(windows))]
         owner_path(path, &owner)?;
     }
     let mut kind = None;
@@ -354,6 +401,13 @@ fn load_bound(store: &EnvironmentStore, runtime: &Path) -> SetupResultValue<Pack
             ));
         }
     }
+    #[cfg(windows)]
+    {
+        let mut authority = sealed_authority(&journal, true)?;
+        for program in &journal.programs {
+            authority.destination(&program.target)?;
+        }
+    }
     Ok(journal)
 }
 
@@ -420,6 +474,17 @@ fn prepare_verified(
         ));
     }
     let owner = current_account()?.identity;
+    #[cfg(windows)]
+    let mut authority = windows_installation::ProgramAuthority::new(
+        &owner,
+        runtime,
+        None,
+        windows_installation::Purpose::Admission,
+    )?;
+    #[cfg(windows)]
+    for target in targets(runtime)?.values() {
+        authority.authorize(target, false)?;
+    }
     let id = uuid::Uuid::new_v4().to_string();
     let backup_root = store.root().join("upgrade-backups").join(&id);
     ensure_private_directory(&backup_root)?;
@@ -432,10 +497,16 @@ fn prepare_verified(
         candidate,
         phase: Phase::Prepared,
         programs: Vec::new(),
+        windows_installation: None,
     };
     let preparation = (|| -> SetupResultValue<()> {
         let mut remaining = SNAPSHOT_LIMIT;
         for (name, target) in targets(runtime)? {
+            #[cfg(windows)]
+            let windows_security = Some(authority.snapshot(&target)?);
+            #[cfg(not(windows))]
+            let windows_security = None;
+            #[cfg(not(windows))]
             owner_path(&target, &owner)?;
             stopped(&target)?;
             let sha256 = digest(&target)?;
@@ -443,6 +514,11 @@ fn prepare_verified(
             copy_bounded(&target, &backup, &mut remaining)?;
             #[cfg(windows)]
             crate::storage::secure_windows_path(&backup)?;
+            #[cfg(windows)]
+            windows_installation::verify_security(
+                &target,
+                windows_security.as_ref().ok_or_else(SetupDiagnostic::io)?,
+            )?;
             if digest(&backup)? != sha256 || digest(&target)? != sha256 {
                 return Err(error(
                     "upgrade_program_changed",
@@ -454,7 +530,12 @@ fn prepare_verified(
                 backup,
                 sha256,
                 name,
+                windows_security,
             });
+        }
+        #[cfg(windows)]
+        {
+            journal.windows_installation = authority.binding();
         }
         // Replacement authority exists only after all backups have been sealed.
         store.write_json(JOURNAL, &journal)?;
@@ -557,8 +638,17 @@ fn verify_receipt_inner(
 }
 
 fn verify_original_programs(journal: &PackageJournal) -> SetupResultValue<()> {
+    #[cfg(windows)]
+    let mut authority = sealed_authority(journal, false)?;
     for p in &journal.programs {
+        #[cfg(windows)]
+        authority.authorize(&p.target, false)?;
+        #[cfg(not(windows))]
         owner_path(&p.target, &journal.owner_identity)?;
+        #[cfg(windows)]
+        if let Some(snapshot) = &p.windows_security {
+            windows_installation::verify_security(&p.target, snapshot)?;
+        }
         stopped(&p.target)?;
         if digest(&p.target)? != p.sha256 {
             return Err(error(
@@ -587,10 +677,19 @@ async fn finish_inner(store: &EnvironmentStore, runtime: &Path) -> SetupResultVa
             "The package has not reached its installation boundary",
         ));
     }
+    #[cfg(windows)]
+    let mut authority = sealed_authority(&journal, false)?;
+    #[cfg(windows)]
+    for program in &journal.programs {
+        authority.authorize(&program.target, false)?;
+    }
     journal.phase = Phase::Verifying;
     store.write_json(JOURNAL, &journal)?;
     let mut installed = journal.candidate.clone();
     for p in &journal.programs {
+        #[cfg(windows)]
+        authority.authorize(&p.target, false)?;
+        #[cfg(not(windows))]
         owner_path(&p.target, &journal.owner_identity)?;
         let artifact = installed
             .artifacts
@@ -633,20 +732,28 @@ fn rollback_inner(store: &EnvironmentStore, runtime: &Path) -> SetupResultValue<
             "A committed Windows upgrade cannot be rolled back",
         ));
     }
+    #[cfg(windows)]
+    let mut authority = sealed_authority(&journal, true)?;
+    #[cfg(windows)]
+    for program in &journal.programs {
+        authority.destination(&program.target)?;
+    }
     journal.phase = Phase::Restoring;
     store.write_json(JOURNAL, &journal)?;
     for p in &journal.programs {
+        #[cfg(windows)]
+        authority.destination(&p.target)?;
+        #[cfg(not(windows))]
         owner_path(
             p.target.parent().ok_or_else(SetupDiagnostic::io)?,
             &journal.owner_identity,
         )?;
         if p.target.try_exists().map_err(|_| SetupDiagnostic::io())? {
+            #[cfg(not(windows))]
             owner_path(&p.target, &journal.owner_identity)?;
             stopped(&p.target)?;
         }
         restore_program(p)?;
-        #[cfg(windows)]
-        crate::storage::secure_windows_path(&p.target)?;
         if digest(&p.target)? != p.sha256 {
             return Err(error(
                 "upgrade_restore_failed",

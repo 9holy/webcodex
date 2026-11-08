@@ -9,10 +9,26 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = crate::test_tempdir().unwrap();
+        Self::in_directory(temp, true)
+    }
+    #[cfg(windows)]
+    fn group_owned() -> Self {
+        let directory = std::env::var_os("LOCALAPPDATA").expect("native per-user directory");
+        let temp = tempfile::Builder::new()
+            .prefix("webcodex-owner-native-")
+            .tempdir_in(directory)
+            .unwrap();
+        Self::in_directory(temp, false)
+    }
+    fn in_directory(temp: tempfile::TempDir, private_programs: bool) -> Self {
         let store = EnvironmentStore::open(temp.path().join("environment")).unwrap();
         let runtime = temp.path().join("installed/webcodex-runtime");
-        ensure_private_directory(runtime.parent().unwrap()).unwrap();
-        ensure_private_directory(&runtime).unwrap();
+        if private_programs {
+            ensure_private_directory(runtime.parent().unwrap()).unwrap();
+            ensure_private_directory(&runtime).unwrap();
+        } else {
+            std::fs::create_dir_all(&runtime).unwrap();
+        }
         // The published Windows Desktop resolves its runtime before recording
         // these paths, while NSIS supplies the ordinary DOS spelling.
         #[cfg(windows)]
@@ -21,7 +37,9 @@ impl Fixture {
         for (name, target) in targets(&runtime).unwrap() {
             std::fs::write(&target, format!("old {name}")).unwrap();
             #[cfg(windows)]
-            crate::storage::secure_windows_path(&target).unwrap();
+            if private_programs {
+                crate::storage::secure_windows_path(&target).unwrap();
+            }
             let path = temp.path().join(format!("new-{name}.exe"));
             std::fs::write(&path, format!("new {name}")).unwrap();
             let build_info: MachineBuildInfo = serde_json::from_value(json!({
@@ -258,5 +276,7 @@ async fn environment_owner_path_is_preserved_and_package_coordinator_cannot_adop
     );
 }
 
+#[cfg(windows)]
+mod windows_owners;
 #[cfg(windows)]
 mod windows_paths;

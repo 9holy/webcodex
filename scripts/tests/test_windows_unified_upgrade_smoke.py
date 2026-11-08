@@ -181,11 +181,14 @@ class WindowsUnifiedUpgradeEvidenceTests(unittest.TestCase):
     def test_classification_report_does_not_copy_arbitrary_output_or_credentials(self):
         result = smoke.classification(smoke.CommandResult(1,
             b'{"token":"fixture-secret-must-not-be-reported","kind":"environment"}',
-            b"unrecognized error fixture-secret-must-not-be-reported"))
+            b"unrecognized error fixture-secret-must-not-be-reported installer_registration "
+            b"installer_program_acl upgrade_restore_security upgrade_program_changed"))
         encoded = json.dumps(result)
         self.assertNotIn("fixture-secret", encoded)
         self.assertNotIn("token", encoded)
         self.assertEqual(len(result["output_sha256"]), 64)
+        self.assertEqual(result["diagnostic_codes"], ["installer_registration", "installer_program_acl",
+                                                     "upgrade_restore_security", "upgrade_program_changed"])
 
     def test_snapshot_changes_are_rejected_without_disclosing_private_values(self):
         smoke.unchanged({"private/runner.toml": "original"}, {"private/runner.toml": "original"}, "negative control")

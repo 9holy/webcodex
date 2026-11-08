@@ -35,6 +35,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows package path and recovery tests failed" }
           cargo test --locked -p webcodex-environment --lib installer_authorization::tests
           if ($LASTEXITCODE -ne 0) { throw "Windows installer authorization tests failed" }
+          cargo test --locked -p webcodex-environment --lib upgrade::windows_installation::security::tests
+          if ($LASTEXITCODE -ne 0) { throw "Windows program security descriptor tests failed" }
+          cargo test --locked -p webcodex-environment --lib upgrade::windows_package::tests::windows_owners::registered_group_owned_installation_lifecycle -- --exact --ignored
+          if ($LASTEXITCODE -ne 0) { throw "Registered administrator-owned installation lifecycle failed" }
   installer-diagnostics:
     runs-on: windows-latest
     timeout-minutes: 10
@@ -52,5 +56,101 @@ jobs:
         run: |
           choco install nsis --yes --no-progress
           if ($LASTEXITCODE -ne 0) { throw "NSIS installation failed" }
-          python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native -v
+          python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native scripts.tests.test_windows_desktop_hashes -v
           if ($LASTEXITCODE -ne 0) { throw "Native NSIS lifecycle and diagnostic tests failed" }
+
+  real-classifier:
+    needs: protected-paths
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: windows-core-ci
+      - name: Build the exact real CLI under test
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $env:WEBCODEX_GIT_COMMIT = $env:GITHUB_SHA
+          $env:WEBCODEX_GIT_DIRTY = "false"
+          cargo build --locked -p webcodex-cli
+          if ($LASTEXITCODE -ne 0) { throw "Real classifier build failed" }
+          $version = python -c "import tomllib; print(tomllib.load(open('Cargo.toml','rb'))['workspace']['package']['version'])"
+          "CANDIDATE_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Download fixed published installer fixtures
+        shell: python
+        run: |
+          import hashlib
+          import os
+          from pathlib import Path, PurePosixPath
+          import shutil
+          import tarfile
+          import urllib.request
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'webcodex-unified-reproduction-inputs'
+          root.mkdir(exist_ok=False)
+          assets = {
+              'PREVIOUS_INSTALLER': (
+                  'https://github.com/yyjeqhc/webcodex/releases/download/v0.5.0/webcodex-desktop-v0.5.0-win32-x64-setup.exe',
+                  'dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6'),
+              'PUBLISHED_INSTALLER': (
+                  'https://github.com/9holy/webcodex/releases/download/v0.5.3/webcodex-unified-v0.5.3-win32-x64.exe',
+                  '7a43d294780f8af8a3e22853d81065ccca4546fda1e8316156a2dad9b9c812ab'),
+              'PUBLISHED_RUNTIME': (
+                  'https://github.com/9holy/webcodex/releases/download/v0.5.3/webcodex-v0.5.3-win32-x64.tar.gz',
+                  '95cb8d1d9b3756e531a48f85032d7aeb0771fe141ec09940b308f25fdc6a1be6'),
+          }
+          paths = {}
+          for key, (url, expected) in assets.items():
+              destination = root / url.rsplit('/', 1)[1]
+              with urllib.request.urlopen(url, timeout=120) as response, destination.open('xb') as output:
+                  shutil.copyfileobj(response, output)
+              with destination.open('rb') as stream:
+                  actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+              if actual != expected:
+                  raise SystemExit(f'{key} did not match its pinned published digest')
+              paths[key] = destination
+              print(f'{key}: SHA-256 verified')
+          cli = root / 'published-cli' / 'webcodex.exe'
+          cli.parent.mkdir()
+          with tarfile.open(paths['PUBLISHED_RUNTIME'], 'r:gz') as archive:
+              members = [member for member in archive.getmembers()
+                         if PurePosixPath(member.name).name == 'webcodex.exe']
+              if len(members) != 1 or not members[0].isfile() or not (0 < members[0].size < 200_000_000):
+                  raise SystemExit('Published runtime must contain exactly one bounded regular CLI')
+              with archive.extractfile(members[0]) as source, cli.open('xb') as output:
+                  shutil.copyfileobj(source, output)
+          paths['PUBLISHED_CLI'] = cli
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              for key, path in paths.items():
+                  print(f'{key}={path}', file=output)
+      - name: Verify the real classifier against active upstream services
+        shell: pwsh
+        run: |
+          python scripts/windows_unified_upgrade_smoke.py `
+            --verify-classifier --platform win32-x64 `
+            --previous-installer $env:PREVIOUS_INSTALLER `
+            --previous-installer-sha256 dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6 `
+            --published-installer $env:PUBLISHED_INSTALLER `
+            --published-installer-sha256 7a43d294780f8af8a3e22853d81065ccca4546fda1e8316156a2dad9b9c812ab `
+            --published-cli $env:PUBLISHED_CLI `
+            --candidate-cli target/debug/webcodex.exe `
+            --candidate-version $env:CANDIDATE_VERSION `
+            --candidate-source-sha $env:GITHUB_SHA `
+            --report (Join-Path $env:RUNNER_TEMP "windows-unified-classifier-report.json")
+          if ($LASTEXITCODE -ne 0) { throw "Real active Environment classifier validation failed" }
+      - name: Retain exact native classifier evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-unified-classifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-unified-classifier-report.json
+          if-no-files-found: warn
+          retention-days: 7

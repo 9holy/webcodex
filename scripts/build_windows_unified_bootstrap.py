@@ -18,8 +18,28 @@ INSTALLER_HOOKS = Path(__file__).resolve().parents[1] / "apps/desktop/src-tauri/
 # paths or other private details and must never become an installer log dump.
 CLASSIFICATION_DIAGNOSTICS = {
     "installer_owner": (
-        "The saved Environment targets or Windows ownership do not match this installation. Keep its original folder and use the Windows account that owns it.",
-        "已保存的运行环境路径或 Windows 归属与本次安装不匹配。请保留原安装目录，并使用拥有该运行环境的 Windows 账户。",
+        "The saved Environment targets or Windows ownership do not match this installation. Keep its original folder and use the Windows account and permission level of the original installation.",
+        "已保存的运行环境路径或 Windows 归属与本次安装不匹配。请保留原安装目录，并使用原安装的 Windows 账户和权限级别。",
+    ),
+    "installer_registration": (
+        "Setup could not verify the original Windows installation registration. Keep the original folder and recover its installation information before retrying.",
+        "无法确认原 Windows 安装登记。请保留原安装目录，并恢复原安装信息后重试。",
+    ),
+    "installer_program_acl": (
+        "The installed program permissions could not be verified or allow another account to change the programs. Restore the original installation permissions before upgrading.",
+        "无法验证已有程序的权限，或这些权限允许其他账户修改程序。请先恢复原安装权限，再进行升级。",
+    ),
+    "upgrade_receipt_owner": (
+        "The saved upgrade state or its path is not private to the original account. Resume recovery using the original account and Environment directory.",
+        "已保存的升级状态或其路径不再专属于原账户。请使用原账户和原运行环境目录恢复升级。",
+    ),
+    "upgrade_restore_security": (
+        "The original program permissions could not be recovered from the saved upgrade state. Keep the original installation and its recovery files for diagnosis.",
+        "无法根据已保存的升级状态恢复原程序权限。请保留原安装及恢复文件，以便进一步检查。",
+    ),
+    "upgrade_program_changed": (
+        "The installed program bytes or permissions changed after upgrade preparation. Recover the saved upgrade before starting again.",
+        "升级准备后，已有程序的内容或权限发生了变化。请先恢复已保存的升级，再重新开始。",
     ),
     "package_identity": (
         "Setup could not verify the installed Runtime version or program identity. The existing installation needs to be checked before it can be upgraded.",
@@ -48,8 +68,8 @@ def classification_diagnostic_lines() -> list[str]:
     lines = [
         'LangString WebCodexClassifyUnknown 1033 "Setup could not verify the existing installation or Environment. Use the diagnostic code below when reporting this error."',
         'LangString WebCodexClassifyUnknown 2052 "无法验证已有安装或运行环境。反馈此错误时，请附上下方的诊断代码。"',
-        'LangString WebCodexClassifyStopped 1033 "Installation files have not been replaced.$\\r$\\nDiagnostic code: $WebCodexClassificationCode"',
-        'LangString WebCodexClassifyStopped 2052 "安装文件尚未替换。$\\r$\\n诊断代码：$WebCodexClassificationCode"',
+        'LangString WebCodexClassifyStopped 1033 "No installation files were replaced by this attempt.$\\r$\\nDiagnostic code: $WebCodexClassificationCode"',
+        'LangString WebCodexClassifyStopped 2052 "本次安装尚未替换任何文件。$\\r$\\n诊断代码：$WebCodexClassificationCode"',
     ]
     for code, (english, chinese) in CLASSIFICATION_DIAGNOSTICS.items():
         lines.extend([

@@ -57,6 +57,8 @@ DIAGNOSTIC_CODES = (
     "installer_owner", "upgrade_receipt_owner", "package_identity",
     "legacy_installation_incomplete", "unsafe_path", "state_path",
     "environment_io", "io_error", "home_unavailable", "setup_busy",
+    "installer_registration", "installer_program_acl",
+    "upgrade_restore_security", "upgrade_program_changed",
 )
 SETUP_STEPS = (
     "preflight", "server_configuration", "server_service_install", "server_service_start",

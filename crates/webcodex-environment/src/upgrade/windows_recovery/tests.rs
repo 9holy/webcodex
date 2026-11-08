@@ -51,6 +51,7 @@ impl Fixture {
                 sha256: digest(&backup).unwrap(),
                 backup,
                 name: name.into(),
+                windows_security: None,
             });
             let path = candidate.join(format!("{name}.exe"));
             atomic_private_write(&path, format!("candidate {name}").as_bytes()).unwrap();
@@ -81,6 +82,7 @@ impl Fixture {
             sha256: digest(&desktop_backup).unwrap(),
             backup: desktop_backup,
             directory_modes_sha256: String::new(),
+            windows_security: None,
         });
         store.save_environment(&journal.record).unwrap();
         save(&store, &journal).unwrap();
@@ -212,11 +214,13 @@ fn restore_rejects_changed_owner_operation_backup_and_missing_parent() {
     );
     assert_eq!(digest(target).unwrap(), before);
     let nonexistent = fixture._temporary.path().join("absent-parent/webcodex.exe");
-    assert!(authorize_destination(
-        &nonexistent,
-        &fixture.journal.record.request.account.identity
+    let mut authority = windows_installation::ProgramAuthority::for_record(
+        &fixture.journal.record,
+        None,
+        windows_installation::Purpose::Recovery,
     )
-    .is_err());
+    .unwrap();
+    assert!(authorize_destination(&nonexistent, &mut authority).is_err());
     assert!(!nonexistent.exists());
 }
 
@@ -395,6 +399,7 @@ fn already_restored_self_image_is_an_idempotent_noop() {
         backup: current.clone(),
         sha256: digest(&current).unwrap(),
         directory_modes_sha256: String::new(),
+        windows_security: None,
     });
     ensure_external_restore_process(&journal).unwrap();
 }

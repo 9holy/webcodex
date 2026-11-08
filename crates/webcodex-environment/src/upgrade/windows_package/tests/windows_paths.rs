@@ -206,6 +206,48 @@ fn prepared_targets_accept_real_aliases_and_keep_missing_leaf_bindings() {
 }
 
 #[test]
+fn alternate_data_streams_are_not_program_targets_even_when_the_stream_is_missing() {
+    let f = Fixture::new();
+    let target = f.runtime.join("webcodex.exe");
+    let original = std::fs::read(&target).unwrap();
+    let stream = PathBuf::from(format!("{}:other", target.display()));
+    std::fs::write(&stream, b"distinct named-stream bytes").unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert_ne!(std::fs::read(&stream).unwrap(), original);
+    assert_eq!(
+        installed_paths::same_location(&stream, &target)
+            .unwrap_err()
+            .code,
+        "installer_targets"
+    );
+    let mut receipt = prepared(&f);
+    receipt.targets.insert("webcodex".into(), stream.clone());
+    assert_eq!(
+        crate::verify_installer_targets(&receipt, &f.runtime)
+            .unwrap_err()
+            .code,
+        "installer_targets"
+    );
+    std::fs::remove_file(&stream).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), original);
+    assert_eq!(
+        installed_paths::same_location(&stream, &target)
+            .unwrap_err()
+            .code,
+        "installer_targets"
+    );
+    assert_eq!(
+        installed_paths::same_location(
+            &f.runtime.join("missing.exe:other"),
+            &f.runtime.join("missing.exe"),
+        )
+        .unwrap_err()
+        .code,
+        "installer_targets"
+    );
+}
+
+#[test]
 fn identical_package_detection_accepts_windows_spellings_but_still_checks_all_bytes() {
     let f = Fixture::new();
     f.replace();
@@ -251,6 +293,7 @@ async fn prepared_environment_receipt_accepts_the_original_dos_directory_without
         rollback_from: None,
         replacement_started: false,
         snapshot_digest: None,
+        windows_installation: None,
     };
     store.write_json("upgrade.json", &journal).unwrap();
     let receipt = prepared_receipt(store.root(), &journal);

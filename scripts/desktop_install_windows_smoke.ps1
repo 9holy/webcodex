@@ -10,7 +10,8 @@ param(
     [bool]$GitDirty = $false,
     [string]$InstallDir,
     [string]$PreviousInstaller,
-    [string]$PreviousInstallerSha256
+    [string]$PreviousInstallerSha256,
+    [string]$ExpectedProgramHashes
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,6 +19,54 @@ $ErrorActionPreference = "Stop"
 function Resolve-InputPath([string]$Path) {
     return $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 }
+
+function Read-ExpectedProgramHashes([string]$Path) {
+    if (-not $Path) { return $null }
+    $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+    if ($file.PSIsContainer -or $file.Length -le 0 -or $file.Length -gt 4096) {
+        throw "ExpectedProgramHashes must be a nonempty JSON file of at most 4096 bytes"
+    }
+    $names = @("webcodex", "webcodex-server", "webcodex-runner", "webcodex-desktop")
+    # Preserve duplicate JSON members until validation; ConvertFrom-Json would
+    # silently replace identical keys before we could reject them.
+    $document = [System.Text.Json.JsonDocument]::Parse([IO.File]::ReadAllText($file.FullName))
+    try {
+        if ($document.RootElement.ValueKind.ToString() -ne "Object") { throw "ExpectedProgramHashes must be an object" }
+        $properties = @($document.RootElement.EnumerateObject())
+        if ($properties.Count -ne 4) { throw "ExpectedProgramHashes must bind exactly four programs" }
+        $result = @{}
+        foreach ($property in $properties) {
+            if ($names -cnotcontains $property.Name -or $result.ContainsKey($property.Name) -or
+                $property.Value.ValueKind.ToString() -ne "String" -or
+                $property.Value.GetString() -cnotmatch '^[0-9a-f]{64}$') {
+                throw "ExpectedProgramHashes contains an invalid or duplicate program name or SHA-256"
+            }
+            $result[$property.Name] = $property.Value.GetString()
+        }
+        return $result
+    } finally {
+        $document.Dispose()
+    }
+}
+
+function Assert-ExpectedProgramHashes([string]$InstalledDir, [hashtable]$Expected) {
+    if ($null -eq $Expected) { return }
+    $paths = @{
+        "webcodex" = "webcodex-runtime/webcodex.exe"
+        "webcodex-server" = "webcodex-runtime/webcodex-server.exe"
+        "webcodex-runner" = "webcodex-runtime/webcodex-runner.exe"
+        "webcodex-desktop" = "WebCodex.exe"
+    }
+    foreach ($name in $paths.Keys) {
+        $path = Join-Path $InstalledDir $paths[$name]
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or
+            (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -cne $Expected[$name].ToUpperInvariant()) {
+            throw "installed $name bytes differ from the frozen public source manifest"
+        }
+    }
+}
+
+$expectedHashes = Read-ExpectedProgramHashes $ExpectedProgramHashes
 $Installer = Resolve-InputPath $Installer
 if (-not (Test-Path -LiteralPath $Installer -PathType Leaf)) {
     throw "Desktop installer does not exist: $Installer"
@@ -294,6 +343,7 @@ try {
         }
     }
 
+    Assert-ExpectedProgramHashes $installedDir $expectedHashes
     if ($PreviousInstaller) {
         Write-Output "Pinned upstream-to-candidate upgrade passed: original folder, Desktop data and unrelated process preserved"
     }

@@ -60,7 +60,7 @@ mod windows {
     use super::*;
     use std::ffi::OsString;
     use std::fs::File;
-    use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+    use std::os::windows::{ffi::OsStrExt, fs::OpenOptionsExt, io::AsRawHandle};
     use windows_sys::Win32::Storage::FileSystem::{
         FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
         BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
@@ -78,6 +78,18 @@ mod windows {
     }
 
     pub(super) fn resolve(path: &Path) -> SetupResultValue<Location> {
+        // A file ID identifies a file, not a particular NTFS data stream.
+        // Program destinations use the default stream only, including while a
+        // recovery leaf is absent. Drive-prefix colons are not Normal parts.
+        if path.components().any(|part| match part {
+            PathComponent::Normal(name) => name.encode_wide().any(|unit| unit == u16::from(b':')),
+            _ => false,
+        }) {
+            return Err(error(
+                "installer_targets",
+                "Installed program paths must not name alternate data streams",
+            ));
+        }
         if !path.is_absolute() {
             return Err(error(
                 "installer_targets",
