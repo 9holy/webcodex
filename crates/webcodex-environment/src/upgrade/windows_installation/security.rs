@@ -146,6 +146,24 @@ fn inspect_descriptor(descriptor: *mut c_void) -> SetupResultValue<(String, bool
     Ok((sid_string(owner)?, control & SE_DACL_PROTECTED != 0))
 }
 
+// `capacity` is the allocation size returned by the native SDDL converter, not
+// the string length. Read only the initialized prefix through its first NUL.
+// SAFETY: `text` must point to that allocation, or a readable test buffer of
+// `capacity` WCHARs. The converter guarantees an initialized NUL-terminated string.
+unsafe fn descriptor_string(text: *const u16, capacity: usize) -> SetupResultValue<String> {
+    if text.is_null() || capacity == 0 || capacity > MAX_DESCRIPTOR {
+        return Err(invalid());
+    }
+    let mut length = 0;
+    while length < capacity && unsafe { *text.add(length) } != 0 {
+        length += 1;
+    }
+    if length == 0 || length == capacity {
+        return Err(invalid());
+    }
+    String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).map_err(|_| invalid())
+}
+
 pub(super) fn capture(path: &Path) -> SetupResultValue<WindowsProgramSecurity> {
     let file = open(path, false)?;
     let mut descriptor = null_mut();
@@ -181,12 +199,7 @@ pub(super) fn capture(path: &Path) -> SetupResultValue<WindowsProgramSecurity> {
         return Err(invalid());
     }
     let text_allocation = Local(text.cast());
-    if length == 0 || length as usize > MAX_DESCRIPTOR {
-        return Err(invalid());
-    }
-    let descriptor =
-        String::from_utf16(unsafe { std::slice::from_raw_parts(text, length as usize - 1) })
-            .map_err(|_| invalid())?;
+    let descriptor = unsafe { descriptor_string(text, length as usize) }?;
     drop(text_allocation);
     drop(allocation);
     verify_installed_target_path(path)?;

@@ -31,14 +31,16 @@ jobs:
       - name: Exercise protected Windows installer paths and recovery
         shell: pwsh
         run: |
+          $failures = @()
           cargo test --locked -p webcodex-environment --lib upgrade::windows_package::tests
-          if ($LASTEXITCODE -ne 0) { throw "Windows package path and recovery tests failed" }
+          if ($LASTEXITCODE -ne 0) { $failures += "Windows package paths and recovery" }
           cargo test --locked -p webcodex-environment --lib installer_authorization::tests
-          if ($LASTEXITCODE -ne 0) { throw "Windows installer authorization tests failed" }
+          if ($LASTEXITCODE -ne 0) { $failures += "Windows installer authorization" }
           cargo test --locked -p webcodex-environment --lib upgrade::windows_installation::security::tests
-          if ($LASTEXITCODE -ne 0) { throw "Windows program security descriptor tests failed" }
+          if ($LASTEXITCODE -ne 0) { $failures += "Windows program security descriptors" }
           cargo test --locked -p webcodex-environment --lib upgrade::windows_package::tests::windows_owners::registered_group_owned_installation_lifecycle -- --exact --ignored
-          if ($LASTEXITCODE -ne 0) { throw "Registered administrator-owned installation lifecycle failed" }
+          if ($LASTEXITCODE -ne 0) { $failures += "Registered administrator-owned installation lifecycle" }
+          if ($failures.Count -ne 0) { throw ("Required Windows checks failed: " + ($failures -join "; ")) }
   installer-diagnostics:
     runs-on: windows-latest
     timeout-minutes: 10
