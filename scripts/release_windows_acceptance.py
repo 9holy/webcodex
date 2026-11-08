@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Read-only repository acceptance of frozen public Windows release bytes.
 
-Only the reviewed v0.5.4 controller may dispatch this worker. The worker installs
-on disposable native runners; it cannot publish, promote, overwrite, or repair
-release assets. Its bounded report is independently checked by the controller.
+Only explicitly selected, reviewed fixed controllers may dispatch this worker.
+The worker installs on disposable native runners; it cannot publish, promote,
+overwrite, or repair release assets. The controller checks its bounded report.
 """
 from __future__ import annotations
 
@@ -82,6 +82,21 @@ def validate_request(request: dict, spec: control.ReleaseSpec) -> None:
         control._validate_asset_description(asset)
         require(name == asset["name"], "Windows 验收资产索引无效。")
     require(len(control._json_bytes(request)) <= MAX_REQUEST_BYTES, "Windows 验收请求超出大小限制。")
+
+
+def select_release_spec(request: dict) -> control.ReleaseSpec:
+    """Select one code-owned authority; request fields never define its pins."""
+    require(isinstance(request, dict), "Windows 验收请求必须是固定身份对象。")
+    identity = (request.get("tag"), request.get("controller_workflow"))
+    if identity == ("v0.5.4", ".github/workflows/release-publish-v054.yml"):
+        from scripts.release_github_actions_v054 import SPEC, require_finalized
+    elif identity == ("v0.5.5", ".github/workflows/release-publish-v055.yml"):
+        from scripts.release_github_actions_v055 import SPEC, require_finalized
+    else:
+        raise control.ReleaseControlError("Windows 验收请求不属于已审核的固定发布入口。")
+    require_finalized(SPEC)
+    validate_request(request, SPEC)
+    return SPEC
 
 
 def validate_run(run: dict, request: dict, *, run_id: int, attempt: int, owner_id: int) -> None:
@@ -324,13 +339,12 @@ def main(argv=None) -> int:
               "workflow_run_attempt": int(os.environ.get("GITHUB_RUN_ATTEMPT", "0")),
               "passed": False, "scenarios": dict.fromkeys(SCENARIOS, False)}
     try:
-        from scripts.release_github_actions_v054 import SPEC, require_finalized
-        require_finalized(SPEC)
         raw = os.environ.get("WEBCODEX_WINDOWS_ACCEPTANCE_REQUEST", "").encode()
         require(0 < len(raw) <= MAX_REQUEST_BYTES, "缺少有界固定 Windows 验收请求。")
         request = control._parse_json(raw)
+        spec = select_release_spec(request)
         report["request_sha256"] = request_digest(request)
-        execute(request, args.platform, args.inputs_root.absolute(), report, spec=SPEC)
+        execute(request, args.platform, args.inputs_root.absolute(), report, spec=spec)
     except Exception as error:
         # Native CLI stdout/stderr and generated Environment credentials are not logs.
         report["passed"] = False

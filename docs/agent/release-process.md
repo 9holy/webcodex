@@ -243,6 +243,34 @@ after the product source commit and successful proof runs have been fixed. The
 optional four-program hash check in the ordinary Windows smoke helper can ship
 with the product source; existing invocations retain their original behavior.
 
+### Fixed v0.5.5 entry with the same staged gates
+
+The v0.5.5 [fixed entry](../../scripts/release_github_actions_v055.py),
+[request](../../.github/release-requests/v0.5.5.json), and
+[publisher](../../.github/workflows/release-publish-v055.yml) reuse the v0.5.4
+staged controller's publication, Windows acceptance, promotion, and recovery
+methods. Only the entry's fixed specification and finalization guard differ.
+The original v0.5.4 module, request, notes, workflow, source tag, and public
+prerelease assets remain unchanged. A corrected product requires a new version;
+its evidence cannot replace the retained v0.5.4 failure.
+
+The shared Windows worker selects a code-owned specification only for the exact
+`(v0.5.4, release-publish-v054.yml)` or `(v0.5.5, release-publish-v055.yml)`
+tag/controller-workflow pair. It then requires finalized pins and validates the
+complete request before downloads or installer execution. Unknown or crossed
+pairs have no fallback. The acceptance workflow, native x64/ARM64 matrix, fixed
+v0.5.0 and v0.5.3 comparison bytes, report schema, four-program hash checks,
+same-attempt proof binding, and same-Release promotion requirements are unchanged.
+
+Prepare v0.5.5 source SHA/tree as explicit zero placeholders and CI/evidence run
+IDs as `1` until exact-source successful push proofs exist. The code specification
+and matching JSON must be finalized together with those six source/proof values;
+their guard rejects unfinished authority before authentication or remote effects.
+Tests construct their own unfinished specifications, so recording real pins does
+not remove rejection coverage. As with v0.5.4, the new fixed control files belong
+in a later reviewed control commit after the product source and evidence are
+frozen. Keep `main` at that control commit until required child dispatches finish.
+
 ### Failed pre-publication tag reclaim
 
 A version tag may be reclaimed only when the human requester explicitly names that
