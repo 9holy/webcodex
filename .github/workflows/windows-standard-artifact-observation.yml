@@ -1,0 +1,334 @@
+name: Observe installed retained standard Windows payload
+run-name: Observe standard v0.5.4 Windows payload ${{ github.sha }}
+
+on:
+  push:
+    branches: [diagnostic/windows-standard-artifact]
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  observe:
+    name: Observe standard payload (${{ matrix.platform }})
+    if: >-
+      github.repository == '9holy/webcodex' &&
+      github.repository_id == '1404596174' &&
+      github.ref == 'refs/heads/diagnostic/windows-standard-artifact'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win32-x64
+            runner: windows-latest
+          - platform: win32-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - name: Checkout the unchanged publication helper
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 7041854bd3cb4df8f5298cbd732ba251237dd590
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Observe standard installed hashes without changing the original gate
+        shell: python
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          OBSERVATION_PLATFORM: ${{ matrix.platform }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import sys
+          import tempfile
+          import stat
+          import time
+          import urllib.error
+          import zipfile
+
+          sys.path.insert(0, os.environ["GITHUB_WORKSPACE"])
+          from scripts import package_unified_installer as packaging
+          from scripts import runtime_installer_manifest as manifest_contract
+          from scripts import collect_release_bundle as collector
+          from scripts import windows_unified_upgrade_smoke as smoke
+
+          HELPER_SOURCE = "7041854bd3cb4df8f5298cbd732ba251237dd590"
+          SOURCE = "1af9bb5321edcdc16a4f1a5be65d0611ef19964a"
+          VERSION = "0.5.4"
+          BUILD_RUN = 42459872642
+          PROGRAMS = ("webcodex", "webcodex-server", "webcodex-runner", "webcodex-desktop")
+          PINS = {
+              "win32-x64": {
+                  "unified": (13608914604, 84368670, "0fcb049cd0b3d8c7c0422b294278c257bfbceb898eaedf83df64094ac8231d94"),
+                  "standard": (13609985962, 34433590, "f5dcfe06ff4810a78aa48217e2f41d60c19020e8e58f2ec87579fcc497bdbd1f"),
+                  "installer_sha256": "6dbaa9075541d44a2c4f22075409abdb43f25a0a41f50aa26fc73cc137f9cc8e",
+                  "manifest_sha256": "432e17cef296ca19f92fbea2b6464d16685317b93f3002545bd57c72417308fd",
+              },
+              "win32-arm64": {
+                  "unified": (13609672779, 77359898, "e917331b03d07ef9235dfd5832d122ee4e4ae7d18aa0cbeb29a471f5b04b3337"),
+                  "standard": (13610400862, 30389085, "a1a48ade7a09ad57dcd5ecf63b2952922f75a40a0eecd50f2b4fc0c4c5d8f5ba"),
+                  "installer_sha256": "b233872dc776d2a706235ac5fcc593b7949f7b38d878dd7de099ec7e513ad180",
+                  "manifest_sha256": "def827c5da540391f35513ff39f0f541a01e61a41bb7cd1b9c0d5114bc56a71b",
+              },
+          }
+          MARKER = b"WEBCODEX_FULL_PAYLOAD_OBSERVATION_V1="
+          platform = os.environ["OBSERVATION_PLATFORM"]
+          output = Path(os.environ["RUNNER_TEMP"]) / "windows-standard-artifact-observation"
+          output.mkdir(exist_ok=False)
+          report = {
+              "schema_version": 1, "kind": "windows-standard-artifact-observation",
+              "input_origin": "retained_formal_artifact", "public_download": False,
+              "diagnostic_only": True, "formal_acceptance": False, "phase": "identity",
+              "installer_kind": "standard_nsis",
+              "platform": platform, "version": VERSION, "public_source_sha": SOURCE,
+              "public_release_id": 438128258, "public_build_run_id": BUILD_RUN,
+              "expected_installer_sha256": PINS[platform]["installer_sha256"],
+              "expected_manifest_sha256": PINS[platform]["manifest_sha256"], "helper_source_sha": HELPER_SOURCE,
+              "github_sha": os.environ.get("GITHUB_SHA"),
+              "workflow_sha": os.environ.get("GITHUB_WORKFLOW_SHA"),
+              "workflow_ref": os.environ.get("GITHUB_WORKFLOW_REF"),
+              "workflow_run_id": int(os.environ["GITHUB_RUN_ID"]),
+              "workflow_run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "helper_exit_code": None, "programs": [], "observation_complete": False,
+          }
+          install_root = install_dir = None
+          failed = False
+
+          class ObservationError(RuntimeError):
+              pass
+
+          def require(condition, code):
+              if not condition:
+                  raise ObservationError(code)
+
+
+          def download_zip(client, artifact_id, size, expected, destination):
+              require(0 < size <= 128 * 1024 * 1024, "artifact_zip_size_bound")
+              request = client._request(client.api_url(f"/actions/artifacts/{artifact_id}/zip"))
+              actual = hashlib.sha256()
+              count = 0
+              deadline = time.monotonic() + 180
+              # The existing client removes API credentials on cross-host HTTPS redirects.
+              with client.opener.open(request, timeout=120) as response, destination.open("xb") as output:
+                  length = response.headers.get("Content-Length")
+                  if length is not None:
+                      require(length.isascii() and length.isdigit() and int(length) == size, "artifact_content_length")
+                  while chunk := response.read(1024 * 1024):
+                      count += len(chunk)
+                      require(count <= size and time.monotonic() <= deadline, "artifact_download_bound")
+                      output.write(chunk)
+                      actual.update(chunk)
+              require(count == size and actual.hexdigest() == expected, "artifact_zip_digest")
+
+          def extract_leaf(archive, name, destination, expected, limit):
+              with zipfile.ZipFile(archive) as source:
+                  entries = source.infolist()
+                  require(0 < len(entries) <= 16 and len({item.filename for item in entries}) == len(entries),
+                          "artifact_zip_member_count")
+                  require(all(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]*", item.filename)
+                              and not item.is_dir() and not item.flag_bits & 1
+                              and stat.S_IFMT((item.external_attr >> 16) & 0xffff) in (0, stat.S_IFREG)
+                              and 0 <= item.file_size <= 128 * 1024 * 1024 for item in entries)
+                          and sum(item.file_size for item in entries) <= 128 * 1024 * 1024, "artifact_zip_members")
+                  matches = [item for item in entries if item.filename == name]
+                  require(len(matches) == 1 and 0 < matches[0].file_size <= limit, "artifact_leaf_unique")
+                  count = 0
+                  actual = hashlib.sha256()
+                  with source.open(matches[0]) as member, destination.open("xb") as output:
+                      while chunk := member.read(1024 * 1024):
+                          count += len(chunk)
+                          require(count <= matches[0].file_size and count <= limit, "artifact_leaf_size")
+                          output.write(chunk)
+                          actual.update(chunk)
+                  require(count == matches[0].file_size and actual.hexdigest() == expected, "artifact_leaf_digest")
+                  return {"sha256": actual.hexdigest(), "size": count}
+
+          try:
+              require(platform in PINS, "platform")
+              native = os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")
+              require(os.name == "nt" and native.upper() == smoke.PLATFORMS[platform][0], "native_architecture")
+              require(os.environ.get("GITHUB_REPOSITORY") == "9holy/webcodex"
+                      and os.environ.get("GITHUB_EVENT_NAME") == "push"
+                      and os.environ.get("GITHUB_REF") == "refs/heads/diagnostic/windows-standard-artifact"
+                      and re.fullmatch(r"[0-9a-f]{40}", report["github_sha"] or "")
+                      and report["workflow_sha"] == report["github_sha"], "workflow_identity")
+              checkout = smoke.run_command(["git", "rev-parse", "HEAD"], "helper checkout")
+              require(checkout.returncode == 0 and checkout.stdout.strip().decode("ascii") == HELPER_SOURCE,
+                      "helper_checkout")
+              require(smoke.read_registration() is None, "existing_installation")
+              environment = Path(os.environ["APPDATA"]) / "webcodex" / "environment"
+              require(not environment.exists(), "existing_environment")
+              inputs = Path(tempfile.mkdtemp(prefix="webcodex-standard-artifact-inputs-", dir=os.environ["RUNNER_TEMP"]))
+              report["phase"] = "artifact_identity"
+              client = collector.GitHubClient("9holy/webcodex", os.environ["GH_TOKEN"], 120)
+              build = client.fetch_json(f"/actions/runs/{BUILD_RUN}/attempts/1")
+              require(build.get("id") == BUILD_RUN and build.get("run_attempt") == 1
+                      and build.get("status") == "completed" and build.get("conclusion") == "success"
+                      and build.get("head_sha") == SOURCE and build.get("head_branch") == "v0.5.4"
+                      and build.get("path") == ".github/workflows/release-build.yml"
+                      and build.get("event") == "workflow_dispatch"
+                      and build.get("repository", {}).get("id") == 1404596174
+                      and build.get("head_repository", {}).get("id") == 1404596174, "formal_build_identity")
+              listing = client.fetch_json(f"/actions/runs/{BUILD_RUN}/artifacts?per_page=100")
+              require(type(listing.get("total_count")) is int and 0 < listing["total_count"] <= 100
+                      and len(listing.get("artifacts", [])) == listing["total_count"], "artifact_listing_bound")
+              names = (f"webcodex-desktop-v0.5.4-{platform}-setup.exe", f"webcodex-source-v0.5.4-{platform}.json")
+              paths = [inputs / name for name in names]
+              pin = PINS[platform]
+              report["artifacts"] = {}
+              for kind in ("unified", "standard"):
+                  report.update(phase="artifact_download", artifact_kind=kind)
+                  artifact_id, size, zip_sha = pin[kind]
+                  found = [item for item in listing["artifacts"] if item.get("id") == artifact_id]
+                  require(len(found) == 1, "artifact_unique_id")
+                  item = found[0]
+                  expected_name = f"webcodex-v0.5.4-{'unified' if kind == 'unified' else 'desktop'}-{platform}"
+                  origin = item.get("workflow_run", {})
+                  require(item.get("name") == expected_name and item.get("size_in_bytes") == size
+                          and item.get("digest") == "sha256:" + zip_sha and item.get("expired") is False
+                          and origin.get("id") == BUILD_RUN and origin.get("head_sha") == SOURCE
+                          and origin.get("head_branch") == "v0.5.4"
+                          and origin.get("repository_id") == 1404596174
+                          and origin.get("head_repository_id") == 1404596174, "artifact_metadata_identity")
+                  archive = inputs / f"{kind}.zip"
+                  download_zip(client, artifact_id, size, zip_sha, archive)
+                  report["artifacts"][kind] = {"id": artifact_id, "name": expected_name,
+                                               "size": size, "zip_sha256": zip_sha, "verified": True}
+                  report["phase"] = "artifact_leaf"
+                  if kind == "unified":
+                      # Read only the small frozen source JSON, never extract/run the full outer EXE.
+                      report["manifest"] = extract_leaf(archive, names[1], paths[1], pin["manifest_sha256"], 128 * 1024)
+                  else:
+                      report["installer"] = extract_leaf(archive, names[0], paths[0], pin["installer_sha256"], 64 * 1024 * 1024)
+              report["phase"] = "manifest"
+              manifest = manifest_contract.parse(paths[1].read_bytes())
+              _, target, architecture = smoke.PLATFORMS[platform]
+              identity = {"schema_version": 1, "version": VERSION, "source_sha": SOURCE,
+                          "source_workflow_run_id": BUILD_RUN, "platform": platform,
+                          "source_workflow_ref": "9holy/webcodex/.github/workflows/release-build.yml@refs/tags/v0.5.4",
+                          "target": target, "architecture": architecture}
+              require(isinstance(manifest, dict) and all(type(manifest.get(k)) is type(v) and manifest[k] == v
+                                                        for k, v in identity.items()), "manifest_identity")
+              records = manifest.get("artifacts")
+              require(isinstance(records, dict) and set(records) == set(PROGRAMS), "manifest_four_programs")
+              expected_hashes = {}
+              for name in PROGRAMS:
+                  item = records[name]
+                  require(isinstance(item, dict)
+                          and set(item) == {"path", "sha256", "build_info", "build_info_sha256", "probe"}
+                          and item["path"] == f"artifacts/bin/{name}.exe"
+                          and isinstance(item["sha256"], str) and re.fullmatch(r"[0-9a-f]{64}", item["sha256"])
+                          and item["probe"] == "native-build-job"
+                          and packaging.canonical_digest(item["build_info"]) == item["build_info_sha256"],
+                          "manifest_program_record")
+                  packaging.validate_build_info(item["build_info"], name, manifest)
+                  expected_hashes[name] = item["sha256"]
+              built_at = records["webcodex"]["build_info"]["built_at"]
+              require(str(built_at).isascii() and str(built_at).isdigit() and int(built_at) > 0, "manifest_built_at")
+              hashes = inputs / "expected-program-hashes.json"
+              hashes.write_text(json.dumps(expected_hashes, sort_keys=True), encoding="utf-8")
+
+              report["phase"] = "instrument"
+              original = (Path("scripts") / "desktop_install_windows_smoke.ps1").read_bytes()
+              call = b"    Assert-ExpectedProgramHashes $installedDir $expectedHashes"
+              lines = original.splitlines(keepends=True)
+              matches = [i for i, line in enumerate(lines) if line.rstrip(b"\r\n") == call]
+              require(len(matches) == 1, "unique_original_hash_gate")
+              insertion = r'''
+              $payloadPaths = [ordered]@{
+                  "webcodex" = "webcodex-runtime/webcodex.exe"
+                  "webcodex-server" = "webcodex-runtime/webcodex-server.exe"
+                  "webcodex-runner" = "webcodex-runtime/webcodex-runner.exe"
+                  "webcodex-desktop" = "WebCodex.exe"
+              }
+              $payloadRows = @()
+              foreach ($payloadName in $payloadPaths.Keys) {
+                  $payloadPath = Join-Path $installedDir $payloadPaths[$payloadName]
+                  $payloadExists = Test-Path -LiteralPath $payloadPath -PathType Leaf
+                  $payloadHash = $null
+                  if ($payloadExists) { $payloadHash = (Get-FileHash -LiteralPath $payloadPath -Algorithm SHA256).Hash.ToLowerInvariant() }
+                  $payloadRows += [ordered]@{ name = $payloadName; exists = [bool]$payloadExists; actual_sha256 = $payloadHash; expected_sha256 = $expectedHashes[$payloadName] }
+              }
+              Write-Output ("WEBCODEX_FULL_PAYLOAD_OBSERVATION_V1=" + (ConvertTo-Json -InputObject $payloadRows -Compress -Depth 3))
+              '''.strip("\n").encode("utf-8") + b"\n"
+              observed = b"".join(lines[:matches[0]]) + insertion + b"".join(lines[matches[0]:])
+              require(observed.replace(insertion, b"", 1) == original, "original_helper_preserved")
+              report["original_helper_reverse_restoration_verified"] = True
+              helper = inputs / "desktop_install_windows_smoke.observed.ps1"
+              helper.write_bytes(observed)
+              report["original_helper_sha256"] = hashlib.sha256(original).hexdigest()
+              report["observed_helper_sha256"] = hashlib.sha256(observed).hexdigest()
+              install_root = Path(tempfile.mkdtemp(prefix="webcodex-standard-artifact-observation-", dir=os.environ["LOCALAPPDATA"]))
+              install_dir = install_root / "fresh Desktop"
+              report["phase"] = "fresh"
+              child_env = {key: value for key, value in os.environ.items() if key not in
+                           {"GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"}}
+              result = smoke.run_command([
+                  "pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(helper),
+                  "-Installer", str(paths[0]), "-Version", VERSION, "-SourceSha", SOURCE,
+                  "-BuiltAt", str(built_at), "-Platform", platform, "-InstallDir", str(install_dir),
+                  "-ExpectedProgramHashes", str(hashes)], "diagnostic fresh helper", timeout=900, env=child_env)
+              report["helper_exit_code"] = result.returncode
+              report["phase"] = "observation"
+              marked = [line[len(MARKER):] for line in result.stdout.splitlines() if line.startswith(MARKER)]
+              require(len(marked) == 1 and len(marked[0]) <= 2048, "bounded_unique_observation")
+              rows = manifest_contract.parse(marked[0])
+              require(isinstance(rows, list) and len(rows) == 4, "four_observations")
+              require([row.get("name") for row in rows if isinstance(row, dict)] == list(PROGRAMS), "fixed_program_names")
+              for row in rows:
+                  require(set(row) == {"name", "exists", "actual_sha256", "expected_sha256"}
+                          and type(row["exists"]) is bool
+                          and row["expected_sha256"] == expected_hashes[row["name"]]
+                          and ((row["exists"] and isinstance(row["actual_sha256"], str)
+                                and re.fullmatch(r"[0-9a-f]{64}", row["actual_sha256"]))
+                               or (not row["exists"] and row["actual_sha256"] is None)), "observation_schema")
+              report["programs"] = rows
+              report["observation_complete"] = True
+              failed = result.returncode != 0
+          except Exception as error:
+              failed = True
+              report["failure_type"] = type(error).__name__
+              if isinstance(error, ObservationError):
+                  report["failure_code"] = str(error)
+              cause = error if isinstance(error, urllib.error.HTTPError) else error.__cause__
+              if isinstance(cause, urllib.error.HTTPError) and type(cause.code) is int and 100 <= cause.code <= 999:
+                  report["http_status"] = cause.code
+          finally:
+              if install_root is not None:
+                  try:
+                      cleanup = {"helper_returned": report["helper_exit_code"] is not None,
+                                 "registration_absent": smoke.read_registration() is None,
+                                 "install_directory_absent": not install_dir.exists(),
+                                 "owned_parent_empty": not any(install_root.iterdir()),
+                                 "owned_parent_removed": False}
+                      if cleanup["owned_parent_empty"]:
+                          install_root.rmdir()  # Only this invocation's empty UUID parent; never recursive.
+                          cleanup["owned_parent_removed"] = True
+                      report["cleanup_observation"] = cleanup
+                      if not all(cleanup.values()):
+                          failed = True
+                  except Exception:
+                      failed = True
+                      report["cleanup_observation_error"] = True
+              encoded = json.dumps(report, sort_keys=True)
+              if len(encoded.encode("utf-8")) > 16 * 1024:
+                  raise SystemExit("diagnostic report exceeded its fixed bound")
+              (output / "report.json").write_text(encoded + "\n", encoding="utf-8")
+              print(encoded)  # Only the allowlisted diagnostic projection, never child stdout/stderr.
+          raise SystemExit(1 if failed else 0)
+      - name: Retain diagnostic evidence even when the original hash gate fails
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-standard-artifact-observation-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-standard-artifact-observation/report.json
+          if-no-files-found: error
+          retention-days: 30
