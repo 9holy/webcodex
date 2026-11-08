@@ -1,0 +1,121 @@
+name: Observe fixed public release downloads
+run-name: Observe public release downloads ${{ github.sha }}
+
+on:
+  push:
+    branches: [diagnostic/public-release-download]
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    if: >-
+      github.repository == '9holy/webcodex' &&
+      github.repository_id == '1404596174' &&
+      github.ref == 'refs/heads/diagnostic/public-release-download'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout the fixed diagnostic baseline
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 7041854bd3cb4df8f5298cbd732ba251237dd590
+          persist-credentials: false
+      - name: Make three bounded public requests without credentials or retries
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import signal
+          import time
+          import urllib.error
+          import urllib.request
+
+          manifest_url = "https://github.com/9holy/webcodex/releases/download/v0.5.4/webcodex-source-v0.5.4-win32-x64.json"
+          v8_url = "https://github.com/denoland/rusty_v8/releases/download/v149.2.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz"
+          manifest_sha = "432e17cef296ca19f92fbea2b6464d16685317b93f3002545bd57c72417308fd"
+          report = {
+              "schema_version": 1, "kind": "public-release-download-observation",
+              "diagnostic_only": True, "formal_acceptance": False, "automatic_retries": False,
+              "checkout_requested_ref": "7041854bd3cb4df8f5298cbd732ba251237dd590",
+              "github_sha": os.environ["GITHUB_SHA"], "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"],
+              "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]), "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "manifest_expected_size": 4569, "manifest_expected_sha256": manifest_sha,
+              "v8_asset_id": 429513990, "v8_expected_full_size": 38519314,
+              "v8_expected_full_sha256": "8aed98637db7e77dc8bfb8bb4759ec5bde472d0bf7943f58e0e62a350945c559",
+              "v8_full_hash_verified": False, "requests": [], "observation_complete": False,
+          }
+          output = Path(os.environ["RUNNER_TEMP"]) / "public-release-download-observation"
+          output.mkdir(exist_ok=False)
+
+          def deadline_expired(signum, frame):
+              raise TimeoutError("fixed probe deadline")
+
+          signal.signal(signal.SIGALRM, deadline_expired)
+          # Three top-level probes only. urllib performs its normal bounded redirects;
+          # no API token, authenticated asset endpoint, fallback, or retry is used.
+          probes = (
+              ("manifest_default_get", manifest_url, {}, 4570),
+              ("manifest_download_query_get", manifest_url + "?download=1", {}, 4570),
+              ("v8_range_get", v8_url, {"Range": "bytes=0-4095"}, 4096),
+          )
+          allowed_errors = {"HTTPError", "URLError", "TimeoutError", "SSLError", "ConnectionResetError", "OSError"}
+          for label, url, headers, limit in probes:
+              row = {"label": label, "method": "GET", "attempts": 1, "status": None,
+                     "read_limit": limit, "received_bytes": 0, "probe_succeeded": False}
+              started = time.monotonic()
+              signal.setitimer(signal.ITIMER_REAL, 30)
+              try:
+                  request = urllib.request.Request(url, headers=headers)
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      row["status"] = response.status
+                      raw = response.read(limit)
+                      row["received_bytes"] = len(raw)
+                      digest = hashlib.sha256(raw).hexdigest()
+                      if label.startswith("manifest_"):
+                          row["received_sha256"] = digest
+                          row["exact_size_and_sha256_verified"] = len(raw) == 4569 and digest == manifest_sha
+                          row["probe_succeeded"] = response.status == 200 and row["exact_size_and_sha256_verified"]
+                      else:
+                          row["prefix_sha256"] = digest
+                          row["full_hash_verified"] = False
+                          row["gzip_header"] = raw.startswith(b"\x1f\x8b")
+                          row["range_honored"] = (response.status == 206
+                              and response.headers.get("Content-Range") == "bytes 0-4095/38519314")
+                          # If Range is ignored, still read at most 4096 bytes and close.
+                          row["probe_succeeded"] = (response.status in (200, 206) and len(raw) == 4096
+                              and row["gzip_header"] and (response.status == 200 or row["range_honored"]))
+              except Exception as error:
+                  name = type(error).__name__
+                  row["error_type"] = name if name in allowed_errors else "OtherError"
+                  cause = error.reason if isinstance(error, urllib.error.URLError) else error.__cause__
+                  if cause is not None:
+                      name = type(cause).__name__
+                      row["cause_type"] = name if name in allowed_errors else "OtherError"
+                  if isinstance(error, urllib.error.HTTPError):
+                      if type(error.code) is int and 100 <= error.code <= 599:
+                          row["status"] = error.code
+                      error.close()  # Never read or print an error response body.
+              finally:
+                  signal.setitimer(signal.ITIMER_REAL, 0)
+                  row["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+                  report["requests"].append(row)
+          report["observation_complete"] = len(report["requests"]) == 3
+          encoded = json.dumps(report, sort_keys=True)
+          if len(encoded.encode("utf-8")) > 8192:
+              raise SystemExit("fixed diagnostic report bound exceeded")
+          (output / "report.json").write_text(encoded + "\n", encoding="utf-8")
+          print(encoded)  # Fixed labels, integers, booleans and hashes; no bodies, URLs or exception messages.
+          raise SystemExit(0 if all(row["probe_succeeded"] for row in report["requests"]) else 1)
+      - name: Retain the bounded network observation
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-release-download-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/public-release-download-observation/report.json
+          if-no-files-found: error
+          retention-days: 30
