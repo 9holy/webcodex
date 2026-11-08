@@ -1,0 +1,148 @@
+{
+  "assets": {
+    "SHA256SUMS": {
+      "name": "SHA256SUMS",
+      "sha256": "29b1d2200be56ab7b505a6b6664d1184464f276ff37b77f2df4a280666e4e385",
+      "size": 2582
+    },
+    "manifest.json": {
+      "name": "manifest.json",
+      "sha256": "ad1b7c1843b139b09038a158c769bb6c3d4447f3ab92b39ef71501227dc05b83",
+      "size": 6062
+    },
+    "webcodex-desktop-v0.5.5-darwin-arm64.dmg": {
+      "name": "webcodex-desktop-v0.5.5-darwin-arm64.dmg",
+      "sha256": "12d1d342f50b9b648f9a2ad6f87166dadde01e2f38dbeb7c5454955770173fea",
+      "size": 51637563
+    },
+    "webcodex-desktop-v0.5.5-win32-arm64-setup.exe": {
+      "name": "webcodex-desktop-v0.5.5-win32-arm64-setup.exe",
+      "sha256": "44d8c714fdef3fec986435dafd18bda38879210baf5ea66f8c9d98943e308dad",
+      "size": 30438357
+    },
+    "webcodex-desktop-v0.5.5-win32-x64-setup.exe": {
+      "name": "webcodex-desktop-v0.5.5-win32-x64-setup.exe",
+      "sha256": "1026aa7efb5e332e0b01d208bb1d3ff290ce037dc4e683b13bce5ac65a6aef97",
+      "size": 34510485
+    },
+    "webcodex-release-manifest.json": {
+      "name": "webcodex-release-manifest.json",
+      "sha256": "aa3781a104c4a09d3374a6a10c6cc48438a92cd408781010b9b7209bd3adc200",
+      "size": 172
+    },
+    "webcodex-source-v0.5.5-darwin-arm64.json": {
+      "name": "webcodex-source-v0.5.5-darwin-arm64.json",
+      "sha256": "0ea8470fa68c4e1b5e9167bdb9dd7b97ce3de719ba46a8742a7bf5c6f6c44abb",
+      "size": 3909
+    },
+    "webcodex-source-v0.5.5-darwin-x64.json": {
+      "name": "webcodex-source-v0.5.5-darwin-x64.json",
+      "sha256": "dde35f7987055e56a69a8b82da102b1e771c9616c719586b887c80db6222eee1",
+      "size": 3897
+    },
+    "webcodex-source-v0.5.5-linux-arm64.json": {
+      "name": "webcodex-source-v0.5.5-linux-arm64.json",
+      "sha256": "6c4de6bdc4f03ba2ef90c444318b3a6648c3c44dd9b42c0ef4f3ffb61c103c95",
+      "size": 3888
+    },
+    "webcodex-source-v0.5.5-linux-x64.json": {
+      "name": "webcodex-source-v0.5.5-linux-x64.json",
+      "sha256": "ad3ae4eeab812b8b5df550313e7bb34c12b24e529b977d7106271e640df88d29",
+      "size": 3876
+    },
+    "webcodex-source-v0.5.5-win32-arm64.json": {
+      "name": "webcodex-source-v0.5.5-win32-arm64.json",
+      "sha256": "b9abfdce33e1d9ad8bda84a66c422e6d2ca7c990695bd4071d2f1f03aca998c8",
+      "size": 4581
+    },
+    "webcodex-source-v0.5.5-win32-x64.json": {
+      "name": "webcodex-source-v0.5.5-win32-x64.json",
+      "sha256": "6fc8d24a09be2d9138cfe00c4a86f8c70098ad41a3081185bb9870fe277f4761",
+      "size": 4569
+    },
+    "webcodex-unified-v0.5.5-darwin-arm64.pkg": {
+      "name": "webcodex-unified-v0.5.5-darwin-arm64.pkg",
+      "sha256": "6f8170547ec80c19958eddef2728f2fd775a7eab19920e08cdbca993b6ff28f7",
+      "size": 167061388
+    },
+    "webcodex-unified-v0.5.5-darwin-x64.pkg": {
+      "name": "webcodex-unified-v0.5.5-darwin-x64.pkg",
+      "sha256": "25097f153c6ab8168734640f73d920d1d61d386d5c817738133b1dc01bbd800a",
+      "size": 178888019
+    },
+    "webcodex-unified-v0.5.5-linux-arm64.deb": {
+      "name": "webcodex-unified-v0.5.5-linux-arm64.deb",
+      "sha256": "0797b4623b7d802e2f3bab6b11c50580e6d4f238a25df7e1adca4af01af626eb",
+      "size": 71800570
+    },
+    "webcodex-unified-v0.5.5-linux-arm64.rpm": {
+      "name": "webcodex-unified-v0.5.5-linux-arm64.rpm",
+      "sha256": "4a0f419a4abb26b79f7b193fd952423d2a20073339e53d4b692de8976acc4f9b",
+      "size": 98386898
+    },
+    "webcodex-unified-v0.5.5-linux-x64.deb": {
+      "name": "webcodex-unified-v0.5.5-linux-x64.deb",
+      "sha256": "0a61abaa87fd25be7afaff45351ee16b639faaedc1be4df9ffb9734208ef34fb",
+      "size": 75864286
+    },
+    "webcodex-unified-v0.5.5-linux-x64.rpm": {
+      "name": "webcodex-unified-v0.5.5-linux-x64.rpm",
+      "sha256": "b79660b6a856cb24114e03a29ddee23ae08a6559e3330a8d9c690f38a87bce38",
+      "size": 103400096
+    },
+    "webcodex-unified-v0.5.5-win32-arm64.exe": {
+      "name": "webcodex-unified-v0.5.5-win32-arm64.exe",
+      "sha256": "b1b04fb534311883513c414dc8da2d3ab4cc102ac5f1b9b8ea2995769564fc7e",
+      "size": 77491451
+    },
+    "webcodex-unified-v0.5.5-win32-x64.exe": {
+      "name": "webcodex-unified-v0.5.5-win32-x64.exe",
+      "sha256": "4052a99cea4d8de6f2c51ad0df4c9a01f541692c8e9247bc7fb3e35e35e46274",
+      "size": 84540000
+    },
+    "webcodex-v0.5.5-darwin-arm64.tar.gz": {
+      "name": "webcodex-v0.5.5-darwin-arm64.tar.gz",
+      "sha256": "f050c7887e5907f3bb93b24031ad987906a5a93205edbd0b0e5ec9862f3a5426",
+      "size": 37225645
+    },
+    "webcodex-v0.5.5-darwin-x64.tar.gz": {
+      "name": "webcodex-v0.5.5-darwin-x64.tar.gz",
+      "sha256": "b8dcb0d0181a0951e66f4a4038ab785db23d58ff2e47b9da4237a75dd1c61b32",
+      "size": 39861312
+    },
+    "webcodex-v0.5.5-linux-arm64.tar.gz": {
+      "name": "webcodex-v0.5.5-linux-arm64.tar.gz",
+      "sha256": "a1df814c6d1d11416c8afc4140f356c8167da84ca44d9416f05961a9d591b093",
+      "size": 38136193
+    },
+    "webcodex-v0.5.5-linux-x64.tar.gz": {
+      "name": "webcodex-v0.5.5-linux-x64.tar.gz",
+      "sha256": "ba491c9e380b451e881dcb81f4fce5be530f3aa9265f32ef169058e2ff5407b1",
+      "size": 40954856
+    },
+    "webcodex-v0.5.5-win32-arm64.tar.gz": {
+      "name": "webcodex-v0.5.5-win32-arm64.tar.gz",
+      "sha256": "77026d72696321b61b30a15b8d8a5d169c4bfd8ce7779573d01109f9651dde6c",
+      "size": 38756327
+    },
+    "webcodex-v0.5.5-win32-x64.tar.gz": {
+      "name": "webcodex-v0.5.5-win32-x64.tar.gz",
+      "sha256": "c1e8941990966e091bebbf6fcb6d25cd01d230b571b4f1c30c67773d4e4cab32",
+      "size": 41329042
+    }
+  },
+  "build_run_attempt": 1,
+  "build_run_id": 42486798203,
+  "control_sha": "fa9c6e329109e8a5acdea060b1f0f74764a556d2",
+  "controller_run_id": 42486687139,
+  "controller_workflow": ".github/workflows/release-publish-v055.yml",
+  "release_body_sha256": "1556a2dd129181fc76a7370d0c165bbe771a6df69abd34c45f2f9abc7da35fd6",
+  "release_id": 438305617,
+  "repo": "9holy/webcodex",
+  "repo_id": 1404596174,
+  "request_id": "wa_03e63c31f0ea530183d6672205bf02b3",
+  "schema_version": 1,
+  "source_sha": "a596cec372232b1aa008cef676f61a8170fbf239",
+  "tag": "v0.5.5",
+  "tag_object_sha": "10d2b275a00a587fa297b05d00f0b99ca25f6dec"
+}

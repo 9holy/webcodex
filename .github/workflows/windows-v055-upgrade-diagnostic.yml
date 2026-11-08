@@ -1,0 +1,92 @@
+name: Diagnose frozen v0.5.5 Windows upgrade
+run-name: Diagnose v0.5.5 upgrade ${{ github.sha }}
+
+on:
+  push:
+    branches:
+      - diagnostic/v055-upgrade-stage1
+
+# Read the public release/tag and the pinned formal build; no write authority.
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  diagnose:
+    name: Diagnostic (${{ matrix.platform }}, ${{ matrix.mode }})
+    if: >-
+      github.repository == '9holy/webcodex' &&
+      github.repository_id == '1404596174' &&
+      github.ref == 'refs/heads/diagnostic/v055-upgrade-stage1' &&
+      github.event_name == 'push' &&
+      github.actor == '9holy' &&
+      github.triggering_actor == '9holy'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win32-x64
+            runner: windows-latest
+            mode: sequence
+          - platform: win32-x64
+            runner: windows-latest
+            mode: direct
+          - platform: win32-arm64
+            runner: windows-11-arm
+            mode: sequence
+          - platform: win32-arm64
+            runner: windows-11-arm
+            mode: direct
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: diagnostic
+    steps:
+      - name: Checkout the actual diagnostic commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          path: diagnostic
+          persist-credentials: false
+      - name: Checkout the unchanged published acceptance control
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: fa9c6e329109e8a5acdea060b1f0f74764a556d2
+          path: control
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Check diagnostic observation and privacy contracts
+        shell: pwsh
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -B -m unittest scripts.tests.test_windows_v055_upgrade_diagnostic -v
+          if ($LASTEXITCODE -ne 0) { throw "Diagnostic observation contracts failed" }
+      - name: Observe the same public installer bytes on this fresh native runner
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -B scripts/diagnostics/windows_v055_upgrade.py --platform '${{ matrix.platform }}' --mode '${{ matrix.mode }}' --control-root "$env:GITHUB_WORKSPACE/control" --inputs-root "$env:RUNNER_TEMP/webcodex-v055-diagnostic-inputs" --report "$env:RUNNER_TEMP/webcodex-v055-diagnostic/report.json"
+          if ($LASTEXITCODE -ne 0) { throw "Diagnostic observed failure; inspect its bounded phase report" }
+      - name: Retain this diagnostic attempt's bounded report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: diagnostic-v055-upgrade-${{ matrix.platform }}-${{ matrix.mode }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/webcodex-v055-diagnostic/report.json
+          if-no-files-found: error
+          retention-days: 90
+
