@@ -1,0 +1,73 @@
+name: Verify public Windows release installers
+run-name: Verify Windows release ${{ inputs.tag }} ${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Fixed preview tag bound by the publisher
+        required: true
+        type: string
+      request_id:
+        description: Unique frozen publisher request identity
+        required: true
+        type: string
+      request:
+        description: Bounded JSON identity and immutable public asset digests
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  windows:
+    name: Windows acceptance (${{ matrix.platform }})
+    if: >-
+      github.repository == '9holy/webcodex' &&
+      github.repository_id == '1404596174' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == 'github-actions[bot]' &&
+      (github.run_attempt == 1 || github.triggering_actor == '9holy')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: win32-x64
+            runner: windows-latest
+          - platform: win32-arm64
+            runner: windows-11-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    steps:
+      - name: Checkout the exact reviewed control commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Verify native Desktop digest enforcement
+        shell: pwsh
+        run: |
+          python -B -m unittest scripts.tests.test_windows_desktop_hashes -v
+          if ($LASTEXITCODE -ne 0) { throw "Desktop digest enforcement regression failed" }
+      - name: Verify frozen public bytes and execute three real installation scenarios
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WEBCODEX_WINDOWS_ACCEPTANCE_REQUEST: ${{ inputs.request }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -B scripts/release_windows_acceptance.py --platform '${{ matrix.platform }}' --inputs-root "$env:RUNNER_TEMP/windows-release-acceptance-inputs" --report "$env:RUNNER_TEMP/windows-release-acceptance/report.json"
+          if ($LASTEXITCODE -ne 0) { throw "Frozen public Windows acceptance failed; see the bounded report" }
+      - name: Retain this exact attempt's bounded report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-release-acceptance-${{ matrix.platform }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-release-acceptance/report.json
+          if-no-files-found: error
+          retention-days: 90

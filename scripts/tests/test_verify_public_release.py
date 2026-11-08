@@ -73,7 +73,7 @@ def synthetic_elf(machine: int, glibc: str = "2.17", needed: tuple[str, ...] = (
 
 
 class GitHubOnlyReleaseTests(unittest.TestCase):
-    def verify_fork(self, *, foreign_source=False, corrupt_installer=False):
+    def verify_fork(self, *, foreign_source=False, corrupt_installer=False, prerelease=False, expected_prerelease=False):
         from scripts.tests.test_collect_release_bundle import _write_bundle, VERSION
         repo = "9holy/webcodex"
         with tempfile.TemporaryDirectory() as temp:
@@ -112,7 +112,7 @@ class GitHubOnlyReleaseTests(unittest.TestCase):
                        "digest": "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest(),
                        "browser_download_url": f"https://github.com/{repo}/releases/download/v{VERSION}/{name}"}
                       for name in [*names, "SHA256SUMS"]]
-            release = {"tag_name": f"v{VERSION}", "draft": False, "prerelease": False, "assets": assets}
+            release = {"tag_name": f"v{VERSION}", "draft": False, "prerelease": prerelease, "assets": assets}
             def read(url, *_):
                 self.assertTrue(url.startswith(f"https://github.com/{repo}/releases/download/v{VERSION}/"))
                 return (root / url.rsplit("/", 1)[1]).read_bytes()
@@ -125,7 +125,8 @@ class GitHubOnlyReleaseTests(unittest.TestCase):
             with mock.patch.object(verifier, "fetch_json", return_value=release) as metadata, mock.patch.object(
                 verifier, "fetch_bytes", side_effect=read
             ), mock.patch.object(verifier, "download_file", side_effect=download), contextlib.redirect_stdout(io.StringIO()):
-                verifier.verify_public_release(VERSION, 5, repo=repo, github_only=True, require_unified_installers=True)
+                verifier.verify_public_release(VERSION, 5, repo=repo, github_only=True, require_unified_installers=True,
+                                               expected_prerelease=expected_prerelease)
             metadata.assert_called_once_with(f"https://api.github.com/repos/{repo}/releases/tags/v{VERSION}", 5)
 
     def test_full_fork_release_verifies_all_platforms_without_npm(self):
@@ -138,6 +139,17 @@ class GitHubOnlyReleaseTests(unittest.TestCase):
     def test_github_only_keeps_installer_byte_verification(self):
         with self.assertRaisesRegex(verifier.VerificationError, "installer SHA-256"):
             self.verify_fork(corrupt_installer=True)
+
+    def test_preview_requires_explicit_opt_in_and_actual_github_flag(self):
+        with self.assertRaisesRegex(verifier.VerificationError, "prerelease state"):
+            self.verify_fork(prerelease=True)
+        with self.assertRaisesRegex(verifier.VerificationError, "prerelease state"):
+            self.verify_fork(expected_prerelease=True)
+        self.verify_fork(prerelease=True, expected_prerelease=True)
+
+    def test_preview_opt_in_keeps_full_downloaded_byte_verification(self):
+        with self.assertRaisesRegex(verifier.VerificationError, "installer SHA-256"):
+            self.verify_fork(prerelease=True, expected_prerelease=True, corrupt_installer=True)
 
 
 class ManifestTests(unittest.TestCase):

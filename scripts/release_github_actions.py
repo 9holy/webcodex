@@ -314,7 +314,8 @@ def validate_journal(value: dict, request: dict, request_digest: str, context: d
     return value
 
 
-def validate_release_identity(release: dict, journal: dict, allow_public: bool = False) -> None:
+def validate_release_identity(release: dict, journal: dict, allow_public: bool = False, *,
+                              expected_prerelease: bool | None = None, publication_effect: str = "publish") -> None:
     effect = journal.get("effects", {}).get("draft")
     _require(isinstance(effect, dict), "发现未归属当前发布记录的 Release。")
     intent = effect["intent"]
@@ -323,13 +324,16 @@ def validate_release_identity(release: dict, journal: dict, allow_public: bool =
     # target_commitish is unused by GitHub for an already-existing tag. The
     # annotated tag object, independently rechecked by the controller, owns
     # source identity; a mutable/default-branch display field cannot replace it.
-    for key in ("tag_name", "name", "body", "prerelease"):
+    for key in ("tag_name", "name", "body"):
         _require(release.get(key) == intent.get(key), "GitHub Release 与固定 tag、说明或发布记录不一致。")
+    prerelease = intent.get("prerelease") if expected_prerelease is None else expected_prerelease
+    _require(type(prerelease) is bool and release.get("prerelease") is prerelease,
+             "GitHub Release 的预发布状态与固定阶段不一致。")
     author = release.get("author")
     _require(isinstance(author, dict) and author.get("login") == BOT_LOGIN and author.get("id") == BOT_ID,
              "GitHub Release 创建者不是本发布工作流的机器身份。")
     if release.get("draft") is False:
-        publish = journal.get("effects", {}).get("publish")
+        publish = journal.get("effects", {}).get(publication_effect)
         _require(allow_public and isinstance(publish, dict) and publish["intent"].get("release_id") == release["id"]
                  and bool(release.get("published_at")), "Release 已公开，但缺少本记录的已验收发布意图。")
     else:
@@ -368,6 +372,8 @@ def annotated_tag_intent(request: dict, journal: dict) -> dict:
 
 
 class Controller:
+    stages = STAGES
+
     def __init__(self, request_path: Path, source_root: Path, state_dir: Path,
                  bundle_dir: Path | None = None, timeout: float = 60,
                  env: Mapping[str, str] | None = None, client: collector.GitHubClient | None = None,
@@ -537,7 +543,7 @@ class Controller:
         return value
 
     def run(self, stage: str, wait_secs: int = 0) -> int:
-        _require(stage in STAGES and 0 <= wait_secs <= 60, "发布阶段或等待时间无效。")
+        _require(stage in self.stages and 0 <= wait_secs <= 60, "发布阶段或等待时间无效。")
         self._authenticate()
         with self._lock():
             if stage == "restore-state":
@@ -737,7 +743,7 @@ class Controller:
         release = self._find_release()
         if release is not None:
             self._verify_tag(ref)
-            validate_release_identity(release, self.state, allow_public=True)
+            self._validate_release_identity(release, allow_public=True)
         self.state["checks"]["preflight"] = {"principal": "github-actions-installation", "github_only": True}
         self._save()
         print("机器身份、固定源码、版本及两份成功源码验收已核对；仅发布 GitHub。")
@@ -1001,8 +1007,11 @@ class Controller:
         self._verify_tag()
         release = self._find_release()
         _require(release is not None, "当前发布记录绑定的 Release 不存在；不会重建。")
-        validate_release_identity(release, self.state, allow_public=allow_public)
+        self._validate_release_identity(release, allow_public=allow_public)
         return release
+
+    def _validate_release_identity(self, release: dict, *, allow_public: bool = True) -> None:
+        validate_release_identity(release, self.state, allow_public=allow_public)
 
     def create_draft(self) -> int:
         self._verify_tag()
@@ -1012,7 +1021,7 @@ class Controller:
         if release is None:
             self._bundle_summary()
             release = self._mutate("draft", "POST", "/releases", self._draft_intent())
-        validate_release_identity(release, self.state, allow_public=True)
+        self._validate_release_identity(release, allow_public=True)
         self.state["release_id"] = release["id"]
         self._record_success("draft", {"release_id": release["id"]})
         print(f"已核对本次发布的 Release {release['id']}；未重复创建。")
@@ -1047,7 +1056,7 @@ class Controller:
         print(f"已冻结 {len(expected)} 个允许公开的附件及其大小、SHA-256；须先保留 checkpoint。")
         return 0
 
-    def _verify_primary_assets(self, release: dict, *, complete: bool) -> dict[str, dict]:
+    def _verify_primary_assets(self, release: dict, *, complete: bool, expected_prerelease: bool = False) -> dict[str, dict]:
         assets = release.get("assets")
         _require(isinstance(assets, list) and len(assets) <= 64, "GitHub 附件列表不完整或过大。")
         by_name: dict[str, dict] = {}
@@ -1068,7 +1077,7 @@ class Controller:
             _require(set(by_name) <= set(expected) | post_names, "公开 Release 含有未允许的额外附件。")
             primary_release = {**release, "assets": [item for name, item in by_name.items() if name in expected]}
             public_verifier.validate_github_assets(primary_release, self.request["version"], unified_installers=True,
-                                                  require_runtime_installers=False)
+                                                  require_runtime_installers=False, expected_prerelease=expected_prerelease)
         else:
             _require(set(by_name) <= set(expected), "草稿包含未允许公开的内部文件或额外附件。")
         if complete:
@@ -1179,8 +1188,20 @@ class Controller:
         print("GitHub 公开安装包的字节验收已通过；Docker 仍由独立 image 工作流验收。")
         return 0
 
+    def _post_definition(self, kind: str) -> tuple[str, str]:
+        return self.spec.post_workflows[kind]
+
+    def _post_identity(self, kind: str) -> dict:
+        workflow, title = self._post_definition(kind)
+        return {"workflow_file": workflow, "run_name": title, "ref": "main", "tag": self.request["tag"],
+                "source_sha": self.request["source_sha"], "tag_object_sha": self.state["tag_object_sha"],
+                "release_id": self.state["release_id"], "head_sha": self.context["control_sha"]}
+
+    def _post_inputs(self, kind: str) -> dict:
+        return {"tag": self.request["tag"]}
+
     def _post_runs(self, kind: str) -> list[dict]:
-        workflow, _title = self.spec.post_workflows[kind]
+        workflow, _title = self._post_definition(kind)
         payload = self.client.fetch_json(f"/actions/workflows/{workflow}/runs?event=workflow_dispatch&branch=main&per_page=100")
         runs = payload.get("workflow_runs")
         _require(isinstance(runs, list) and len(runs) <= 100 and all(isinstance(run, dict) for run in runs),
@@ -1191,10 +1212,7 @@ class Controller:
         effect = self.state["effects"].get(f"post:{kind}")
         _require(isinstance(effect, dict), "缺少后续工作流的固定 dispatch 意图。")
         intent = effect["intent"]
-        workflow, title = self.spec.post_workflows[kind]
-        expected = {"workflow_file": workflow, "run_name": title, "ref": "main", "tag": self.request["tag"],
-                    "source_sha": self.request["source_sha"], "tag_object_sha": self.state["tag_object_sha"],
-                    "release_id": self.state["release_id"], "head_sha": self.context["control_sha"]}
+        expected = self._post_identity(kind)
         _require(set(intent) == set(expected) | {"not_before", "baseline_run_ids"}
                  and all(intent.get(key) == value for key, value in expected.items()), "后续工作流意图发生变化。")
         baseline = intent.get("baseline_run_ids")
@@ -1289,24 +1307,27 @@ class Controller:
         _require(release["draft"] is False and self.state["checks"].get("public_bytes") is True,
                  "后续任务需要已验收的公开 Release。")
         for kind in self.spec.post_workflows:
-            intent = self._post_intent(kind)
-            if self._post_snapshot(kind) is not None:
-                continue
-            self._may_execute(f"post:{kind}")
-            _require(readiness._branch_sha(self.client, "main") == intent["head_sha"],
-                     "dispatch 前 main 控制源码已变化；已停止。")
-            result = self._mutate(f"post:{kind}", "POST", f"/actions/workflows/{intent['workflow_file']}/dispatches",
-                                  {"ref": "main", "inputs": {"tag": self.request["tag"]}, "return_run_details": True},
-                                  expected_status=200)
-            run_id = result.get("workflow_run_id")
-            _require(_positive_int(run_id) and result.get("run_url") == self.client.api_url(f"/actions/runs/{run_id}")
-                     and result.get("html_url") == f"https://github.com/{self.request['repo']}/actions/runs/{run_id}",
-                     "GitHub 未返回可核对的后续运行编号；保留意图，只允许只读恢复。")
-            self.state["post"][kind] = {"run_id": run_id, "head_sha": intent["head_sha"],
-                                       "run_attempt": 1, "status": "requested", "conclusion": None}
-            self._record_success(f"post:{kind}", {"run_id": run_id, "run_attempt": 1})
-            print(f"已绑定 {kind} 后续运行 {run_id}；尚未将 dispatch 当作验收完成。")
+            self._dispatch_post_kind(kind)
         return 0
+
+    def _dispatch_post_kind(self, kind: str) -> None:
+        intent = self._post_intent(kind)
+        if self._post_snapshot(kind) is not None:
+            return
+        self._may_execute(f"post:{kind}")
+        _require(readiness._branch_sha(self.client, "main") == intent["head_sha"],
+                 "dispatch 前 main 控制源码已变化；已停止。")
+        result = self._mutate(f"post:{kind}", "POST", f"/actions/workflows/{intent['workflow_file']}/dispatches",
+                              {"ref": "main", "inputs": self._post_inputs(kind), "return_run_details": True},
+                              expected_status=200)
+        run_id = result.get("workflow_run_id")
+        _require(_positive_int(run_id) and result.get("run_url") == self.client.api_url(f"/actions/runs/{run_id}")
+                 and result.get("html_url") == f"https://github.com/{self.request['repo']}/actions/runs/{run_id}",
+                 "GitHub 未返回可核对的后续运行编号；保留意图，只允许只读恢复。")
+        self.state["post"][kind] = {"run_id": run_id, "head_sha": intent["head_sha"],
+                                    "run_attempt": 1, "status": "requested", "conclusion": None}
+        self._record_success(f"post:{kind}", {"run_id": run_id, "run_attempt": 1})
+        print(f"已绑定 {kind} 后续运行 {run_id}；尚未将 dispatch 当作验收完成。")
 
     def _verify_image_success(self, run: dict) -> None:
         payload = self.client.fetch_json(f"/actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100")
@@ -1364,9 +1385,9 @@ class Controller:
             time.sleep(min(10, max(0.1, deadline - time.monotonic())))
 
 
-def build_parser(*, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC) -> argparse.ArgumentParser:
+def build_parser(*, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC, stages: tuple[str, ...] = STAGES) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=f"固定 WebCodex {spec.pinned_request['tag']} 的 GitHub Actions 发布控制器；无参数仅显示计划。")
-    parser.add_argument("stage", nargs="?", choices=STAGES)
+    parser.add_argument("stage", nargs="?", choices=stages)
     parser.add_argument("--plan", action="store_true", help="只显示固定目标和阶段，不联网或创建状态")
     parser.add_argument("--request", type=Path)
     parser.add_argument("--source-root", type=Path)
@@ -1377,19 +1398,22 @@ def build_parser(*, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC) -> argparse.Argume
     return parser
 
 
-def main(argv: list[str] | None = None, *, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC) -> int:
-    parser = build_parser(spec=spec)
+def main(argv: list[str] | None = None, *, spec: ReleaseSpec = DEFAULT_RELEASE_SPEC,
+         controller_type: type[Controller] | None = None) -> int:
+    stages = STAGES if controller_type is None else controller_type.stages
+    controller_type = Controller if controller_type is None else controller_type
+    parser = build_parser(spec=spec, stages=stages)
     args = parser.parse_args(argv)
     if args.plan or args.stage is None:
         print(f"固定发布 {spec.pinned_request['repo']} {spec.pinned_request['tag']}，源码 {spec.pinned_request['source_sha']}。")
         print("仅 GitHub、8 个 unified 安装目标；通过仓库官方 Actions installation token 执行。")
         print("prepare 后必须先保存 checkpoint；同一控制 run 可恢复，未知操作不重复提交。")
-        print("阶段：" + " → ".join(STAGES))
+        print("阶段：" + " → ".join(stages))
         return 0
     if args.request is None or args.source_root is None or args.state_dir is None:
         parser.error("执行阶段需要 --request、--source-root 和 --state-dir")
     try:
-        return Controller(args.request, args.source_root, args.state_dir, args.bundle_dir, args.timeout, spec=spec).run(args.stage, args.wait_secs)
+        return controller_type(args.request, args.source_root, args.state_dir, args.bundle_dir, args.timeout, spec=spec).run(args.stage, args.wait_secs)
     except ReleaseControlError as exc:
         print(f"[release-control] {exc}", file=sys.stderr)
         return 1
