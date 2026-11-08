@@ -242,6 +242,32 @@ def _classify_path(risk: Risk, path: str) -> None:
         if path in ssh_acceptance_scripts:
             return
 
+    # The real installed-Environment classifier and installer hash checks live
+    # in the Desktop lane. Keep their upgrade/authority owners reachable there
+    # while retaining the existing native risks for shared Rust and helpers.
+    windows_upgrade_smoke_scripts = {
+        "scripts/windows_unified_upgrade_smoke.py",
+        "scripts/tests/test_windows_unified_upgrade_smoke.py",
+    }
+    if path in windows_upgrade_smoke_scripts or path in {
+        "scripts/tests/test_windows_desktop_hashes.py",
+        "crates/webcodex-environment/src/upgrade.rs",
+        "crates/webcodex-environment/src/installer_authorization.rs",
+        "crates/webcodex-environment/src/upgrade/installed_paths.rs",
+        "crates/webcodex-environment/src/upgrade/windows_installation.rs",
+        "crates/webcodex-environment/src/upgrade/windows_package.rs",
+        "crates/webcodex-environment/src/upgrade/windows_recovery.rs",
+    } or path.startswith((
+        "crates/webcodex-environment/src/installer_authorization/",
+        "crates/webcodex-environment/src/upgrade/installed_paths/",
+        "crates/webcodex-environment/src/upgrade/windows_installation/",
+        "crates/webcodex-environment/src/upgrade/windows_package/",
+        "crates/webcodex-environment/src/upgrade/windows_recovery/",
+    )):
+        _mark_windows_desktop(risk, "windows-upgrade-acceptance")
+        if path in windows_upgrade_smoke_scripts:
+            return
+
     if (
         path.startswith("npm/plugin-sdk/")
         or path.startswith("plugins/safe-delete/")

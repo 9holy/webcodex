@@ -169,6 +169,90 @@ class PathRiskFixtureTests(unittest.TestCase):
         self.assertEqual(result["needs_windows_desktop"], "true")
         self.assertEqual(result["needs_macos_desktop"], "true")
 
+    def test_windows_upgrade_sources_require_real_installed_acceptance(self) -> None:
+        for relative, previous_category in (
+            ("upgrade.rs", "normal-linux"),
+            ("installer_authorization.rs", "release-packaging"),
+            ("installer_authorization/tests.rs", "release-packaging"),
+            ("upgrade/installed_paths.rs", "normal-linux"),
+            ("upgrade/installed_paths/tests.rs", "normal-linux"),
+            ("upgrade/windows_installation.rs", "platform-source"),
+            ("upgrade/windows_installation/security.rs", "platform-source"),
+            ("upgrade/windows_installation/security/tests.rs", "platform-source"),
+            ("upgrade/windows_package.rs", "platform-source"),
+            ("upgrade/windows_package/tests/windows_owners.rs", "platform-source"),
+            ("upgrade/windows_recovery.rs", "platform-source"),
+            ("upgrade/windows_recovery/tests.rs", "platform-source"),
+        ):
+            path = f"crates/webcodex-environment/src/{relative}"
+            for status in ("A", "M", "D"):
+                with self.subTest(path=path, status=status):
+                    result = classify(path, statuses=(status,))
+                    self.assertEqual(result["needs_windows_desktop"], "true")
+                    self.assertEqual(result["needs_desktop_package"], "true")
+                    self.assertIn("windows-upgrade-acceptance", result["categories"])
+                    self.assertIn(previous_category, result["categories"])
+                    self.assertEqual(
+                        result["needs_full_native"],
+                        str(previous_category == "release-packaging").lower(),
+                    )
+                    if previous_category != "normal-linux":
+                        self.assertEqual(result["needs_windows_core"], "true")
+                        self.assertEqual(result["needs_macos"], "true")
+
+    def test_windows_upgrade_smoke_and_hash_tests_reach_desktop(self) -> None:
+        for path in (
+            "scripts/windows_unified_upgrade_smoke.py",
+            "scripts/tests/test_windows_unified_upgrade_smoke.py",
+            "scripts/tests/test_windows_desktop_hashes.py",
+        ):
+            for status in ("A", "M", "D"):
+                with self.subTest(path=path, status=status):
+                    result = classify(path, statuses=(status,))
+                    self.assertEqual(result["needs_windows_desktop"], "true")
+                    self.assertEqual(result["needs_desktop_package"], "true")
+                    self.assertEqual(result["needs_full_native"], "false")
+                    self.assertEqual(result["needs_macos"], "false")
+                    self.assertIn("windows-upgrade-acceptance", result["categories"])
+                    self.assertEqual(
+                        result["needs_windows_runner"],
+                        str(path == "scripts/tests/test_windows_desktop_hashes.py").lower(),
+                    )
+                    if path == "scripts/tests/test_windows_desktop_hashes.py":
+                        self.assertIn("windows-runner-script", result["categories"])
+
+    def test_windows_upgrade_mapping_retains_platform_context_risks(self) -> None:
+        for path in (
+            "crates/webcodex-environment/src/upgrade.rs",
+            "crates/webcodex-environment/src/upgrade/installed_paths.rs",
+        ):
+            for status in ("A", "M", "D"):
+                with self.subTest(path=path, status=status):
+                    result = classify(
+                        path, statuses=(status,), platform_diff="#[cfg(windows)]\n"
+                    )
+                    self.assertEqual(result["needs_windows_desktop"], "true")
+                    self.assertEqual(result["needs_windows_core"], "true")
+                    self.assertEqual(result["needs_macos"], "true")
+                    self.assertEqual(result["needs_full_native"], "false")
+                    self.assertIn("platform-cfg", result["categories"])
+
+    def test_unrelated_environment_paths_do_not_reach_windows_upgrade_gate(self) -> None:
+        for path in (
+            "crates/webcodex-environment/src/lib.rs",
+            "crates/webcodex-environment/src/upgrade_transport.rs",
+            "crates/webcodex-environment/src/upgrade/status/tests.rs",
+            "crates/webcodex-environment/src/upgrade/installed_paths_other.rs",
+            "crates/webcodex-environment/src/upgrade/windows_installation_other.rs",
+            "crates/webcodex-environment/src/upgrade/windows_package_other/tests.rs",
+            "scripts/tests/test_windows_other.py",
+        ):
+            for status in ("A", "M", "D"):
+                with self.subTest(path=path, status=status):
+                    result = classify(path, statuses=(status,))
+                    self.assertEqual(result["needs_windows_desktop"], "false")
+                    self.assertNotIn("windows-upgrade-acceptance", result["categories"])
+
     def test_desktop_ui_smoke_changes_keep_the_browser_gate_active(self) -> None:
         for path in (
             "scripts/ui-smoke/desktop-fork-workflows.mjs",
