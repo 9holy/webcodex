@@ -10,6 +10,7 @@ written to the report or printed.
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass
 import hashlib
 import json
@@ -26,7 +27,14 @@ import time
 import uuid
 
 
-UPSTREAM_SHA256 = "dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6"
+UPSTREAM_SHA256 = {
+    "win32-x64": "dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6",
+    "win32-arm64": "9d3692b3d9309b82ec987565d140dd9226a6d1473d2e67e5f9d675a3250a52b2",
+}
+PLATFORMS = {
+    "win32-x64": ("AMD64", "x86_64-pc-windows-msvc", "x86_64"),
+    "win32-arm64": ("ARM64", "aarch64-pc-windows-msvc", "aarch64"),
+}
 PUBLISHED_SOURCE = "883fe91ec125440a689827eb8857d04718331461"
 UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\WebCodex Desktop"
 PROGRAMS = {
@@ -120,6 +128,17 @@ def verify_input(path: Path, expected: str, label: str) -> str:
     return actual
 
 
+def verify_build(info: dict, *, binary: str, version: str, source: str | None,
+                 platform: str, label: str) -> dict:
+    _, target, architecture = PLATFORMS[platform]
+    if (info.get("binary") != binary or info.get("version") != version
+            or source is not None and info.get("git_commit") != source
+            or info.get("git_dirty") is not False or info.get("target") != target
+            or info.get("architecture") != architecture):
+        raise SmokeFailure(f"{label}: runtime build identity differs from the selected source/platform")
+    return {key: info.get(key) for key in ("version", "git_commit", "git_dirty", "target", "architecture")}
+
+
 def parse_json(result: CommandResult, label: str) -> dict:
     if result.returncode:
         raise SmokeFailure(f"{label}: CLI exit {result.returncode}")
@@ -184,6 +203,10 @@ def unchanged(before: dict, after: dict, label: str) -> None:
         raise SmokeFailure(f"{label}: changed fixture entries: {', '.join(changed)}")
 
 
+def preserved_state(snapshot: dict) -> dict:
+    return {name: value for name, value in snapshot.items() if not name.startswith("program/")}
+
+
 def service_observation(status: dict) -> dict:
     local = status.get("observation", {}).get("local") or {}
     components = {}
@@ -244,27 +267,56 @@ def owner_observation(paths: dict[str, Path]) -> dict:
     script = r"""
 $ErrorActionPreference='Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-$identity=[Security.Principal.WindowsIdentity]::GetCurrent()
-$result=@{token_user=$identity.User.Value; token_owner=$identity.Owner.Value; files=@{}}
-$paths=$env:WEBCODEX_UPGRADE_SMOKE_PATHS | ConvertFrom-Json
-foreach($item in $paths.PSObject.Properties) {
-  $acl=Get-Acl -LiteralPath $item.Value
-  $result.files[$item.Name]=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+$stage='read_path_request'
+$result=@{files=@{}; exists=@{}}
+try {
+  $paths=$env:WEBCODEX_UPGRADE_SMOKE_PATHS | ConvertFrom-Json
+  foreach($item in $paths.PSObject.Properties) {
+    $result.exists[$item.Name]=[bool](Test-Path -LiteralPath $item.Value)
+  }
+  $stage='token_identity'
+  $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
+  $result.token_user=$identity.User.Value
+  $result.token_owner=$identity.Owner.Value
+  foreach($item in $paths.PSObject.Properties) {
+    $stage='file_owner_' + $item.Name
+    $acl=Get-Acl -LiteralPath $item.Value
+    $result.files[$item.Name]=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+  }
+} catch {
+  $result.failure=@{stage=$stage; exception_type=$_.Exception.GetType().Name;
+    reason=$_.CategoryInfo.Reason; script_line=$_.InvocationInfo.ScriptLineNumber}
+  $result | ConvertTo-Json -Depth 5 -Compress
+  exit 1
 }
-$result | ConvertTo-Json -Depth 4 -Compress
+$result | ConvertTo-Json -Depth 5 -Compress
 """
     env = dict(os.environ, WEBCODEX_UPGRADE_SMOKE_PATHS=json.dumps({k: str(v) for k, v in paths.items()}))
     powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-    result = run_command([str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script],
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    result = run_command([str(powershell), "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
                          "observe installed owners", env=env)
-    return parse_json(result, "observe installed owners")
+    try:
+        value = json.loads(result.stdout)
+        if not isinstance(value, dict):
+            raise ValueError("non-object helper result")
+    except (ValueError, UnicodeError):
+        value = {"failure": {"stage": "decode_read_only_owner_helper"}}
+    value["helper_exit_code"] = result.returncode
+    if result.stderr:
+        # This dedicated helper only consumes the five explicit fixture paths and
+        # token SID metadata. Unlike setup/Runtime CLI output, it has no secrets.
+        value["helper_stderr"] = result.stderr[:2048].decode("utf-8", errors="replace")
+    return value
 
 
 class NativeSmoke:
     def __init__(self, args):
         self.args = args
         self.report = {"schema_version": 1, "scenario": "published-unified-verbatim-upgrade",
-                       "published_source": PUBLISHED_SOURCE, "phases": {}, "cleanup": {}}
+                       "platform": args.platform, "published_source": PUBLISHED_SOURCE,
+                       "mode": "reproduce_only" if args.reproduce_only else "verify_candidate" if args.verify_candidate else "verify_classifier",
+                       "phases": {}, "cleanup": {}}
         self.root: Path | None = None
         self.installed: Path | None = None
         self.environment: Path | None = None
@@ -318,8 +370,9 @@ class NativeSmoke:
 
     def run(self) -> None:
         self.report["phase"] = "validate_inputs"
-        if os.name != "nt" or os.environ.get("PROCESSOR_ARCHITECTURE", "").upper() != "AMD64":
-            raise SmokeFailure("this smoke requires a disposable native Windows x64 runner")
+        native_arch = os.environ.get("PROCESSOR_ARCHITEW6432") or os.environ.get("PROCESSOR_ARCHITECTURE", "")
+        if os.name != "nt" or native_arch.upper() != PLATFORMS[self.args.platform][0]:
+            raise SmokeFailure("this smoke requires a disposable native Windows runner matching --platform")
         if read_registration() is not None:
             raise SmokeFailure("refusing to change a pre-existing current-user Desktop installation")
         with socket.socket() as probe:
@@ -333,9 +386,16 @@ class NativeSmoke:
             "published_cli_sha256": digest(self.args.published_cli),
         }
         build = parse_json(run_command([str(self.args.published_cli), "--build-info-json"], "published CLI identity"), "published CLI identity")
-        if (build.get("binary") != "webcodex" or build.get("version") != "0.5.3"
-                or build.get("git_commit") != PUBLISHED_SOURCE or build.get("git_dirty") is not False):
-            raise SmokeFailure("published CLI does not match immutable v0.5.3 source identity")
+        verify_build(build, binary="webcodex", version="0.5.3", source=PUBLISHED_SOURCE,
+                     platform=self.args.platform, label="published CLI")
+        if not self.args.reproduce_only:
+            candidate = parse_json(run_command([str(self.args.candidate_cli), "--build-info-json"], "candidate CLI identity"), "candidate CLI identity")
+            self.report["candidate_runtime"] = verify_build(candidate, binary="webcodex", version=self.args.candidate_version,
+                source=self.args.candidate_source_sha, platform=self.args.platform, label="candidate CLI")
+            self.report["inputs"]["candidate_cli_sha256"] = digest(self.args.candidate_cli)
+        if self.args.verify_candidate:
+            self.report["inputs"]["candidate_installer_sha256"] = verify_input(
+                self.args.candidate_installer, self.args.candidate_installer_sha256, "candidate unified installer")
         self.root = Path(tempfile.mkdtemp(prefix="webcodex-unified-regression-", dir=os.environ.get("RUNNER_TEMP")))
         self.installed = self.root / "Upstream Desktop"
         self.environment = self.root / "Environment"
@@ -348,18 +408,26 @@ class NativeSmoke:
         registration = read_registration()
         if registration is None or not os.path.samefile(registered_path(registration["InstallLocation"]), self.installed):
             raise SmokeFailure("upstream installer did not register the exact isolated directory")
+        self.report["phase"] = "observe_upstream_installed_file_owners"
+        self.report["installed_program_presence"] = {name: (self.installed / path).is_file()
+                                                      for name, path in PROGRAMS.items()}
         owners = owner_observation({"install_directory": self.installed,
                                     **{name: self.installed / path for name, path in PROGRAMS.items()}})
         self.report["installed_owners"] = owners
+        if owners.get("helper_exit_code") != 0 or owners.get("failure"):
+            raise SmokeFailure("read-only installed owner helper failed; inspect its fixed-stage diagnostic")
         identities = []
         for name in ("webcodex", "webcodex-server", "webcodex-runner"):
             info = parse_json(run_command([str(self.installed / PROGRAMS[name]), "--build-info-json"], "upstream build identity"), "upstream build identity")
-            if info.get("binary") != name or info.get("version") != "0.5.0":
-                raise SmokeFailure("upstream setup did not install the expected real v0.5.0 runtime")
-            identities.append({key: info.get(key) for key in ("version", "git_commit", "git_dirty", "target", "architecture")})
+            identities.append(verify_build(info, binary=name, version="0.5.0", source=None,
+                                           platform=self.args.platform, label="upstream installed runtime"))
         if any(identity != identities[0] for identity in identities[1:]):
             raise SmokeFailure("upstream runtime build identities disagree")
         self.report["upstream_runtime"] = identities[0]
+        self.report["phase"] = "classify_real_unconfigured_upstream_installation"
+        self.report["unconfigured_classification"] = classification(self.cli(self.args.published_cli,
+            ["installer-classify", "--expected-runtime-dir", str(self.installed / "webcodex-runtime")],
+            "published unconfigured classification"))
         self.report["phase"] = "configure_real_upstream_environment"
         try:
             setup = self.cli(self.old_cli, ["configure", "--create", "--runner", "--no-project", "--scope", "user",
@@ -428,6 +496,67 @@ class NativeSmoke:
         if self.report["verdict"] != "reproduced_verbatim_path_rejection":
             raise SmokeFailure("original installer did not isolate the expected verbatim-path rejection; inspect the classification/owner evidence")
         self.report["phase"] = "reproduction_complete"
+        if not self.args.reproduce_only:
+            self.verify_candidate(before, verbatim_runtime)
+
+    def verify_candidate(self, before: dict, verbatim_runtime: str) -> None:
+        self.report["phase"] = "classify_candidate_dos_and_verbatim_paths"
+        observations = {}
+        for name, runtime in (("dos", str(self.installed / "webcodex-runtime")), ("verbatim", verbatim_runtime)):
+            observed = classification(self.cli(self.args.candidate_cli,
+                ["installer-classify", "--expected-runtime-dir", runtime], f"candidate {name} classification"))
+            observations[name] = observed
+        self.report["candidate_classification"] = observations
+        if any(value["exit_code"] != 0 or value["kind"] != "environment" for value in observations.values()):
+            raise SmokeFailure("fixed real CLI did not accept both spellings of the same owned Environment")
+        unchanged(before, self.snapshot(), "candidate classification")
+        if self.unrelated.poll() is not None:
+            raise SmokeFailure("candidate classification stopped an unrelated same-name process")
+        if self.args.verify_classifier:
+            self.report["phases"]["after_candidate_classification_services"] = self.wait_services(True)
+            self.report["complete_upgrade_verified"] = False
+            self.report["verdict"] = "verified_fixed_classifier_only"
+            self.report["phase"] = "classifier_verification_complete"
+            return
+
+        # The release builder's collected native candidate directory contains all
+        # four exact programs. The Desktop is named webcodex-desktop.exe there,
+        # and WebCodex.exe at its installed destination.
+        expected = {}
+        for name in PROGRAMS:
+            source = self.args.candidate_cli.parent / f"{name}.exe"
+            if not source.is_file():
+                raise SmokeFailure("candidate CLI directory lacks the complete native installer inputs")
+            expected[f"program/{name}"] = digest(source)
+        self.report["phase"] = "upgrade_running_environment_with_candidate_outer"
+        installed = self.run_installer(self.args.candidate_installer, environment=self.environment)
+        self.report["candidate_outer"] = {"exit_code": installed.returncode}
+        if installed.returncode:
+            raise SmokeFailure(f"candidate unified installer exit {installed.returncode}")
+        self.report["phase"] = "verify_exact_installed_candidate_and_preserved_identity"
+        after = self.snapshot()
+        unchanged(expected, {key: value for key, value in after.items() if key.startswith("program/")},
+                  "installed candidate program bytes")
+        unchanged(preserved_state(before), preserved_state(after), "candidate upgrade private state and directory")
+        for name in ("webcodex", "webcodex-server", "webcodex-runner"):
+            info = parse_json(run_command([str(self.installed / PROGRAMS[name]), "--build-info-json"], "installed candidate identity"), "installed candidate identity")
+            verify_build(info, binary=name, version=self.args.candidate_version, source=self.args.candidate_source_sha,
+                         platform=self.args.platform, label="installed candidate")
+        if self.unrelated.poll() is not None:
+            raise SmokeFailure("candidate unified installer stopped an unrelated same-name process")
+        self.report["phases"]["after_candidate_upgrade_services"] = self.wait_services(True)
+        for component in ("runner", "server"):
+            self.control("stop", component)
+        self.report["phases"]["candidate_services_stopped"] = self.wait_services(False)
+        for component in ("server", "runner"):
+            self.control("start", component)
+        self.report["phases"]["candidate_services_restarted"] = self.wait_services(True)
+        unchanged(preserved_state(before), preserved_state(self.snapshot()), "candidate service restart private state")
+        self.report["candidate_outer"].update({"exact_native_programs": True, "private_state_preserved": True,
+            "original_directory_preserved": True, "unrelated_process_alive": True})
+        self.report["complete_upgrade_verified"] = True
+        self.report["verdict"] = "verified_real_unified_upgrade"
+        self.report["phase"] = "candidate_upgrade_verification_complete"
 
     def cleanup(self) -> None:
         problems = []
@@ -477,27 +606,52 @@ class NativeSmoke:
                 except OSError:
                     pass  # Never delete other Desktop state.
         if not problems and not self.uncertain_installer and self.root is not None:
-            try:
-                shutil.rmtree(self.root)
-            except OSError:
-                problems.append("owned_fixture_directory_cleanup_failed")
+            # The exact uninstaller has exited; Windows can release its image
+            # handle slightly later. Retry only removal of our own unique root.
+            deadline = time.monotonic() + 10
+            while self.root.exists():
+                try:
+                    shutil.rmtree(self.root)
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        problems.append("owned_fixture_directory_cleanup_failed")
+                        break
+                    time.sleep(0.25)
         self.report["cleanup"] = {"complete": not problems and not self.uncertain_installer, "problems": problems}
 
 
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--reproduce-only", action="store_true", required=True)
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument("--reproduce-only", action="store_true")
+    mode.add_argument("--verify-classifier", action="store_true", help="real fixed CLI acceptance; does not install a candidate")
+    mode.add_argument("--verify-candidate", action="store_true", help="upgrade with a genuine release-builder outer installer")
+    parser.add_argument("--platform", choices=tuple(PLATFORMS), default="win32-x64")
     parser.add_argument("--previous-installer", type=Path, required=True)
     parser.add_argument("--previous-installer-sha256", required=True)
     parser.add_argument("--published-installer", type=Path, required=True)
     parser.add_argument("--published-installer-sha256", required=True)
     parser.add_argument("--published-cli", type=Path, required=True)
+    parser.add_argument("--candidate-cli", type=Path)
+    parser.add_argument("--candidate-version")
+    parser.add_argument("--candidate-source-sha")
+    parser.add_argument("--candidate-installer", type=Path)
+    parser.add_argument("--candidate-installer-sha256")
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args(argv)
-    if args.previous_installer_sha256 != UPSTREAM_SHA256:
-        parser.error("the upstream v0.5.0 x64 standard fixture must use its code-owned published digest")
-    for name in ("previous_installer", "published_installer", "published_cli", "report"):
-        setattr(args, name, getattr(args, name).absolute())
+    if args.previous_installer_sha256 != UPSTREAM_SHA256[args.platform]:
+        parser.error("the upstream v0.5.0 standard fixture must use its code-owned platform digest")
+    if not args.reproduce_only and (not args.candidate_cli or not args.candidate_version
+            or not re.fullmatch(r"[0-9a-f]{40}", args.candidate_source_sha or "")):
+        parser.error("candidate verification requires the real CLI, version and exact source SHA")
+    if args.verify_candidate and (not args.candidate_installer
+            or not re.fullmatch(r"[0-9a-f]{64}", args.candidate_installer_sha256 or "")):
+        parser.error("complete upgrade verification requires the genuine outer installer and its SHA256")
+    if not args.verify_candidate and (args.candidate_installer or args.candidate_installer_sha256):
+        parser.error("candidate installer inputs apply only to --verify-candidate")
+    for name in ("previous_installer", "published_installer", "published_cli", "candidate_cli", "candidate_installer", "report"):
+        if getattr(args, name) is not None:
+            setattr(args, name, getattr(args, name).absolute())
     return args
 
 
