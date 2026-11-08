@@ -108,6 +108,23 @@ WebCodex 可以在已注册的项目范围内读取和修改文件、执行命�
 协调升级，或先通过原有运行环境控制停止相应服务，再运行标准安装包。完整安装包及
 标准安装包的升级路径只检查选定的文件，不会按进程名停止其他安装实例。
 
+**Windows 安装检查报错。**v0.5.4 起，完整安装包会显示具体的诊断代码。
+同一目录的普通 Windows 路径和系统保存的扩展路径会按实际目标核对，无需手工
+修改运行环境里的路径。请使用原安装的 Windows 账户；如果原安装使用了管理员
+权限，也应在同一账户下使用相同的权限级别升级。
+
+| 诊断代码 | 处理方式 |
+|---|---|
+| `setup_busy` | 等待正在进行的运行环境操作完成，再重试。 |
+| `installer_owner` | 核对原安装目录、Windows 账户和原安装的权限级别。 |
+| `installer_registration` | 恢复原安装登记信息，并继续使用原目录。 |
+| `installer_program_acl` | 先恢复原程序的访问权限；安装器无法确认这些权限时会停止。 |
+| `package_identity` / `legacy_installation_incomplete` | 检查并恢复原 Runtime 安装，保留已有运行环境和数据。 |
+| `upgrade_pending` / `upgrade_receipt_owner` | 使用原账户和运行环境目录处理已有升级或恢复记录。 |
+
+这些安装身份检查在替换程序前进行。反馈问题时，请提供安装包文件名和诊断代码；
+代码能区分身份或权限问题与真正的文件占用。
+
 macOS 签名明确分为三种模式：`self-signed` 是当前 public release 和长期 dogfood 的持久 fallback；Apple 凭据可用时可显式选择 `developer-id`，使用 Developer ID Application 并完成 notarization/stapling；`adhoc` 仅用于一次性 CI/本地验证，不承诺 TCC 升级连续性。必须跨 build/upgrade 长期保留**同一张 self-signed certificate 及其 private key**；同名重建证书也会改变身份。Desktop（`dev.webcodex.desktop`）和 bundled Runner（`dev.webcodex.runner`）都使用不含 binary cdhash 的证书锚定 designated requirement，并在 Tauri nested signing 后验证最终 app/DMG。历史 ad-hoc 授权不会因此自动迁移，首次改用持久身份时可能需要重新授权。Self-signed 不等同于 Apple notarization；如 Gatekeeper 要求，请使用**系统设置 → 隐私与安全 → 仍要打开**，不要全局关闭 Gatekeeper。
 
 安装完成后启动 WebCodex Desktop。

@@ -16,11 +16,14 @@ use webcodex_core::desktop_runtime_contract::{MachineBuildInfo, DESKTOP_RUNTIME_
 mod candidate_relocation_tests;
 #[cfg(unix)]
 mod desktop_tree;
+pub(crate) mod installed_paths;
 mod journal_codec;
 mod observation;
 #[cfg(all(test, target_os = "linux"))]
 mod runtime_package_tests;
 mod status;
+#[cfg(windows)]
+mod windows_installation;
 pub mod windows_package;
 #[cfg(windows)]
 mod windows_recovery;
@@ -94,6 +97,34 @@ struct ProgramBackup {
     backup: PathBuf,
     sha256: String,
     name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_security: Option<WindowsProgramSecurity>,
+}
+/// Original program security, distinct from the private backup's permissions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct WindowsProgramSecurity {
+    owner_identity: String,
+    descriptor: String,
+    dacl_protected: bool,
+}
+/// Admission of the current user's registered, group-owned NSIS installation.
+/// Only a sealed transaction may retain this authority if registration vanishes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct WindowsInstallationBinding {
+    owner_identity: String,
+    program_owner_identity: String,
+    install_root: PathBuf,
+}
+fn program_security_matches(path: &Path, security: Option<&WindowsProgramSecurity>) -> bool {
+    #[cfg(windows)]
+    return security.is_none_or(|security| windows_installation::security_matches(path, security));
+    #[cfg(not(windows))]
+    {
+        let _ = (path, security);
+        true
+    }
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(remote = "UpgradeJournal")]
@@ -121,6 +152,8 @@ struct UpgradeJournal {
     replacement_started: bool,
     #[serde(default)]
     snapshot_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_installation: Option<WindowsInstallationBinding>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub(crate) struct DesktopBackup {
@@ -129,6 +162,8 @@ pub(crate) struct DesktopBackup {
     pub(crate) sha256: String,
     #[serde(default)]
     pub(crate) directory_modes_sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    windows_security: Option<WindowsProgramSecurity>,
 }
 fn managed_desktop_target(binaries: &RuntimeBinaries) -> Option<PathBuf> {
     // Only package-managed program payloads are part of the Core rollback.
@@ -196,6 +231,7 @@ fn desktop_directory_modes_hash(path: &Path) -> SetupResultValue<String> {
 fn snapshot_desktop(
     binaries: &RuntimeBinaries,
     backup_root: &Path,
+    windows_security: Option<WindowsProgramSecurity>,
 ) -> SetupResultValue<Option<DesktopBackup>> {
     let Some(target) = managed_desktop_target(binaries) else {
         return Ok(None);
@@ -212,14 +248,10 @@ fn snapshot_desktop(
         }
     }
     #[cfg(windows)]
-    if crate::storage::windows_path_owner(&target)?
-        != crate::storage::windows_path_owner(&binaries.cli)?
-    {
-        return Err(error(
-            "upgrade_desktop_owner",
-            "The managed Desktop executable belongs to another owner",
-        ));
-    }
+    windows_installation::verify_security(
+        &target,
+        windows_security.as_ref().ok_or_else(SetupDiagnostic::io)?,
+    )?;
     let backup = backup_root.join(if cfg!(target_os = "macos") {
         "desktop.app"
     } else {
@@ -231,6 +263,7 @@ fn snapshot_desktop(
     {
         let mut remaining = SNAPSHOT_LIMIT;
         copy_bounded(&target, &backup, &mut remaining)?;
+        crate::storage::secure_windows_path(&backup)?;
     }
     let sha256 = desktop_installed_hash(&backup)?;
     let directory_modes_sha256 = desktop_directory_modes_hash(&backup)?;
@@ -242,11 +275,17 @@ fn snapshot_desktop(
             "The Desktop installation changed during its recovery snapshot",
         ));
     }
+    #[cfg(windows)]
+    windows_installation::verify_security(
+        &target,
+        windows_security.as_ref().ok_or_else(SetupDiagnostic::io)?,
+    )?;
     Ok(Some(DesktopBackup {
         target,
         backup,
         sha256,
         directory_modes_sha256,
+        windows_security,
     }))
 }
 /// Non-secret, owner-bound handoff to an elevated package installer. The
@@ -294,6 +333,8 @@ fn write_prepared_receipt(
     store: &EnvironmentStore,
     journal: &UpgradeJournal,
 ) -> SetupResultValue<()> {
+    #[cfg(windows)]
+    windows_installation::verify_original_security(journal)?;
     store.write_json(PREPARED_RECEIPT, &prepared_receipt(store.root(), journal))
 }
 
@@ -421,6 +462,9 @@ pub(crate) async fn verify_prepared_installation_for(
         ));
     }
     let root = receipt_path.parent().ok_or_else(SetupDiagnostic::io)?;
+    #[cfg(windows)]
+    installed_paths::existing_directory(root)?;
+    #[cfg(not(windows))]
     if root.canonicalize().map_err(|_| SetupDiagnostic::io())? != root {
         return Err(error(
             "upgrade_receipt",
@@ -435,7 +479,7 @@ pub(crate) async fn verify_prepared_installation_for(
         )
     })?;
     if receipt.schema_version != receipt.package_flavor.source_schema()
-        || receipt.environment_dir != root
+        || !installed_paths::same_location(&receipt.environment_dir, root)?
         || receipt.operation_id.is_empty()
         || receipt.environment_id.is_empty()
     {
@@ -467,13 +511,22 @@ pub(crate) async fn verify_prepared_installation_for(
     }
     if journal.phase != Phase::SnapshotReady
         || !journal.candidate.provenance_verified
-        || receipt != prepared_receipt(root, &journal)
+        || receipt != prepared_receipt(&receipt.environment_dir, &journal)
     {
         return Err(error(
             "upgrade_receipt",
             "The upgrade is not prepared for this owner and candidate",
         ));
     }
+    #[cfg(windows)]
+    windows_installation::verify_journal(
+        &EnvironmentStore::existing(root.into())?,
+        &journal,
+        windows_installation::Purpose::Sealed,
+        false,
+    )?;
+    #[cfg(windows)]
+    windows_installation::verify_original_security(&journal)?;
     let candidate = verify_upgrade_candidate(candidate_dir)?;
     if candidate.manifest_sha256 != receipt.manifest_sha256 {
         return Err(error(
@@ -1310,6 +1363,19 @@ pub async fn verify_same_installed_package(
     let candidate = verify_upgrade_candidate(candidate_dir)?;
     verify_published_provenance(&candidate).await?;
     verify_candidate_executable_headers(&candidate)?;
+    verify_same_installed_package_contents(&candidate, expected_runtime_dir, expected_target)
+}
+
+fn verify_same_installed_package_contents(
+    candidate: &UpgradeCandidate,
+    expected_runtime_dir: &Path,
+    expected_target: Option<InstallerTarget>,
+) -> SetupResultValue<()> {
+    #[cfg(windows)]
+    let canonical_runtime = installed_paths::existing_directory(expected_runtime_dir)?;
+    #[cfg(windows)]
+    let expected_runtime_dir = canonical_runtime.as_path();
+    #[cfg(not(windows))]
     if !expected_runtime_dir.is_absolute()
         || expected_runtime_dir
             .canonicalize()
@@ -1336,11 +1402,7 @@ pub async fn verify_same_installed_package(
         ));
     }
     #[cfg(windows)]
-    if expected_runtime_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        != Some("webcodex-runtime")
-    {
+    if !installed_paths::runtime_directory_name(expected_runtime_dir) {
         return Err(error(
             "installer_targets",
             "The Windows package runtime target differs",
@@ -1546,6 +1608,14 @@ impl NativeEnvironment {
             &record.request.binaries,
             PackageInspection::Installed,
         )?;
+        #[cfg(windows)]
+        windows_installation::verify_record(
+            store,
+            &record,
+            None,
+            windows_installation::Purpose::Admission,
+            false,
+        )?;
         let mut diagnostics = Vec::new();
         for spec in configured_specs(store, &record)? {
             let status = ServiceManager::inspect(&spec).map_err(crate::native::service_error)?;
@@ -1686,6 +1756,13 @@ impl NativeEnvironment {
         let mut journal = if let Some(previous) = previous
             .filter(|journal| !matches!(journal.phase, Phase::Committed | Phase::RolledBack))
         {
+            #[cfg(windows)]
+            windows_installation::verify_journal(
+                store,
+                &previous,
+                windows_installation::Purpose::Sealed,
+                false,
+            )?;
             if previous.candidate.manifest_sha256 != candidate.manifest_sha256 {
                 return Err(error(
                     "upgrade_pending",
@@ -1725,6 +1802,14 @@ impl NativeEnvironment {
             let Some(record) = store.load_environment()? else {
                 return Ok(checked);
             };
+            #[cfg(windows)]
+            let mut program_authority = windows_installation::verify_record(
+                store,
+                &record,
+                None,
+                windows_installation::Purpose::Admission,
+                false,
+            )?;
             let operation_id = uuid::Uuid::new_v4().to_string();
             let backup = store.root().join("upgrade-backups").join(&operation_id);
             ensure_private_directory(&backup)?;
@@ -1735,9 +1820,20 @@ impl NativeEnvironment {
                 ("webcodex-server", &record.request.binaries.server),
                 ("webcodex-runner", &record.request.binaries.runner),
             ] {
+                #[cfg(windows)]
+                let windows_security = Some(program_authority.snapshot(target)?);
+                #[cfg(not(windows))]
+                let windows_security = None;
                 let target = target.canonicalize().map_err(|_| SetupDiagnostic::io())?;
                 let copy = backup.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
                 copy_bounded(&target, &copy, &mut bytes_left)?;
+                #[cfg(windows)]
+                crate::storage::secure_windows_path(&copy)?;
+                #[cfg(windows)]
+                windows_installation::verify_security(
+                    &target,
+                    windows_security.as_ref().ok_or_else(SetupDiagnostic::io)?,
+                )?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -1749,10 +1845,17 @@ impl NativeEnvironment {
                     target,
                     backup: copy,
                     name: name.into(),
+                    windows_security,
                 });
             }
             let desktop = if candidate.package_flavor.is_full() {
-                snapshot_desktop(&record.request.binaries, &backup)?
+                #[cfg(windows)]
+                let windows_security = managed_desktop_target(&record.request.binaries)
+                    .map(|path| program_authority.snapshot(&path))
+                    .transpose()?;
+                #[cfg(not(windows))]
+                let windows_security = None;
+                snapshot_desktop(&record.request.binaries, &backup, windows_security)?
             } else {
                 None
             };
@@ -1815,6 +1918,10 @@ impl NativeEnvironment {
                 rollback_from: None,
                 replacement_started: false,
                 snapshot_digest: None,
+                #[cfg(windows)]
+                windows_installation: program_authority.binding(),
+                #[cfg(not(windows))]
+                windows_installation: None,
             };
             save(store, &journal)?;
             journal
@@ -2044,6 +2151,13 @@ impl NativeEnvironment {
         store: &EnvironmentStore,
         journal: &mut UpgradeJournal,
     ) -> SetupResultValue<()> {
+        #[cfg(windows)]
+        windows_installation::verify_journal(
+            store,
+            journal,
+            windows_installation::Purpose::Sealed,
+            false,
+        )?;
         journal.phase = Phase::Verifying;
         save(store, journal)?;
         for backup in &journal.programs {
@@ -2162,15 +2276,22 @@ impl NativeEnvironment {
                 || receipt
                     .as_ref()
                     .is_some_and(|receipt| receipt.operation_id == journal.operation_id)
-                || journal
-                    .programs
-                    .iter()
-                    .any(|backup| digest(&backup.target).ok().as_deref() != Some(&backup.sha256))
+                || journal.programs.iter().any(|backup| {
+                    digest(&backup.target).ok().as_deref() != Some(&backup.sha256)
+                        || !program_security_matches(
+                            &backup.target,
+                            backup.windows_security.as_ref(),
+                        )
+                })
                 || journal.desktop.as_ref().is_some_and(|backup| {
                     desktop_installed_hash(&backup.target).ok().as_deref() != Some(&backup.sha256)
                         || (!backup.directory_modes_sha256.is_empty()
                             && desktop_directory_modes_hash(&backup.target).ok().as_deref()
                                 != Some(&backup.directory_modes_sha256))
+                        || !program_security_matches(
+                            &backup.target,
+                            backup.windows_security.as_ref(),
+                        )
                 })
             {
                 return Err(status::manual_recovery());
@@ -2187,6 +2308,13 @@ impl NativeEnvironment {
         }
         #[cfg(windows)]
         windows_recovery::ensure_external_restore_process(&journal)?;
+        #[cfg(windows)]
+        windows_installation::verify_journal(
+            store,
+            &journal,
+            windows_installation::Purpose::Recovery,
+            true,
+        )?;
         let from = journal.rollback_from.unwrap_or(journal.phase);
         journal.rollback_from = Some(from);
         journal.phase = Phase::Restoring;
@@ -2194,10 +2322,12 @@ impl NativeEnvironment {
         let may_have_replaced = matches!(
             from,
             Phase::SnapshotReady | Phase::Verifying | Phase::RecoveryRequired
-        ) || journal
-            .programs
-            .iter()
-            .any(|backup| digest(&backup.target).ok().as_deref() != Some(&backup.sha256));
+        ) || journal.programs.iter().any(|backup| {
+            digest(&backup.target).ok().as_deref() != Some(&backup.sha256)
+                || !program_security_matches(&backup.target, backup.windows_security.as_ref())
+        }) || journal.desktop.as_ref().is_some_and(|backup| {
+            !program_security_matches(&backup.target, backup.windows_security.as_ref())
+        });
         if may_have_replaced {
             for component in [Component::Tunnel, Component::Runner, Component::Server] {
                 for spec in journal
@@ -2578,6 +2708,13 @@ pub(crate) fn restore_programs_from_journal(
     windows_recovery::ensure_external_restore_process(&journal)?;
     checked_owner(root, &journal.record.request.account.identity)?;
     checked_owner(&path, &journal.record.request.account.identity)?;
+    #[cfg(windows)]
+    windows_installation::verify_journal(
+        &EnvironmentStore::existing(root.into())?,
+        &journal,
+        windows_installation::Purpose::Recovery,
+        true,
+    )?;
     // Restore the launcher last so a self-replacement failure cannot prevent
     // Server and Runner restoration on platforms that lock running images.
     let expected = [
@@ -2603,15 +2740,15 @@ pub(crate) fn restore_programs_from_journal(
     }
     let backup_dir = root.join("upgrade-backups").join(operation_id);
     checked_owner(&backup_dir, &journal.record.request.account.identity)?;
-    let needs_write = journal
-        .programs
-        .iter()
-        .any(|item| digest(&item.target).ok().as_deref() != Some(&item.sha256))
-        || journal.desktop.as_ref().is_some_and(|item| {
-            desktop_installed_hash(&item.target).ok().as_deref() != Some(&item.sha256)
-                || desktop_directory_modes_hash(&item.target).ok().as_deref()
-                    != Some(&item.directory_modes_sha256)
-        });
+    let needs_write = journal.programs.iter().any(|item| {
+        digest(&item.target).ok().as_deref() != Some(&item.sha256)
+            || !program_security_matches(&item.target, item.windows_security.as_ref())
+    }) || journal.desktop.as_ref().is_some_and(|item| {
+        desktop_installed_hash(&item.target).ok().as_deref() != Some(&item.sha256)
+            || desktop_directory_modes_hash(&item.target).ok().as_deref()
+                != Some(&item.directory_modes_sha256)
+            || !program_security_matches(&item.target, item.windows_security.as_ref())
+    });
     if !needs_write {
         return Ok(());
     }
@@ -2662,7 +2799,9 @@ pub(crate) fn restore_programs_from_journal(
                 "The retained program backup was modified",
             ));
         }
-        if digest(&item.target).ok().as_deref() != Some(&item.sha256) {
+        if digest(&item.target).ok().as_deref() != Some(&item.sha256)
+            || !program_security_matches(&item.target, item.windows_security.as_ref())
+        {
             restore_program(item)?;
         }
     }
@@ -2695,8 +2834,13 @@ pub(crate) fn restore_programs_from_journal(
 }
 
 fn authorize_restore_destinations(root: &Path, journal: &UpgradeJournal) -> SetupResultValue<()> {
-    #[cfg(not(unix))]
-    let _ = root;
+    #[cfg(windows)]
+    let mut authority = windows_installation::verify_journal(
+        &EnvironmentStore::existing(root.into())?,
+        journal,
+        windows_installation::Purpose::Recovery,
+        true,
+    )?;
     #[cfg(unix)]
     {
         let system = crate::installer_authorization::system_directory()?;
@@ -2750,7 +2894,7 @@ fn authorize_restore_destinations(root: &Path, journal: &UpgradeJournal) -> Setu
             }
         }
         #[cfg(windows)]
-        windows_recovery::authorize_destination(target, &journal.record.request.account.identity)?;
+        windows_recovery::authorize_destination(target, &mut authority)?;
     }
     Ok(())
 }
@@ -2782,7 +2926,9 @@ fn restore_desktop(
             ));
         }
         #[cfg(windows)]
-        if crate::storage::windows_path_owner(&backup.target)? != owner {
+        if backup.windows_security.is_none()
+            && crate::storage::windows_path_owner(&backup.target)? != owner
+        {
             return Err(error(
                 "upgrade_restore_authorization",
                 "The Desktop target belongs to another account",
@@ -2793,6 +2939,7 @@ fn restore_desktop(
     if desktop_installed_hash(&backup.target).ok().as_deref() == Some(&backup.sha256)
         && desktop_directory_modes_hash(&backup.target).ok().as_deref()
             == Some(&backup.directory_modes_sha256)
+        && program_security_matches(&backup.target, backup.windows_security.as_ref())
     {
         return Ok(());
     }
@@ -2803,6 +2950,7 @@ fn restore_desktop(
             backup: backup.backup.clone(),
             sha256: backup.sha256.clone(),
             name: "webcodex-desktop".into(),
+            windows_security: backup.windows_security.clone(),
         });
     }
     #[cfg(unix)]
@@ -2860,9 +3008,14 @@ fn restore_program(backup: &ProgramBackup) -> SetupResultValue<()> {
     }
     #[cfg(windows)]
     {
-        // Only the newly created UUID copy is normalized. This also preserves
-        // the original user's file ownership when their token is elevated.
-        crate::storage::secure_windows_path(&temporary)?;
+        // Only this new UUID copy receives security. A new transaction retains
+        // the original program's owner, DACL and inheritance protection; old
+        // journals keep their original user-only restoration contract.
+        if let Some(snapshot) = &backup.windows_security {
+            windows_installation::restore_security(&temporary, snapshot)?;
+        } else {
+            crate::storage::secure_windows_path(&temporary)?;
+        }
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::{
             MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -3301,6 +3454,7 @@ mod tests {
             rollback_from: None,
             replacement_started: false,
             snapshot_digest: None,
+            windows_installation: None,
         }
     }
 
@@ -3371,6 +3525,7 @@ mod tests {
             backup: root.join("backup-webcodex"),
             sha256: "c".repeat(64),
             name: "webcodex".into(),
+            windows_security: None,
         });
         let receipt = prepared_receipt(root, &journal);
         assert_eq!(receipt.environment_id, journal.record.environment_id);
@@ -3474,6 +3629,7 @@ mod tests {
                 backup,
                 sha256: sha256.clone(),
                 directory_modes_sha256,
+                windows_security: None,
             },
             "fixture",
             "1000",
@@ -3515,6 +3671,7 @@ mod tests {
                 backup,
                 sha256: sha256.clone(),
                 directory_modes_sha256: desktop_directory_modes_hash(&target).unwrap(),
+                windows_security: None,
             },
             "file-fixture",
             "1000",

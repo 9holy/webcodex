@@ -61,6 +61,10 @@ class Coordinator {
         File.AppendAllText(log, (old ? "old:" : "candidate:") + action + "\n");
         if (old) return 71; // Published upstream rejects the fork's candidate.
         if (action == "installer-classify") {
+            string failure = Environment.GetEnvironmentVariable("WEBCODEX_NSIS_FIXTURE_CLASSIFY_ERROR");
+            if (!String.IsNullOrEmpty(failure)) {
+                Console.Error.WriteLine(failure); return 79;
+            }
             Console.WriteLine("{\"kind\":\"environment\"}"); return 0;
         }
         if (action == "installer-verify-same") return 1;
@@ -136,7 +140,7 @@ class Coordinator {
             if line.strip() == "SetErrorLevel 1":
                 traced.extend([
                     '  FileOpen $R9 "$EXEDIR\\fixture-failure.txt" a',
-                    f'  FileWriteUTF16LE $R9 "nsis_line={number} instdir=[$INSTDIR] registered=[$WebCodexRegisteredDir] api_result=[$0]$\\r$\\n"',
+                    f'  FileWriteUTF16LE $R9 "nsis_line={number} instdir=[$INSTDIR] registered=[$WebCodexRegisteredDir] api_result=[$0] classify_code=[$WebCodexClassificationCode]$\\r$\\n"',
                     '  FileClose $R9',
                 ])
             traced.append(line)
@@ -233,6 +237,28 @@ class Coordinator {
             "candidate:installer-verify", "candidate:upgrade-finish",
         ])
         self.assertEqual((self.old_cli.parent.parent / "candidate-installed.txt").read_text(), "candidate")
+
+    def test_classification_failure_keeps_bounded_diagnostic_and_stops_before_replacement(self):
+        self.env["WEBCODEX_NSIS_FIXTURE_CLASSIFY_ERROR"] = "installer_owner: private-fixture-value"
+        self.compile(self.source, "outer")
+        destination = self.root / "existing"
+        self.assertNotEqual(self.run_installer(self.outer, destination).returncode, 0)
+        self.assertEqual(self.log.read_text().splitlines(), ["candidate:installer-classify"])
+        self.assertFalse((destination / "candidate-installed.txt").exists())
+        diagnostic = (self.root / "fixture-failure.txt").read_text(encoding="utf-16le")
+        self.assertIn("classify_code=[installer_owner]", diagnostic)
+        self.assertNotIn("private-fixture-value", diagnostic)
+
+    def test_unknown_classification_failure_uses_fixed_generic_code(self):
+        self.env["WEBCODEX_NSIS_FIXTURE_CLASSIFY_ERROR"] = "unrecognized-private-value: installer_owner:"
+        self.compile(self.source, "outer")
+        destination = self.root / "existing"
+        self.assertNotEqual(self.run_installer(self.outer, destination).returncode, 0)
+        self.assertEqual(self.log.read_text().splitlines(), ["candidate:installer-classify"])
+        self.assertFalse((destination / "candidate-installed.txt").exists())
+        diagnostic = (self.root / "fixture-failure.txt").read_text(encoding="utf-16le")
+        self.assertIn("classify_code=[installer_classify_failed]", diagnostic)
+        self.assertNotIn("unrecognized-private-value", diagnostic)
 
     def test_old_publisher_handoff_reproduces_upgrade_rejection(self):
         self.old_cli.parent.mkdir(parents=True)

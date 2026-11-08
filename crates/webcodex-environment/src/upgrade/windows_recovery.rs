@@ -61,21 +61,24 @@ pub(super) fn ensure_external_restore_process(journal: &UpgradeJournal) -> Setup
     let targets = journal
         .programs
         .iter()
-        .map(|item| (&item.target, &item.sha256))
+        .map(|item| (&item.target, &item.sha256, item.windows_security.as_ref()))
         .chain(
             journal
                 .desktop
                 .iter()
-                .map(|item| (&item.target, &item.sha256)),
+                .map(|item| (&item.target, &item.sha256, item.windows_security.as_ref())),
         );
-    for (target, previous_hash) in targets {
+    for (target, previous_hash, security) in targets {
         match std::fs::symlink_metadata(target) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(_) => return Err(SetupDiagnostic::io()),
             Ok(_) => {}
         }
         let (mut file, identity) = open_image(target)?;
-        if identity == current_id && image_hash(&mut file)? != *previous_hash {
+        if identity == current_id
+            && (image_hash(&mut file)? != *previous_hash
+                || !program_security_matches(target, security))
+        {
             return Err(SetupDiagnostic::new(
                 "upgrade_external_recovery_required",
                 "Rollback cannot replace the executable that is running this recovery",
@@ -86,31 +89,11 @@ pub(super) fn ensure_external_restore_process(journal: &UpgradeJournal) -> Setup
     Ok(())
 }
 
-pub(super) fn authorize_destination(target: &Path, owner: &str) -> SetupResultValue<()> {
-    let parent = target.parent().ok_or_else(SetupDiagnostic::io)?;
-    verify_installed_target_path(parent)?;
-    if crate::storage::windows_path_owner(parent)? != owner {
-        return Err(error(
-            "upgrade_restore_authorization",
-            "The restore directory has a different owner",
-        ));
-    }
-    match std::fs::symlink_metadata(target) {
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(SetupDiagnostic::io()),
-        Ok(metadata) => {
-            if !metadata.is_file()
-                || crate::storage::is_link(&metadata)
-                || crate::storage::windows_path_owner(target)? != owner
-            {
-                return Err(error(
-                    "upgrade_restore_authorization",
-                    "A restore destination is not owned by the original user",
-                ));
-            }
-            Ok(())
-        }
-    }
+pub(super) fn authorize_destination(
+    target: &Path,
+    authority: &mut windows_installation::ProgramAuthority,
+) -> SetupResultValue<()> {
+    authority.destination(target)
 }
 
 pub(crate) struct ServiceHelper {
