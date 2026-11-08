@@ -419,6 +419,7 @@ pub fn generated_runner_config_toml(opts: &RunnerInitOptions) -> Result<String, 
             // Credential setup is implemented and advertised by the running
             // Runner binary, never inferred from a generated configuration.
             ssh_connection_setup: false,
+            ssh_verification_history: false,
             // First-class config control is implemented by the running binary
             // against its startup-bound path and must never be inferred from a
             // generated static runner.toml capability block.

@@ -188,6 +188,7 @@ struct ResolvedRunner {
     client_id: String,
     runner_instance_id: String,
     connection_setup: bool,
+    verification_history: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -488,6 +489,16 @@ async fn list_resolved(
     else {
         return response_to_error(response);
     };
+    Ok(list_projection(runtime, runner, auth, revision, resources))
+}
+
+fn list_projection(
+    runtime: &ToolRuntime,
+    runner: &ResolvedRunner,
+    auth: Option<&AuthContext>,
+    revision: u64,
+    resources: Vec<webcodex_core::ssh_resource::SshResourceInventoryEntry>,
+) -> Value {
     let caller = CallerIdentity::from_auth(auth.expect("authorized checked above"));
     let binding = runtime.ssh_resource_gateway.remember(Binding {
         caller,
@@ -495,11 +506,11 @@ async fn list_resolved(
         runner_instance_id: runner.runner_instance_id.clone(),
         revision,
     });
-    Ok(json!({
+    json!({
         "runner": runner.client_id,
         "binding": binding,
         "resources": resources
-    }))
+    })
 }
 
 async fn register(
@@ -686,6 +697,7 @@ async fn resolve_runner(
             client_id: runner.client_id,
             runner_instance_id: runner.runner_instance_id,
             connection_setup: runner.capabilities.ssh_connection_setup,
+            verification_history: runner.capabilities.ssh_verification_history,
         })
         .ok_or_else(|| {
             GatewayError::new(
@@ -701,7 +713,9 @@ async fn execute_exact(
     request: SshResourceRequest,
     auth: Option<&AuthContext>,
 ) -> Result<SshResourceResponse, GatewayError> {
-    if request.requires_connection_setup() && !runner.connection_setup {
+    if (request.requires_connection_setup() && !runner.connection_setup)
+        || (request.requires_verification_history() && !runner.verification_history)
+    {
         return Err(GatewayError::new(
             "ssh_connection_setup_unsupported",
             "Upgrade this Runner to configure SSH connection authentication",

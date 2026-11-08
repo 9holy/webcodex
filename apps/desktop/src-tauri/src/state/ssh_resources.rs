@@ -166,6 +166,18 @@ impl AppState {
         .await
     }
 
+    pub async fn ssh_resource_verify_saved(
+        &self,
+        request: SshRemoveRequest,
+    ) -> DesktopResult<SshMutationResult> {
+        self.mutate_ssh_resource(
+            request.expected,
+            request.observation_id,
+            Mutation::VerifySaved { name: request.name },
+        )
+        .await
+    }
+
     async fn mutate_ssh_resource(
         &self,
         expected: crate::webcodex::settings::SettingsTarget,

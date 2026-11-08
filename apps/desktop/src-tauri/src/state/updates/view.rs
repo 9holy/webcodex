@@ -246,19 +246,69 @@ fn standalone_tunnel_service(profile: &webcodex_environment::TunnelRecord) -> bo
     profile.installed && profile.host_mode == webcodex_environment::TunnelHostMode::Standalone
 }
 
+fn desktop_component(
+    binary: &'static str,
+    local_role: bool,
+    process: Option<&crate::process::ProcessSnapshot>,
+) -> RunningComponent {
+    let mut component = unknown(binary, if local_role { "unknown" } else { "not_local" });
+    if !local_role {
+        component.service_state = "not_local";
+    } else if let Some(process) = process.filter(|process| {
+        process.owned_by_desktop
+            && (process.pid.is_some()
+                || matches!(process.phase, ProcessPhase::Exited | ProcessPhase::Failed))
+    }) {
+        component.service_state = "desktop_managed";
+        component.state = match process.phase {
+            ProcessPhase::Starting => "starting",
+            ProcessPhase::Running => "running",
+            ProcessPhase::Stopping => "stopping",
+            ProcessPhase::Exited => "stopped",
+            ProcessPhase::Failed => "failed",
+        };
+    }
+    component
+}
+
+fn owned_running(process: Option<&crate::process::ProcessSnapshot>) -> bool {
+    process.is_some_and(|process| {
+        process.owned_by_desktop && process.pid.is_some() && process.phase == ProcessPhase::Running
+    })
+}
+
 impl AppState {
     pub async fn local_update_status(
         &self,
         inspect_files: bool,
     ) -> DesktopResult<LocalUpdateStatus> {
-        let (config, bundled) = {
+        let (config, bundled, desktop_processes) = {
             let slot = self.core.lock().await;
             let core = slot.as_ref().ok_or_else(action_error)?;
+            // Legacy/Desktop-managed Runtime has no persisted Environment
+            // service record. Its own supervisor is the process authority;
+            // absence of a service record must not hide these local processes.
+            let desktop_processes = if core.config.persistent_environment.is_none()
+                && core.configuration_issue.is_none()
+                && core
+                    .config
+                    .topology
+                    .as_ref()
+                    .is_some_and(|topology| topology.experience == Experience::Full)
+            {
+                Some([
+                    core.process_snapshot(ProcessKey::LocalServer).await,
+                    core.process_snapshot(ProcessKey::LocalRunner).await,
+                ])
+            } else {
+                None
+            };
             (
                 core.config.clone(),
                 core.adapter
                     .bundled_runtime_dir()
                     .map(std::path::Path::to_path_buf),
+                desktop_processes,
             )
         };
         let record = local_record(&config);
@@ -311,7 +361,7 @@ impl AppState {
             state: "observed",
             service_state: "not_applicable",
         };
-        let mut observation_error = false;
+        let mut observation_error = config.persistent_environment.is_some() && record.is_none();
         let mut active_tasks = None;
         let mut services = Vec::new();
         let mut service_inventory_complete = false;
@@ -365,6 +415,54 @@ impl AppState {
                 }
             } else if !record.request.local_runner() {
                 running[2].state = "not_local";
+            }
+        }
+        if let (Some(processes), Some(topology), Some(runtime)) =
+            (&desktop_processes, &config.topology, &config.runtime)
+        {
+            let local_server = matches!(topology.server, ServerTopology::Local);
+            let local_runner = matches!(topology.runner, RunnerTopology::Local);
+            running[1] = desktop_component("webcodex-server", local_server, processes[0].as_ref());
+            running[2] = desktop_component("webcodex-runner", local_runner, processes[1].as_ref());
+            if local_server && loopback(&runtime.server_url) && owned_running(processes[0].as_ref())
+            {
+                match crate::workspace::query(
+                    runtime,
+                    crate::workspace::WorkspaceRequest::Overview {},
+                )
+                .await
+                {
+                    Ok(value) => {
+                        running[1] = observed("webcodex-server", &value);
+                        running[1].service_state = "desktop_managed";
+                    }
+                    Err(_) => observation_error = true,
+                }
+            }
+            if local_runner && owned_running(processes[1].as_ref()) {
+                if let Some(id) = stored_runner_client_id(&config) {
+                    let mut exact = runtime.clone();
+                    exact.runner_client_id = Some(id.clone());
+                    match crate::workspace::query(
+                        &exact,
+                        crate::workspace::WorkspaceRequest::RunnerDetails {},
+                    )
+                    .await
+                    {
+                        Ok(value)
+                            if value.get("client_id").and_then(Value::as_str)
+                                == Some(id.as_str())
+                                && value.get("connected").and_then(Value::as_bool)
+                                    == Some(true) =>
+                        {
+                            running[2] = observed("webcodex-runner", &value);
+                            running[2].service_state = "desktop_managed";
+                        }
+                        _ => observation_error = true,
+                    }
+                } else {
+                    observation_error = true;
+                }
             }
         }
         if let (Some(record), Some(root)) = (
@@ -524,9 +622,25 @@ impl AppState {
         if slot.as_ref().is_none_or(|core| {
             core.config.persistent_environment != config.persistent_environment
                 || core.config.runtime_selection_revision != config.runtime_selection_revision
+                || core.config.topology != config.topology
+                || core.config.runtime != config.runtime
                 || runner_identity_from_config(&core.config) != runner_identity_from_config(&config)
         }) {
             return Err(action_error());
+        }
+        if let Some(before) = desktop_processes {
+            let core = slot.as_ref().ok_or_else(action_error)?;
+            // A replacement/exit during the network read invalidates the build
+            // observation. Never attach an old response to a new child process.
+            if core.configuration_issue.is_some()
+                || before
+                    != [
+                        core.process_snapshot(ProcessKey::LocalServer).await,
+                        core.process_snapshot(ProcessKey::LocalRunner).await,
+                    ]
+            {
+                return Err(action_error());
+            }
         }
         // Core task observation fences its own record. This response must also
         // retain the original role/account/service inventory we observed above.

@@ -13,6 +13,10 @@ function setupError(value: unknown): RunnerCapabilitiesKey {
   if (typeof code !== "string") return "codexSetupFailed";
   if (code === "codex_python_unavailable") return "codexSetupPython";
   if (code === "codex_not_found") return "codexSetupMissing";
+  if (code === "codex_requires_native_executable") return "codexSetupLauncher";
+  if (code === "codex_npm_layout_invalid") return "codexSetupNpm";
+  if (code === "codex_node_not_found") return "codexSetupNode";
+  if (code === "codex_launcher_arguments_invalid") return "codexSetupArguments";
   if (["codex_schema_incompatible", "codex_version_mismatch"].includes(code)) return "codexSetupIncompatible";
   if (["coding_agent_state_changed", "runner_settings_changed"].includes(code)) return "codexSetupChanged";
   return "codexSetupFailed";

@@ -71,10 +71,150 @@ fn register(name: &str) -> Mutation {
     }
 }
 
+fn verified_status(error: Option<&str>) -> Result<Value, SshResourceError> {
+    Ok(
+        json!({"runner":"mini","binding":"wc_sbind_private-observation","resources":[resource("saved","managed")],
+        "setup_supported":true,"verification_supported":true,
+        "verifications":[{"name":"saved","verification":{"checked_at":1700000000,"error_kind":error}}]}),
+    )
+}
+
+#[tokio::test]
+async fn ssh_status_falls_back_only_for_explicit_old_server_unsupported() {
+    let gateway = MockGateway::new(vec![
+        (
+            "status",
+            Err(SshResourceError::SshConnectionSetupUnsupported),
+        ),
+        ("list", list(vec![resource("legacy", "managed")])),
+    ]);
+    let result = SshResourcesManager::default()
+        .list(&runtime(), &gateway)
+        .await;
+    assert!(result.available);
+    assert!(!result.verification_supported && result.verifications.is_empty());
+    assert_eq!(gateway.actions(), ["status", "list"]);
+    for error in [
+        SshResourceError::InsufficientScope,
+        SshResourceError::AuthorizationUnavailable,
+        SshResourceError::SshResourceRegistryUnavailable,
+        SshResourceError::RunnerReplaced,
+    ] {
+        let gateway = MockGateway::new(vec![("status", Err(error))]);
+        let result = SshResourcesManager::default()
+            .list(&runtime(), &gateway)
+            .await;
+        assert_eq!(result.error_kind, Some(error));
+        assert!(!result.available);
+        assert_eq!(gateway.actions(), ["status"]);
+    }
+}
+
+#[tokio::test]
+async fn ssh_saved_check_consumes_observation_reobserves_failure_and_never_replays() {
+    let gateway = MockGateway::new(vec![
+        ("status", verified_status(None)),
+        (
+            "verify_saved",
+            Ok(
+                json!({"resource":"saved","persisted":true,"verification":{"checked_at":1700000001,"error_kind":"ssh_authentication_failed"}}),
+            ),
+        ),
+        ("status", verified_status(Some("ssh_authentication_failed"))),
+        ("status", verified_status(Some("ssh_authentication_failed"))),
+    ]);
+    let mut manager = SshResourcesManager::default();
+    let first = manager.list(&runtime(), &gateway).await;
+    let old = first.observation_id.unwrap();
+    assert!(first.verifications[0]
+        .verification
+        .as_ref()
+        .unwrap()
+        .error_kind
+        .is_none());
+    let result = manager
+        .mutate(
+            &runtime(),
+            &old,
+            Mutation::VerifySaved {
+                name: "saved".into(),
+            },
+            &gateway,
+        )
+        .await;
+    assert_eq!(
+        result.error_kind,
+        Some(SshResourceError::SshAuthenticationFailed)
+    );
+    assert!(!result.success && !result.restart_required);
+    assert_eq!(
+        result.inventory.verifications[0]
+            .verification
+            .as_ref()
+            .unwrap()
+            .error_kind
+            .unwrap()
+            .code(),
+        "ssh_authentication_failed"
+    );
+    let replay = manager
+        .mutate(
+            &runtime(),
+            &old,
+            Mutation::VerifySaved {
+                name: "saved".into(),
+            },
+            &gateway,
+        )
+        .await;
+    assert_eq!(
+        replay.error_kind,
+        Some(SshResourceError::SshResourceRegistryStale)
+    );
+    assert_eq!(
+        gateway.actions(),
+        ["status", "verify_saved", "status", "status"]
+    );
+    assert_eq!(
+        gateway.calls.lock().unwrap()[1],
+        json!({"action":"verify_saved","binding":"wc_sbind_private-observation","name":"saved"})
+    );
+}
+
+#[tokio::test]
+async fn ssh_saved_check_retains_unknown_outcome_even_when_history_can_be_read() {
+    let gateway = MockGateway::new(vec![
+        ("status", verified_status(None)),
+        (
+            "verify_saved",
+            Err(SshResourceError::SshResourceOutcomeUnknown),
+        ),
+        ("status", verified_status(None)),
+    ]);
+    let mut manager = SshResourcesManager::default();
+    let first = manager.list(&runtime(), &gateway).await;
+    let result = manager
+        .mutate(
+            &runtime(),
+            first.observation_id.as_deref().unwrap(),
+            Mutation::VerifySaved {
+                name: "saved".into(),
+            },
+            &gateway,
+        )
+        .await;
+    assert!(!result.success && result.inventory.available);
+    assert_eq!(
+        result.error_kind,
+        Some(SshResourceError::SshResourceOutcomeUnknown)
+    );
+    assert_eq!(gateway.actions(), ["status", "verify_saved", "status"]);
+}
+
 #[tokio::test]
 async fn ssh_list_is_exact_and_public_inventory_has_no_binding_or_target() {
     let gateway = MockGateway::new(vec![(
-        "list",
+        "status",
         list(vec![
             resource("managed", "managed"),
             resource("static", "static"),
@@ -97,24 +237,24 @@ async fn ssh_list_is_exact_and_public_inventory_has_no_binding_or_target() {
     ] {
         assert!(!public.contains(forbidden));
     }
-    assert_eq!(gateway.actions(), ["list"]);
+    assert_eq!(gateway.actions(), ["status"]);
     assert_eq!(
         gateway.calls.lock().unwrap()[0],
-        json!({"action":"list","runner":"mini"})
+        json!({"action":"status","runner":"mini"})
     );
 }
 
 #[tokio::test]
 async fn ssh_register_remove_each_consume_observation_then_relist() {
     let gateway = MockGateway::new(vec![
-        ("list", list(vec![])),
+        ("status", list(vec![])),
         ("register", registered("test")),
-        ("list", list(vec![resource("test", "managed")])),
+        ("status", list(vec![resource("test", "managed")])),
         (
             "remove",
             Ok(json!({"resource":"test","persisted":true,"active":false,"restart_required":false})),
         ),
-        ("list", list(vec![])),
+        ("status", list(vec![])),
     ]);
     let mut manager = SshResourcesManager::default();
     let first = manager.list(&runtime(), &gateway).await;
@@ -144,7 +284,7 @@ async fn ssh_register_remove_each_consume_observation_then_relist() {
     assert!(removed.inventory.resources.is_empty());
     assert_eq!(
         gateway.actions(),
-        ["list", "register", "list", "remove", "list"]
+        ["status", "register", "status", "remove", "status"]
     );
     let calls = gateway.calls.lock().unwrap();
     assert_eq!(calls[1]["binding"], "wc_sbind_private-observation");
@@ -158,10 +298,10 @@ async fn ssh_register_remove_each_consume_observation_then_relist() {
 #[tokio::test]
 async fn ssh_second_mutation_cannot_reuse_previous_observation() {
     let gateway = MockGateway::new(vec![
-        ("list", list(vec![])),
+        ("status", list(vec![])),
         ("register", registered("test")),
-        ("list", list(vec![resource("test", "managed")])),
-        ("list", list(vec![resource("test", "managed")])),
+        ("status", list(vec![resource("test", "managed")])),
+        ("status", list(vec![resource("test", "managed")])),
     ]);
     let mut manager = SshResourcesManager::default();
     let first = manager.list(&runtime(), &gateway).await;
@@ -186,14 +326,17 @@ async fn ssh_second_mutation_cannot_reuse_previous_observation() {
         stale.error_kind,
         Some(SshResourceError::SshResourceRegistryStale)
     );
-    assert_eq!(gateway.actions(), ["list", "register", "list", "list"]);
+    assert_eq!(
+        gateway.actions(),
+        ["status", "register", "status", "status"]
+    );
 }
 
 #[tokio::test]
 async fn ssh_static_resource_is_read_only_even_before_server_dispatch() {
     let gateway = MockGateway::new(vec![
-        ("list", list(vec![resource("static", "static")])),
-        ("list", list(vec![resource("static", "static")])),
+        ("status", list(vec![resource("static", "static")])),
+        ("status", list(vec![resource("static", "static")])),
     ]);
     let mut manager = SshResourcesManager::default();
     let first = manager.list(&runtime(), &gateway).await;
@@ -211,7 +354,7 @@ async fn ssh_static_resource_is_read_only_even_before_server_dispatch() {
         result.error_kind,
         Some(SshResourceError::SshResourceStaticReadOnly)
     );
-    assert_eq!(gateway.actions(), ["list", "list"]);
+    assert_eq!(gateway.actions(), ["status", "status"]);
 }
 
 #[tokio::test]
@@ -225,9 +368,9 @@ async fn ssh_unknown_stale_replaced_and_conflict_never_retry_mutation() {
         SshResourceError::InsufficientScope,
     ] {
         let gateway = MockGateway::new(vec![
-            ("list", list(vec![])),
+            ("status", list(vec![])),
             ("register", Err(error)),
-            ("list", list(vec![])),
+            ("status", list(vec![])),
         ]);
         let mut manager = SshResourcesManager::default();
         let first = manager.list(&runtime(), &gateway).await;
@@ -243,13 +386,13 @@ async fn ssh_unknown_stale_replaced_and_conflict_never_retry_mutation() {
         assert_eq!(result.error_kind, Some(error));
         assert!(result.inventory.available);
         assert_ne!(first.observation_id, result.inventory.observation_id);
-        assert_eq!(gateway.actions(), ["list", "register", "list"]);
+        assert_eq!(gateway.actions(), ["status", "register", "status"]);
     }
 }
 
 #[tokio::test]
 async fn ssh_connection_or_credential_replacement_invalidates_observation() {
-    let gateway = MockGateway::new(vec![("list", list(vec![])), ("list", list(vec![]))]);
+    let gateway = MockGateway::new(vec![("status", list(vec![])), ("status", list(vec![]))]);
     let mut manager = SshResourcesManager::default();
     let first = manager.list(&runtime(), &gateway).await;
     let mut replaced = runtime();
@@ -263,7 +406,7 @@ async fn ssh_connection_or_credential_replacement_invalidates_observation() {
         )
         .await;
     assert_eq!(result.error_kind, Some(SshResourceError::RunnerReplaced));
-    assert_eq!(gateway.actions(), ["list", "list"]);
+    assert_eq!(gateway.actions(), ["status", "status"]);
 }
 
 #[tokio::test]
@@ -277,7 +420,7 @@ async fn ssh_missing_capability_offline_denied_and_invalid_inventory_are_not_emp
             json!({"runner":"mini", "binding":"wc_sbind_private", "resources":[{"name":"leak", "source":"managed","active":true,"pending_restart":false,"target":"private"}]}),
         ),
     ] {
-        let gateway = MockGateway::new(vec![("list", response)]);
+        let gateway = MockGateway::new(vec![("status", response)]);
         let mut manager = SshResourcesManager::default();
         let result = manager.list(&runtime(), &gateway).await;
         assert!(!result.available);
@@ -291,7 +434,7 @@ async fn ssh_missing_capability_offline_denied_and_invalid_inventory_are_not_emp
 #[tokio::test]
 async fn ssh_pending_restart_is_runner_state_not_local_form_history() {
     let gateway = MockGateway::new(vec![(
-        "list",
+        "status",
         list(vec![
             json!({"name":"pending","source":"managed","active":false,"pending_restart":true}),
         ]),
@@ -356,12 +499,12 @@ async fn ssh_http_transport_uses_operator_routes_and_native_token_only() {
         let mut calls = Vec::new();
         for (action, response) in [
             (
-                "list",
+                "status",
                 Some(json!({"success":true,"output":list(vec![]).unwrap()})),
             ),
             ("register", None),
             (
-                "list",
+                "status",
                 Some(
                     json!({"success":true,"output":list(vec![resource("test","managed")]).unwrap()}),
                 ),
@@ -436,7 +579,7 @@ async fn ssh_http_transport_uses_operator_routes_and_native_token_only() {
     );
     assert!(result.inventory.available);
     assert_eq!(result.inventory.resources[0].name, "test");
-    assert_eq!(server.await.unwrap(), ["list", "register", "list"]);
+    assert_eq!(server.await.unwrap(), ["status", "register", "status"]);
 }
 
 fn connection_endpoint() -> SshEndpoint {
@@ -472,7 +615,7 @@ fn inspection_output() -> Value {
 #[tokio::test]
 async fn ssh_inspect_probe_preserve_one_save_observation_and_public_outputs_have_no_credentials() {
     let gateway = MockGateway::new(vec![
-        ("list", list(vec![])),
+        ("status", list(vec![])),
         ("inspect", Ok(inspection_output())),
         (
             "probe",
@@ -487,7 +630,7 @@ async fn ssh_inspect_probe_preserve_one_save_observation_and_public_outputs_have
             ),
         ),
         (
-            "list",
+            "status",
             list(vec![
                 json!({"name":"production","source":"managed","active":false,"pending_restart":true}),
             ]),
@@ -562,7 +705,7 @@ async fn ssh_inspect_probe_preserve_one_save_observation_and_public_outputs_have
     }
     assert_eq!(
         gateway.actions(),
-        ["list", "inspect", "probe", "register", "list"]
+        ["status", "inspect", "probe", "register", "status"]
     );
     let calls = gateway.calls.lock().unwrap();
     assert!(calls[1].get("authentication").is_none());
@@ -584,7 +727,7 @@ async fn ssh_probe_rejects_mismatched_fingerprint_and_unexpected_private_respons
         json!({"action":"probe","revision":1,"host_key_fingerprint":connection_trust().fingerprint,"password":"fixture-private"}),
         inspection_output(),
     ] {
-        let gateway = MockGateway::new(vec![("list", list(vec![])), ("probe", Ok(response))]);
+        let gateway = MockGateway::new(vec![("status", list(vec![])), ("probe", Ok(response))]);
         let mut manager = SshResourcesManager::default();
         let observed = manager.list(&runtime(), &gateway).await;
         assert!(matches!(
@@ -602,13 +745,13 @@ async fn ssh_probe_rejects_mismatched_fingerprint_and_unexpected_private_respons
                 .await,
             Err(SshResourceError::SshResourceRegistryUnavailable)
         ));
-        assert_eq!(gateway.actions(), ["list", "probe"]);
+        assert_eq!(gateway.actions(), ["status", "probe"]);
     }
 }
 
 #[tokio::test]
 async fn ssh_inspection_uses_the_exact_connection_and_old_runner_support_fails_closed() {
-    let gateway = MockGateway::new(vec![("list", list(vec![]))]);
+    let gateway = MockGateway::new(vec![("status", list(vec![]))]);
     let mut manager = SshResourcesManager::default();
     let observed = manager.list(&runtime(), &gateway).await;
     let mut replacement = runtime();
@@ -635,10 +778,10 @@ async fn ssh_inspection_uses_the_exact_connection_and_old_runner_support_fails_c
             .await,
         Err(SshResourceError::SshResourceRegistryStale)
     ));
-    assert_eq!(gateway.actions(), ["list"]);
+    assert_eq!(gateway.actions(), ["status"]);
 
     let gateway = MockGateway::new(vec![(
-        "list",
+        "status",
         Ok(json!({"runner":"mini","binding":"wc_sbind_legacy","resources":[]})),
     )]);
     let observed = manager.list(&runtime(), &gateway).await;
@@ -654,7 +797,7 @@ async fn ssh_inspection_uses_the_exact_connection_and_old_runner_support_fails_c
             .await,
         Err(SshResourceError::SshConnectionSetupUnsupported)
     ));
-    assert_eq!(gateway.actions(), ["list"]);
+    assert_eq!(gateway.actions(), ["status"]);
 }
 
 #[test]

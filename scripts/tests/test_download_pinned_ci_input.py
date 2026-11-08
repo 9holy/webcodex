@@ -4,6 +4,7 @@ from dataclasses import replace
 from email.message import Message
 import hashlib
 import io
+import json
 from pathlib import Path
 import subprocess
 import sys
@@ -197,6 +198,74 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(opener.open.call_count, 2)
         self.assertFalse(self.output.exists())
 
+    def test_transient_open_errors_retry_only_the_unwritten_current_range(self):
+        data = b"x" * download.CHUNK_BYTES + b"tail"
+        api = "https://api.github.com/repos/example/project/releases/assets/1"
+        binary = "https://release-assets.githubusercontent.com/input?private=fixture"
+        asset = replace(asset_for(data, sha1=True), api_url=api)
+        responses = [
+            Response(data[:download.CHUNK_BYTES], 206,
+                     [("Content-Range", f"bytes 0-{download.CHUNK_BYTES - 1}/{len(data)}")], url=binary),
+            urllib.error.HTTPError(binary, 502, "private detail", None, None),
+            urllib.error.HTTPError(binary, 503, "private detail", None, None),
+            Response(data[download.CHUNK_BYTES:], 206,
+                     [("Content-Range", f"bytes {download.CHUNK_BYTES}-{len(data) - 1}/{len(data)}")], url=binary),
+        ]
+        with mock.patch.object(download.time, "sleep") as sleep:
+            opener = self.transfer(asset, responses)
+        self.assertEqual(self.output.read_bytes(), data)
+        self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list],
+                         [api, binary, binary, binary])
+        self.assertEqual([call.args[0].get_header("Range") for call in opener.open.call_args_list],
+                         [f"bytes=0-{download.CHUNK_BYTES - 1}"]
+                         + [f"bytes={download.CHUNK_BYTES}-{len(data) - 1}"] * 3)
+        self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
+
+    def test_retryable_open_error_stops_after_three_attempts_and_removes_staging(self):
+        for status in (502, 503, 504):
+            with self.subTest(status=status):
+                opener = mock.Mock()
+                opener.open.side_effect = [
+                    urllib.error.HTTPError(URL, status, "private detail", None, None)
+                    for _ in range(3)
+                ]
+                with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
+                        mock.patch.object(download.time, "sleep") as sleep:
+                    with self.assertRaises(urllib.error.HTTPError) as raised:
+                        download._download_to_staging(asset_for(b"expected"), self.output)
+                self.assertEqual(raised.exception.code, status)
+                self.assertEqual(opener.open.call_count, 3)
+                self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_other_http_open_errors_are_not_retried(self):
+        for status in (401, 403, 404, 429, 500):
+            with self.subTest(status=status):
+                opener = mock.Mock()
+                opener.open.side_effect = urllib.error.HTTPError(URL, status, "private detail", None, None)
+                with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
+                        mock.patch.object(download.time, "sleep") as sleep:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        download._download_to_staging(asset_for(b"expected"), self.output)
+                self.assertEqual(opener.open.call_count, 1)
+                sleep.assert_not_called()
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_body_read_http_error_is_not_retried_after_partial_bytes(self):
+        response = Response(b"expected", 200)
+        response.read = mock.Mock(side_effect=[
+            b"ex", urllib.error.HTTPError(URL, 504, "private detail", None, None),
+        ])
+        opener = mock.Mock()
+        opener.open.return_value = response
+        with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
+                mock.patch.object(download.time, "sleep") as sleep:
+            with self.assertRaises(urllib.error.HTTPError):
+                download._download_to_staging(asset_for(b"expected"), self.output)
+        self.assertEqual(opener.open.call_count, 1)
+        sleep.assert_not_called()
+        self.assertEqual(list(self.root.iterdir()), [])
+
     def test_internal_exclusive_open_never_removes_existing_file(self):
         self.output.write_bytes(b"existing")
         with self.assertRaises(FileExistsError):
@@ -340,6 +409,46 @@ class RequestBoundaryTests(unittest.TestCase):
                     self.assertEqual(code, 1)
                     self.assertEqual((root / "error").read_text(), expected)
                     self.assertEqual(download._read_worker_error(root / "error"), expected)
+
+    def test_failed_worker_request_diagnostic_has_only_valid_fixed_fields(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            asset = replace(asset_for(b"expected"),
+                            api_url="https://api.github.com/repos/example/project/releases/assets/1")
+            key = "v8-linux-x64"
+            opener = mock.Mock()
+            opener.open.side_effect = [
+                urllib.error.HTTPError("https://private.example/secret", 504, "private detail", None, None)
+                for _ in range(3)
+            ]
+            with mock.patch.object(download, "ASSETS", {key: asset}), \
+                    mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
+                    mock.patch.object(download.time, "sleep"):
+                self.assertEqual(download._worker_main(key, str(root / "payload"), str(root / "error")), 1)
+                self.assertEqual((root / "error").read_text(), "http_504")
+                self.assertFalse((root / "payload").exists())
+                expected = {"phase": "api_entry", "chunk_start": 0, "chunk_end": 7, "attempt": 3}
+                self.assertEqual(json.loads((root / "request").read_text()), expected)
+                output = io.StringIO()
+                with mock.patch.object(download.sys, "stderr", output):
+                    download._emit_request_diagnostic(key, root / "error", "http_504")
+                self.assertEqual(json.loads(output.getvalue()), {
+                    "event": "pinned_ci_input_failure", "asset_key": key,
+                    "code": "http_504", "last_request": expected,
+                })
+                self.assertNotIn("private", output.getvalue())
+                for invalid in (
+                    dict(expected, url="https://private.example/secret"),
+                    dict(expected, phase="https://private.example/secret"),
+                    dict(expected, chunk_start=True), dict(expected, chunk_end=8),
+                    dict(expected, attempt=4), "x" * 513,
+                ):
+                    with self.subTest(invalid=type(invalid).__name__):
+                        (root / "request").write_text(json.dumps(invalid))
+                        output = io.StringIO()
+                        with mock.patch.object(download.sys, "stderr", output):
+                            download._emit_request_diagnostic(key, root / "error", "http_504")
+                        self.assertEqual(output.getvalue(), "")
 
     def test_registry_has_only_six_fixed_official_inputs(self):
         expected = {

@@ -20,14 +20,13 @@ export function SshResourcesPanel({ state, onState, settings, onRestarted }: {
   const [restartRequired, setRestartRequired] = useState(false);
   const [editor, setEditor] = useState<ObservedSshTarget | null>(null);
   const [deleting, setDeleting] = useState<(ObservedSshTarget & { resource: SshResource }) | null>(null);
-  const [verifiedResource, setVerifiedResource] = useState<string | null>(null);
   const submitting = useRef(false); const sequence = useRef(0); const mounted = useRef(true);
   const disabled = busy || Boolean(state.current_operation);
 
   useEffect(() => {
     mounted.current = true;
     const current = ++sequence.current;
-    setInventory(null); setError(null); setEditor(null); setDeleting(null); setVerifiedResource(null); setRestartRequired(false);
+    setInventory(null); setError(null); setEditor(null); setDeleting(null); setRestartRequired(false);
     void desktopApi.sshResources().then(value => { if (mounted.current && current === sequence.current) setInventory(value); })
       .catch(() => { if (mounted.current && current === sequence.current) setError("ssh_resource_registry_unavailable"); });
     return () => { mounted.current = false; ++sequence.current; };
@@ -35,7 +34,7 @@ export function SshResourcesPanel({ state, onState, settings, onRestarted }: {
 
   const observe = async (action?: "add" | SshResource) => {
     if (submitting.current || state.current_operation) return;
-    submitting.current = true; setBusy(true); setError(null); setVerifiedResource(null);
+    submitting.current = true; setBusy(true); setError(null);
     const current = ++sequence.current;
     try {
       const target = action ? (await desktopApi.runnerSettings()).target : null;
@@ -54,9 +53,9 @@ export function SshResourcesPanel({ state, onState, settings, onRestarted }: {
     } catch { if (mounted.current && current === sequence.current) setError("ssh_resource_registry_unavailable"); }
     finally { submitting.current = false; if (mounted.current) setBusy(false); }
   };
-  const mutate = async (operation: () => Promise<SshMutationResult>, verifiedName?: string) => {
+  const mutate = async (operation: () => Promise<SshMutationResult>) => {
     if (submitting.current || state.current_operation) return;
-    submitting.current = true; const current = ++sequence.current; setBusy(true); setError(null); setVerifiedResource(null);
+    submitting.current = true; const current = ++sequence.current; setBusy(true); setError(null);
     // Targets exist only in this form's transient request, never inventory/history.
     setEditor(null); setDeleting(null);
     try {
@@ -64,7 +63,6 @@ export function SshResourcesPanel({ state, onState, settings, onRestarted }: {
       if (!mounted.current || current !== sequence.current) return;
       setInventory(result.inventory); setError(result.error_kind);
       if (result.restart_required) setRestartRequired(true);
-      if (result.success && verifiedName) setVerifiedResource(verifiedName);
     } catch {
       // Lost native IPC may follow a committed operation. Read once, never resend.
       if (mounted.current && current === sequence.current) { setError("ssh_resource_outcome_unknown"); setInventory(null); }
@@ -73,7 +71,7 @@ export function SshResourcesPanel({ state, onState, settings, onRestarted }: {
   };
   const restart = async () => {
     if (submitting.current || state.current_operation) return;
-    submitting.current = true; const attempt = ++sequence.current; setBusy(true); setError(null); setInventory(null); setVerifiedResource(null);
+    submitting.current = true; const attempt = ++sequence.current; setBusy(true); setError(null); setInventory(null);
     try {
       const current = await desktopApi.runnerSettings();
       if (!settings || !current.can_restart || current.target.client_id !== settings.target.client_id || current.target.server_url !== settings.target.server_url || current.target.config_path !== settings.target.config_path) throw new Error("runner_changed");
@@ -91,16 +89,27 @@ export function SshResourcesPanel({ state, onState, settings, onRestarted }: {
     <div className="extension-toolbar"><button type="button" className="primary-button" aria-label="Add SSH Resource" disabled={disabled || !settings || !inventory?.available} onClick={() => void observe("add")}>{r("addSshResource")}</button><button type="button" className="secondary-button" aria-label="Refresh SSH Resources" disabled={disabled} onClick={() => void observe()}>{p("refresh")}</button></div>
     <p className="workspace-notice">{r("sshPrivacy")}</p>
     {visibleError && <p role="alert" className="workspace-notice">{sshErrorText(visibleError, r, s)}</p>}
+    {inventory?.verification_unavailable && <p role="alert" className="workspace-notice">{s("verificationHistoryUnavailable")}</p>}
     <RunnerCapabilityAuthorization settings={settings} capability="ssh_resources" disabled={disabled} onAuthorized={() => void observe()} />
     {!inventory && !visibleError && <p role="status">{p("loading")}</p>}
     {needsRestart && <div className="extension-apply-bar" role="status"><span>{r("restartRequired")}</span><button type="button" className="secondary-button" aria-label="Restart Runner" disabled={disabled || !settings?.can_restart} onClick={() => void restart()}>{p("restartRunner")}</button></div>}
-    {inventory?.available && inventory.resources.map(resource => <article className="extension-row" key={resource.name} aria-labelledby={`ssh-resource-${resource.name}`} data-ssh-resource-name={resource.name}>
-      <div><h3 id={`ssh-resource-${resource.name}`}>{resource.name}</h3><p>{r(resource.source)} · {resource.active ? s("loaded") : c("configured")}{resource.pending_restart ? ` · ${r("restartRequired")}` : ""}{resource.source === "static" ? ` · ${r("readOnly")}` : ""}</p><p>{s(verifiedResource === resource.name ? "verified" : "notVerified")}</p></div>
-      {resource.source === "managed" && <button type="button" className="text-button" aria-label={`Remove ${resource.name}`} disabled={disabled || !inventory.observation_id} onClick={() => void observe(resource)}>{c("remove")}</button>}
-    </article>)}
+    {inventory?.available && inventory.resources.map(resource => {
+      const entry = inventory.verifications?.find(entry => entry.name === resource.name);
+      const verification = entry?.verification;
+      return <article className="extension-row" key={resource.name} aria-labelledby={`ssh-resource-${resource.name}`} data-ssh-resource-name={resource.name}>
+        <div><h3 id={`ssh-resource-${resource.name}`}>{resource.name}</h3><p>{r(resource.source)} · {resource.active ? s("loaded") : c("configured")}{resource.pending_restart ? ` · ${r("restartRequired")}` : ""}{resource.source === "static" ? ` · ${r("readOnly")}` : ""}</p>
+          <p>{verification ? <>{s(verification.error_kind ? "lastVerificationFailed" : "lastVerificationSucceeded")} · <time dateTime={new Date(verification.checked_at * 1000).toISOString()}>{new Date(verification.checked_at * 1000).toLocaleString()}</time></> : s("notVerified")}</p>
+          {verification?.error_kind && <p>{sshErrorText(verification.error_kind, r, s)}</p>}
+        </div>
+        {resource.source === "managed" && <div className="connection-actions">
+          {inventory.verification_supported && entry && <button type="button" className="secondary-button" aria-label={`Verify SSH resource ${resource.name}`} disabled={disabled || !settings || !inventory.observation_id || inventory.verification_unavailable} onClick={() => { if (settings && inventory.observation_id) void mutate(() => desktopApi.verifySavedSshResource(settings.target, inventory.observation_id!, resource.name)); }}>{s("verifySaved")}</button>}
+          <button type="button" className="text-button" aria-label={`Remove ${resource.name}`} disabled={disabled || !inventory.observation_id} onClick={() => void observe(resource)}>{c("remove")}</button>
+        </div>}
+      </article>;
+    })}
     {inventory?.available && !inventory.resources.length && <p className="workspace-empty">{r("noResources")}</p>}
-    {inventory?.available && inventory.resources.length > 0 && <p className="workspace-notice">{s("loadedHelp")} {s("chatHelp")} {s("remoteServicesHelp")}</p>}
-    {editor && <SshConnectionEditor key={editor.observationId} observed={editor} busy={disabled} setupSupported={inventory?.setup_supported === true} canChooseKey={Boolean(settings?.can_restart)} onClose={() => setEditor(null)} onSubmit={request => mutate(() => desktopApi.registerSshResource(request), request.connection.kind === "direct" ? request.name : undefined)} />}
+    {inventory?.available && inventory.resources.length > 0 && <p className="workspace-notice">{s("verificationHistoryHelp")} {!inventory.verification_supported && s("operatorUnavailable")} {s("loadedHelp")} {s("chatHelp")} {s("remoteServicesHelp")}</p>}
+    {editor && <SshConnectionEditor key={editor.observationId} observed={editor} busy={disabled} setupSupported={inventory?.setup_supported === true} canChooseKey={Boolean(settings?.can_restart)} onClose={() => setEditor(null)} onSubmit={request => mutate(() => desktopApi.registerSshResource(request))} />}
     {deleting && <WorkspaceDialog title={`${c("remove")} ${deleting.resource.name}`} onClose={() => setDeleting(null)} busy={busy}><p>{r("removeResourceHelp")}</p><div className="connection-actions"><button type="button" className="danger-button" aria-label={`Confirm Remove ${deleting.resource.name}`} disabled={disabled} onClick={() => void mutate(() => desktopApi.removeSshResource(deleting.expected, deleting.observationId, deleting.resource.name))}>{c("remove")}</button><button type="button" className="secondary-button" disabled={disabled} onClick={() => setDeleting(null)}>{p("cancel")}</button></div></WorkspaceDialog>}
   </div>;
 }

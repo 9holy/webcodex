@@ -68,6 +68,24 @@ pub(super) const PUBLIC_WEB_ROUTES: &[RouteSpec] = &[
 // Credential-bearing SSH setup is explicitly first-party only.
 pub(super) const ROUTES: &[RouteSpec] = &[
     route(
+        RuntimeConsoleSshResourcesStatus,
+        Post,
+        "/api/runtime-console/ssh-resources/status",
+        FirstPartyRequire(SCOPE_SSH_LOCAL),
+        RuntimeConsole,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
+        RuntimeConsoleSshResourcesVerifySaved,
+        Post,
+        "/api/runtime-console/ssh-resources/verify_saved",
+        FirstPartyRequire(SCOPE_SSH_LOCAL),
+        RuntimeConsole,
+        Other,
+        AuthMiddleware,
+    ),
+    route(
         RuntimeConsoleSshResourcesList,
         Post,
         "/api/runtime-console/ssh-resources/list",

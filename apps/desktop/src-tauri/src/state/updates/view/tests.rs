@@ -21,6 +21,69 @@ fn remote_hosts_cannot_be_observed_as_local_server() {
 }
 
 #[test]
+fn desktop_owned_processes_have_status_without_environment_services() {
+    let mut process = crate::process::ProcessSnapshot {
+        kind: ProcessKey::LocalRunner,
+        generation: 8,
+        phase: ProcessPhase::Running,
+        pid: Some(123),
+        exit_code: None,
+        owned_by_desktop: true,
+    };
+    let running = desktop_component("webcodex-runner", true, Some(&process));
+    assert_eq!(running.state, "running");
+    assert_eq!(running.service_state, "desktop_managed");
+    // A supervisor proves process lifecycle, not its build identity. Versions
+    // still require the exact Runner's authenticated observation.
+    assert!(running.version.is_none());
+    assert!(running.git_commit.is_none());
+    assert!(owned_running(Some(&process)));
+    for (phase, expected) in [
+        (ProcessPhase::Starting, "starting"),
+        (ProcessPhase::Stopping, "stopping"),
+        (ProcessPhase::Exited, "stopped"),
+        (ProcessPhase::Failed, "failed"),
+    ] {
+        process.phase = phase;
+        assert_eq!(
+            desktop_component("webcodex-runner", true, Some(&process)).state,
+            expected
+        );
+        assert!(!owned_running(Some(&process)));
+    }
+}
+
+#[test]
+fn desktop_observation_does_not_adopt_remote_foreign_or_missing_processes() {
+    let mut process = crate::process::ProcessSnapshot {
+        kind: ProcessKey::LocalServer,
+        generation: 1,
+        phase: ProcessPhase::Running,
+        pid: Some(456),
+        exit_code: None,
+        owned_by_desktop: false,
+    };
+    let foreign = desktop_component("webcodex-server", true, Some(&process));
+    assert_eq!(foreign.state, "unknown");
+    assert_eq!(foreign.service_state, "unknown");
+    assert!(!owned_running(Some(&process)));
+    process.owned_by_desktop = true;
+    let remote = desktop_component("webcodex-server", false, Some(&process));
+    assert_eq!(remote.state, "not_local");
+    assert_eq!(remote.service_state, "not_local");
+    process.pid = None;
+    assert!(!owned_running(Some(&process)));
+    assert_eq!(
+        desktop_component("webcodex-server", true, Some(&process)).state,
+        "unknown"
+    );
+    let missing = desktop_component("webcodex-server", true, None);
+    assert_eq!(missing.state, "unknown");
+    assert_eq!(missing.service_state, "unknown");
+    assert!(!owned_running(None));
+}
+
+#[test]
 fn update_service_inventory_matches_core_tunnel_ownership() {
     let profile = |host_mode, installed| webcodex_environment::TunnelRecord {
         configuration_id: None,

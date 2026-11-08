@@ -203,3 +203,67 @@ async fn ssh_connection_setup_requires_explicit_capability_at_enqueue_and_dequeu
         .as_deref()
         .is_some_and(|error| error.starts_with("ssh_connection_setup_unsupported")));
 }
+
+#[tokio::test]
+async fn ssh_saved_verification_is_capability_fenced_at_enqueue_and_dequeue() {
+    for request in [
+        SshResourceRequest::Status,
+        SshResourceRequest::VerifySaved {
+            expected_revision: 0,
+            name: "saved".into(),
+        },
+    ] {
+        let registry = RunnerRegistry::default();
+        let mut legacy = registration("instance-a", true);
+        legacy.capabilities.ssh_connection_setup = true;
+        registry.register(legacy.clone()).await.unwrap();
+        let error = registry
+            .enqueue_ssh_resource(
+                "ssh-resource-runner",
+                "instance-a",
+                request.clone(),
+                Some(&alice()),
+                "test".into(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.starts_with("ssh_connection_setup_unsupported"));
+        assert!(registry.inner.lock().await.pending_by_id.is_empty());
+        let mut current = legacy.clone();
+        current.capabilities.ssh_verification_history = true;
+        registry.register(current).await.unwrap();
+        let (_, receiver) = registry
+            .enqueue_ssh_resource(
+                "ssh-resource-runner",
+                "instance-a",
+                request,
+                Some(&alice()),
+                "test".into(),
+            )
+            .await
+            .unwrap();
+        registry
+            .inner
+            .lock()
+            .await
+            .runners
+            .get_mut("ssh-resource-runner")
+            .unwrap()
+            .runner_features =
+            RunnerFeatureSet::try_from_registration(&legacy.capabilities).unwrap();
+        assert!(registry
+            .poll(RunnerPollRequest {
+                client_id: "ssh-resource-runner".into(),
+                runner_instance_id: "instance-a".into()
+            })
+            .await
+            .unwrap()
+            .is_none());
+        let result = receiver.await.unwrap();
+        assert_eq!(result.request_dispatched, Some(false));
+        assert!(result
+            .error
+            .as_deref()
+            .is_some_and(|error| error.starts_with("ssh_connection_setup_unsupported")));
+    }
+}

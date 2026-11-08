@@ -13,6 +13,7 @@ use std::sync::{atomic::AtomicBool, Mutex};
 use webcodex_core::ssh_resource::{
     normalize_ssh_resource_default_cwd, normalize_ssh_resource_target, validate_ssh_resource_name,
     SshResourceInventoryEntry, SshResourceRequest, SshResourceResponse, SshResourceSource,
+    SshResourceVerificationEntry, SshVerification, SshVerificationError,
     MANAGED_SSH_REGISTRY_MAX_BYTES, MANAGED_SSH_RESOURCE_MAX_COUNT,
 };
 
@@ -22,8 +23,10 @@ const STORE_FILE: &str = "managed-ssh-resources.json";
 const LOCK_FILE: &str = "managed-ssh-resources.lock";
 
 mod connection;
+mod verification;
 #[cfg(unix)]
 pub(crate) use connection::classify_failure as classify_ssh_connection_failure;
+use verification::VerificationHistory;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -180,6 +183,35 @@ impl ManagedSshResourceStore {
                     static_active,
                     &self.startup_managed,
                 )),
+                SshResourceRequest::Status => {
+                    let history = VerificationHistory::load(path);
+                    let verification_unavailable = history.is_err();
+                    let verifications = registry
+                        .resources
+                        .iter()
+                        .filter(|(_, resource)| resource.connection.is_some())
+                        .map(|(name, resource)| SshResourceVerificationEntry {
+                            name: name.clone(),
+                            verification: history
+                                .as_ref()
+                                .ok()
+                                .and_then(|history| history.get(name, resource)),
+                        })
+                        .collect();
+                    let SshResourceResponse::List {
+                        revision,
+                        resources,
+                    } = list_response(registry, static_active, &self.startup_managed)
+                    else {
+                        unreachable!("list_response always returns the canonical inventory")
+                    };
+                    Ok(SshResourceResponse::Status {
+                        revision,
+                        resources,
+                        verifications,
+                        verification_unavailable,
+                    })
+                }
                 SshResourceRequest::Register {
                     expected_revision,
                     name,

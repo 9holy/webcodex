@@ -322,6 +322,7 @@ pub(crate) fn runner_register_capabilities(cfg: &RunnerConfig) -> RunnerCapabili
     capabilities.set(RunnerCapabilityId::NativeToolPlugins, true);
     capabilities.set(RunnerCapabilityId::ManagedSshResources, true);
     capabilities.set(RunnerCapabilityId::SshConnectionSetup, true);
+    capabilities.set(RunnerCapabilityId::SshVerificationHistory, true);
     // Formal config check/reload is implemented directly against this process's
     // startup-bound runner.toml path on every supported platform. Unix SIGHUP is
     // only an additional trigger and is not part of this capability contract.

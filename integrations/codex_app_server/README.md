@@ -60,11 +60,24 @@ Runner TOML, enable a provider, grant OAuth scopes, log in, or restart a service
 The JSON profile can be supplied to an existing configuration owner. Desktop
 handles the save/revision/enable flow for interactive users.
 
-Windows .cmd/.bat/PowerShell launchers are not executed through a shell. Select
+On Windows, discovery first uses the Codex installation selected by PATH.
+Standard npm codex.cmd and codex.ps1 launchers are recognized from their fixed
+sibling node_modules/@openai/codex package. Preparation selects a native node.exe
+beside the launcher or on PATH and the package's absolute bin/codex.js path;
+the shell wrapper is never executed. If the default codex command is absent from
+PATH, discovery checks only the [official Windows installer's](https://chatgpt.com/codex/install.ps1)
+LOCALAPPDATA/Programs/OpenAI/Codex/bin/codex.exe and APPDATA/npm locations.
+An explicit path, or an installation already selected by PATH, never falls back
+to a different installation when verification fails.
+
+Custom .cmd/.bat/PowerShell wrappers are not executed through a shell. Select
 the actual native Codex executable, or explicitly configure a native Node
-executable plus its fixed absolute Codex launcher script with --codex-arg. The
-same fixed launcher arguments are used for version detection, schema generation,
-and app-server execution; model input cannot replace them.
+executable plus its fixed absolute Codex launcher script with --codex-arg.
+The receipt stores the resolved command and fingerprints both Node and the
+script, so a later PATH change cannot select another installation. The same
+command is used for version detection, schema generation and app-server
+execution. At most eight fixed launcher arguments are allowed, including an
+automatically selected npm script. Model input cannot replace these arguments.
 
 Preparation invokes the selected executable's --version and
 app-server generate-json-schema --experimental. It validates the protocol subset

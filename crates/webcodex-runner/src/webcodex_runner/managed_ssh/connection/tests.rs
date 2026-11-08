@@ -31,6 +31,319 @@ fn fixture() -> (
     (temporary, store, endpoint, key)
 }
 
+fn saved_fixture() -> (tempfile::TempDir, ManagedSshResourceStore) {
+    let (temporary, store, endpoint, key) = fixture();
+    let mut candidate = ConnectionCandidate::create(
+        &store.private_root().unwrap(),
+        endpoint.clone(),
+        SshAuthentication::ExistingEnvironment,
+        key,
+    )
+    .unwrap();
+    let resource = ManagedResource {
+        target: endpoint.host,
+        default_cwd: None,
+        connection: Some(candidate.connection.stored.clone()),
+    };
+    write_registry(
+        store.path.as_ref().unwrap(),
+        &ManagedRegistry {
+            version: STORE_VERSION,
+            revision: 1,
+            resources: BTreeMap::from([("saved".into(), resource)]),
+        },
+    )
+    .unwrap();
+    candidate.retain();
+    (temporary, store)
+}
+
+#[test]
+fn saved_verification_is_durable_safe_history_without_changing_published_registry() {
+    use webcodex_environment::private_files::PrivateFileStore;
+    let (temporary, store) = saved_fixture();
+    let registry_path = store.path.as_ref().unwrap();
+    let original_bytes = fs::read(registry_path).unwrap();
+    let initial = store.handle(&SshConfig::default(), SshResourceRequest::Status);
+    assert!(
+        matches!(&initial, SshResourceResponse::Status { verifications, verification_unavailable: false, .. }
+        if verifications.len() == 1 && verifications[0].verification.is_none())
+    );
+    let response = store
+        .verify_saved(&SshConfig::default(), 1, "saved", None, &|| true, |_, _| {
+            Ok(())
+        })
+        .unwrap();
+    let SshResourceResponse::VerifySaved {
+        verification,
+        revision,
+        ..
+    } = response
+    else {
+        panic!("saved check result");
+    };
+    assert_eq!(revision, 1);
+    assert!(verification.error_kind.is_none() && verification.checked_at > 0);
+    assert_eq!(fs::read(registry_path).unwrap(), original_bytes);
+    // These are the published strict record fields; history must not extend them.
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublishedResource {
+        target: String,
+        #[serde(default)]
+        default_cwd: Option<String>,
+        #[serde(default)]
+        connection: Option<StoredSshConnection>,
+    }
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct PublishedRegistry {
+        version: u32,
+        revision: u64,
+        resources: BTreeMap<String, PublishedResource>,
+    }
+    let old: PublishedRegistry = serde_json::from_slice(&fs::read(registry_path).unwrap()).unwrap();
+    assert_eq!((old.version, old.revision), (1, 1));
+    assert_eq!(old.resources["saved"].target, "127.0.0.1");
+    assert!(old.resources["saved"].default_cwd.is_none());
+    assert!(old.resources["saved"].connection.is_some());
+    let private = PrivateFileStore::existing(&store.private_root().unwrap()).unwrap();
+    private
+        .create(
+            "verification-history.pending.json",
+            b"interrupted observation",
+        )
+        .unwrap();
+    assert!(store.startup_managed.resources.is_empty());
+    // This invokes the unchanged old-prefix-only credential/askpass GC as well as
+    // registry parsing: neither history nor its pending file affects activation.
+    let restarted =
+        ManagedSshResourceStore::initialize_at_root(temporary.path(), &SshConfig::default());
+    let status = restarted.handle(&SshConfig::default(), SshResourceRequest::Status);
+    assert!(
+        matches!(&status, SshResourceResponse::Status { resources, verifications, verification_unavailable: false, .. }
+        if resources[0].active && !resources[0].pending_restart && verifications[0].verification == Some(verification))
+    );
+    assert!(private
+        .path("verification-history.pending.json")
+        .unwrap()
+        .exists());
+    let encoded = serde_json::to_string(&status).unwrap();
+    for secret in [
+        "127.0.0.1",
+        "fixture-user",
+        "credential-",
+        "known_hosts",
+        "binding",
+    ] {
+        assert!(!encoded.contains(secret));
+    }
+    let legacy =
+        serde_json::to_value(restarted.handle(&SshConfig::default(), SshResourceRequest::List))
+            .unwrap();
+    assert!(legacy.get("verifications").is_none());
+    assert!(legacy["resources"][0].get("verification").is_none());
+    let response = restarted
+        .verify_saved(&SshConfig::default(), 1, "saved", None, &|| true, |_, _| {
+            Err("ssh_authentication_failed")
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        SshResourceResponse::VerifySaved {
+            revision: 1,
+            verification: SshVerification {
+                error_kind: Some(SshVerificationError::SshAuthenticationFailed),
+                ..
+            },
+            ..
+        }
+    ));
+    let registry = load_registry(registry_path).unwrap();
+    let history = VerificationHistory::load(registry_path).unwrap();
+    assert_eq!(
+        history
+            .get("saved", &registry.resources["saved"])
+            .unwrap()
+            .error_kind,
+        Some(SshVerificationError::SshAuthenticationFailed)
+    );
+    assert_eq!(fs::read(registry_path).unwrap(), original_bytes);
+    assert!(!private
+        .path("verification-history.pending.json")
+        .unwrap()
+        .exists());
+}
+
+#[test]
+fn verification_history_is_bound_to_resource_configuration_and_credential_uuid() {
+    let (_temporary, store) = saved_fixture();
+    let registry = load_registry(store.path.as_ref().unwrap()).unwrap();
+    let resource = &registry.resources["saved"];
+    let mut history = VerificationHistory::default();
+    assert!(history.get("saved", resource).is_none());
+    history
+        .record(&registry, "saved", resource, Ok(()))
+        .unwrap();
+    assert!(history.get("saved", resource).is_some());
+    assert!(history.get("another-name", resource).is_none());
+    let mut changed = resource.clone();
+    changed.default_cwd = Some("/another-directory".into());
+    assert!(history.get("saved", &changed).is_none());
+    let mut changed = resource.clone();
+    changed.connection.as_mut().unwrap().endpoint.user = "another-user".into();
+    assert!(history.get("saved", &changed).is_none());
+    let mut changed = resource.clone();
+    changed.connection.as_mut().unwrap().id = uuid::Uuid::new_v4().simple().to_string();
+    assert!(history.get("saved", &changed).is_none());
+    assert!(history.get("saved", resource).is_some());
+}
+
+#[test]
+fn saved_verification_rejects_late_revision_binding_credential_replacement_and_cancellation() {
+    for changed in ["revision", "binding", "credential", "generation", "cancel"] {
+        let (_temporary, store) = saved_fixture();
+        let current = AtomicBool::new(true);
+        let stop = AtomicBool::new(false);
+        let result = store.verify_saved(
+            &SshConfig::default(),
+            1,
+            "saved",
+            Some(&stop),
+            &|| current.load(Ordering::SeqCst),
+            |_, _| {
+                match changed {
+                    "revision" | "binding" | "credential" => {
+                        let mut registry = load_registry(store.path.as_ref().unwrap()).unwrap();
+                        match changed {
+                            "revision" => registry.revision += 1,
+                            "binding" => {
+                                registry.resources.get_mut("saved").unwrap().default_cwd =
+                                    Some("/changed".into())
+                            }
+                            _ => {
+                                registry
+                                    .resources
+                                    .get_mut("saved")
+                                    .unwrap()
+                                    .connection
+                                    .as_mut()
+                                    .unwrap()
+                                    .id = uuid::Uuid::new_v4().simple().to_string()
+                            }
+                        }
+                        write_registry(store.path.as_ref().unwrap(), &registry).unwrap();
+                    }
+                    "generation" => current.store(false, Ordering::SeqCst),
+                    "cancel" => stop.store(true, Ordering::SeqCst),
+                    _ => unreachable!(),
+                }
+                Ok(())
+            },
+        );
+        assert_eq!(
+            result,
+            Err(if changed == "cancel" {
+                "ssh_connection_cancelled"
+            } else {
+                "ssh_resource_registry_stale"
+            })
+        );
+        let registry = load_registry(store.path.as_ref().unwrap()).unwrap();
+        assert!(VerificationHistory::load(store.path.as_ref().unwrap())
+            .unwrap()
+            .get("saved", &registry.resources["saved"])
+            .is_none());
+    }
+    let (_temporary, store) = saved_fixture();
+    assert_eq!(
+        store.verify_saved(
+            &SshConfig::default(),
+            0,
+            "saved",
+            None,
+            &|| true,
+            |_, _| panic!("stale request must not probe")
+        ),
+        Err("ssh_resource_registry_stale")
+    );
+}
+
+#[test]
+fn optional_history_corruption_and_orphans_do_not_change_resources_or_grow_unbounded() {
+    use webcodex_environment::private_files::PrivateFileStore;
+    let (temporary, store) = saved_fixture();
+    let registry_path = store.path.as_ref().unwrap();
+    let registry = load_registry(registry_path).unwrap();
+    let original = fs::read(registry_path).unwrap();
+    let mut history = VerificationHistory::default();
+    for index in 0..128 {
+        history
+            .record(
+                &registry,
+                &format!("uncommitted-{index}"),
+                &registry.resources["saved"],
+                Ok(()),
+            )
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(&history).unwrap()["entries"]
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    history.write(registry_path).unwrap();
+    let status = store.handle(&SshConfig::default(), SshResourceRequest::Status);
+    assert!(
+        matches!(status, SshResourceResponse::Status { resources, verifications, verification_unavailable: false, .. }
+        if resources.len() == 1 && resources[0].name == "saved" && verifications[0].verification.is_none())
+    );
+    let private = PrivateFileStore::existing(&store.private_root().unwrap()).unwrap();
+    let path = private.path("verification-history.json").unwrap();
+    fs::write(&path, b"not a valid history document").unwrap();
+    let restarted =
+        ManagedSshResourceStore::initialize_at_root(temporary.path(), &SshConfig::default());
+    assert!(restarted.startup_managed.resources.contains_key("saved"));
+    assert!(
+        matches!(restarted.handle(&SshConfig::default(), SshResourceRequest::List), SshResourceResponse::List { resources, .. } if resources.len() == 1)
+    );
+    assert!(
+        matches!(restarted.handle(&SshConfig::default(), SshResourceRequest::Status), SshResourceResponse::Status { verification_unavailable: true, resources, verifications, .. }
+        if resources.len() == 1 && verifications[0].verification.is_none())
+    );
+    assert_eq!(
+        restarted.verify_saved(
+            &SshConfig::default(),
+            1,
+            "saved",
+            None,
+            &|| true,
+            |_, _| panic!("unsafe history must be detected before network work")
+        ),
+        Err("ssh_resource_invalid")
+    );
+    assert_eq!(fs::read(registry_path).unwrap(), original);
+    let mut oversized = serde_json::to_value(&history).unwrap();
+    let record = oversized["entries"]["uncommitted-127"].clone();
+    oversized["entries"] = serde_json::Value::Object(
+        (0..=MANAGED_SSH_RESOURCE_MAX_COUNT)
+            .map(|index| (format!("entry-{index}"), record.clone()))
+            .collect(),
+    );
+    fs::write(&path, serde_json::to_vec(&oversized).unwrap()).unwrap();
+    assert!(matches!(
+        VerificationHistory::load(registry_path),
+        Err("ssh_resource_invalid")
+    ));
+    private.remove("verification-history.json").unwrap();
+    assert!(VerificationHistory::load(registry_path)
+        .unwrap()
+        .get("saved", &registry.resources["saved"])
+        .is_none());
+}
+
 #[test]
 fn trust_challenges_bind_endpoint_revision_generation_expiry_and_single_commit() {
     let (_temporary, store, endpoint, key) = fixture();

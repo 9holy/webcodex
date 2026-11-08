@@ -3,7 +3,8 @@
 
 Each request is anonymous and uses the runner's normal urllib network routing.
 Only the fixed public release-asset API endpoints below supply binary bytes.
-There are no retries, credentials, configurable URLs, or integrity overrides.
+Only opening a request may retry HTTP 502/503/504 twice, within the same deadline.
+There are no credentials, configurable URLs, or integrity overrides.
 A separate process bounds the complete transfer and verification on Windows too.
 Only a verified, complete file is published, without replacing an existing path.
 """
@@ -13,6 +14,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -73,6 +75,8 @@ CHUNK_BYTES = 1024 * 1024
 READ_BYTES = 64 * 1024
 SOCKET_TIMEOUT_SECONDS = 30
 WHOLE_FILE_TIMEOUT_SECONDS = 180
+OPEN_ATTEMPTS = 3
+RETRYABLE_HTTP_STATUS = frozenset({502, 503, 504})
 _ERROR_CODES = frozenset({
     "unknown_asset", "https_required", "url_credentials", "http_status",
     "content_range", "content_length", "content_encoding", "chunk_length",
@@ -128,7 +132,30 @@ def _copy_exact(response, output, length: int, sha256, sha1) -> None:
         raise DownloadError("chunk_length")
 
 
-def _download_to_staging(asset: PinnedAsset, destination: Path) -> None:
+def _open_request(opener, request, *, phase: str, start: int, end: int,
+                  diagnostic_file: Path | None):
+    # No body bytes or digest state have changed when open() raises HTTPError.
+    # Body/header/integrity failures remain outside this retry boundary.
+    for attempt in range(1, OPEN_ATTEMPTS + 1):
+        if diagnostic_file is not None:
+            try:
+                diagnostic_file.write_text(json.dumps({
+                    "phase": phase, "chunk_start": start, "chunk_end": end,
+                    "attempt": attempt,
+                }), encoding="ascii")
+            except OSError:
+                pass  # Diagnostics must not replace the actual transfer error.
+        try:
+            return opener.open(request, timeout=SOCKET_TIMEOUT_SECONDS)
+        except urllib.error.HTTPError as error:
+            if error.code not in RETRYABLE_HTTP_STATUS or attempt == OPEN_ATTEMPTS:
+                raise
+            error.close()
+            time.sleep(attempt)  # One second, then two; parent deadline is unchanged.
+
+
+def _download_to_staging(asset: PinnedAsset, destination: Path, *,
+                         diagnostic_file: Path | None = None) -> None:
     """Internal worker: its parent enforces the whole-file wall-clock deadline."""
     _require_https(asset.url)
     request_url = asset.api_url or asset.url
@@ -151,7 +178,9 @@ def _download_to_staging(asset: PinnedAsset, destination: Path) -> None:
                 if asset.api_url is not None:
                     headers["Accept"] = "application/octet-stream"
                 request = urllib.request.Request(request_url, headers=headers)
-                with opener.open(request, timeout=SOCKET_TIMEOUT_SECONDS) as response:
+                phase = "api_entry" if request_url == asset.api_url else "binary_range"
+                with _open_request(opener, request, phase=phase, start=start, end=end,
+                                   diagnostic_file=diagnostic_file) as response:
                     final_url = response.geturl()
                     _require_https(final_url)
                     encoding = _single_header(response.headers, "Content-Encoding", "content_encoding")
@@ -200,7 +229,8 @@ def _download_to_staging(asset: PinnedAsset, destination: Path) -> None:
 
 def _worker_main(key: str, staging: str, error_file: str) -> int:
     try:
-        _download_to_staging(ASSETS[key], Path(staging))
+        _download_to_staging(ASSETS[key], Path(staging),
+                             diagnostic_file=Path(error_file).with_name("request"))
         return 0
     except DownloadError as error:
         code = error.code
@@ -241,6 +271,38 @@ def _read_worker_error(path: Path) -> str:
     return "worker_failed"
 
 
+def _emit_request_diagnostic(key: str, error_file: Path, code: str) -> None:
+    # This describes the most recent request, not the origin within a redirect
+    # chain. Never forward a URL, arbitrary worker text, headers, or response bytes.
+    try:
+        with error_file.with_name("request").open("rb") as stream:
+            raw = stream.read(513)
+        if len(raw) > 512:
+            return
+        record = json.loads(raw)
+        if not isinstance(record, dict) or set(record) != {
+            "phase", "chunk_start", "chunk_end", "attempt"
+        }:
+            return
+        if record["phase"] not in {"api_entry", "binary_range"}:
+            return
+        start, end, attempt = (record[name] for name in ("chunk_start", "chunk_end", "attempt"))
+        if any(type(value) is not int for value in (start, end, attempt)):
+            return
+        asset = ASSETS[key]
+        if not (0 <= start < asset.size and start % CHUNK_BYTES == 0
+                and end == min(start + CHUNK_BYTES, asset.size) - 1
+                and 1 <= attempt <= OPEN_ATTEMPTS):
+            return
+    except (OSError, ValueError, KeyError, TypeError):
+        return
+    try:
+        print(json.dumps({"event": "pinned_ci_input_failure", "asset_key": key,
+                          "code": code, "last_request": record}, sort_keys=True), file=sys.stderr)
+    except (OSError, ValueError):
+        pass
+
+
 def _run_worker(key: str, staging: Path, error_file: Path, deadline: float) -> None:
     process = subprocess.Popen(
         _worker_command(key, staging, error_file), stdin=subprocess.DEVNULL,
@@ -255,6 +317,9 @@ def _run_worker(key: str, staging: Path, error_file: Path, deadline: float) -> N
             raise DownloadError("deadline")
         if status != 0:
             raise DownloadError(_read_worker_error(error_file))
+    except DownloadError as error:
+        _emit_request_diagnostic(key, error_file, error.code)
+        raise
     finally:
         if process.poll() is None:
             process.kill()  # Only the exact Python worker created here.

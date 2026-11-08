@@ -14,6 +14,7 @@ import base64
 from dataclasses import dataclass
 import hashlib
 import io
+import itertools
 import json
 import logging
 import os
@@ -60,7 +61,7 @@ ACCEPTANCE_STAGES = frozenset({
     "prepare", "scope", "host_key_inspection", "wrong_password", "changed_host_key",
     "password_probe", "plain_key_probe", "wrong_key_probe", "encrypted_key_probe",
     "user_known_hosts_correct_pin", "user_known_hosts_wrong_pin",
-    "register", "runner_restart", "remote_shell", "privacy",
+    "register", "verification_history", "runner_restart", "saved_verification", "remote_shell", "privacy",
 })
 LITERAL_DOLLAR_ENV = "WEBCODEX_SSH_LITERAL_DOLLAR"
 PIN_PROBE_ALIAS = "webcodex-user-known-hosts-fixture"
@@ -69,6 +70,7 @@ NONEXECUTABLE_DECOY = b"Fixture sentinel; deliberately not a Windows executable.
 OPERATOR_ERROR_KINDS = frozenset({
     "permission_denied", "insufficient_scope", "runner_unavailable", "invalid_runner_response",
     "ssh_resource_invalid", "ssh_resource_registry_unavailable", "ssh_resource_binding_stale",
+    "ssh_resource_registry_stale", "ssh_resource_binding_required", "ssh_resource_outcome_unknown", "runner_replaced",
     "ssh_connection_setup_unsupported", "ssh_host_key_unavailable", "ssh_host_key_stale",
     "ssh_host_key_changed", "ssh_authentication_failed", "ssh_connection_failed",
     "ssh_connection_timeout", "ssh_program_unavailable", "ssh_identity_file_invalid",
@@ -118,7 +120,7 @@ def operator_error_kind(result: dict) -> str:
 class OperatorCallFailed(AssertionError):
     def __init__(self, action: str, success: bool, result: dict):
         self.error_kind = operator_error_kind(result)
-        action = action if action in {"list", "inspect", "probe", "register", "remove"} else "operation"
+        action = action if action in {"list", "status", "verify_saved", "inspect", "probe", "register", "remove"} else "operation"
         super().__init__(f"operator {action}: expected success={success}; code={self.error_kind}")
 
 
@@ -813,6 +815,79 @@ class ConnectionAcceptance(Smoke):
     def observe(self):
         return self.operator("list", {"runner": "ssh-setup-runner"})
 
+    @staticmethod
+    def verification_record(record):
+        check(isinstance(record, dict) and set(record) == {"checked_at", "error_kind"}
+              and type(record.get("checked_at")) is int
+              and 0 < record["checked_at"] <= int(time.time()) + 1
+              and record.get("error_kind") is None,
+              "saved SSH verification must contain only a real successful check time")
+        return record
+
+    def observe_verification(self):
+        before = self.ssh.diagnostic_counts()
+        status = self.operator("status", {"runner": "ssh-setup-runner"})
+        check(isinstance(status, dict) and status.get("verification_supported") is True
+              and status.get("verification_unavailable") is False
+              and isinstance(status.get("binding"), str) and status["binding"],
+              "Runner did not provide supported, readable verification history")
+        entries = status.get("verifications")
+        check(isinstance(entries, list) and len(entries) == 1
+              and isinstance(entries[0], dict) and set(entries[0]) == {"name", "verification"}
+              and entries[0].get("name") == "password-fixture",
+              "verification history belongs to another resource or is missing")
+        record = self.verification_record(entries[0].get("verification"))
+        after = self.ssh.diagnostic_counts()
+        check(all(before[name] == after[name] for name in [
+            "password_attempts", "successful_passwords", "publickey_requests", "executions",
+        ]), "reading verification history must not authenticate or execute")
+        return status, record
+
+    def canonical_registry_snapshot(self):
+        # Only this fixture's generated state is observed; never discover or read
+        # an installed user's registry/credential file. No metadata is printed.
+        paths = list(itertools.islice(self.root.rglob("managed-ssh-resources.json"), 2))
+        check(len(paths) == 1, "fixture canonical SSH registry is ambiguous")
+        with paths[0].open("rb") as source:
+            data = source.read(65537)
+        check(len(data) <= 65536, "fixture canonical SSH registry exceeded its bound")
+        try:
+            registry = json.loads(data)
+        except (ValueError, UnicodeDecodeError):
+            raise AssertionError("fixture canonical SSH registry is invalid") from None
+        check(isinstance(registry, dict) and registry.get("version") == 1
+              and type(registry.get("revision")) is int,
+              "fixture canonical SSH registry has no exact revision")
+        return registry["revision"], hashlib.sha256(data).digest()
+
+    def verify_saved_once(self, observed, previous_record):
+        self.begin_stage("saved_verification")
+        before = self.ssh.diagnostic_counts()
+        registry_before = self.canonical_registry_snapshot()
+        started_at = int(time.time())
+        # Exactly one explicit effect request. Status reads below are observations,
+        # not retries or a fallback to the credential-bearing onboarding probe.
+        checked = self.operator("verify_saved", {
+            "binding": observed["binding"], "name": "password-fixture",
+        })
+        check(isinstance(checked, dict) and set(checked) == {"resource", "persisted", "verification"}
+              and checked.get("resource") == "password-fixture"
+              and checked.get("persisted") is True,
+              "saved SSH verification was not persisted for the exact resource")
+        record = self.verification_record(checked.get("verification"))
+        check(record["checked_at"] >= max(started_at, previous_record["checked_at"]),
+              "saved SSH verification returned an earlier check")
+        after = self.ssh.diagnostic_counts()
+        check(after["successful_passwords"] - before["successful_passwords"] == 1
+              and after["executions"] - before["executions"] == 1,
+              "saved verification must authenticate and run its fixed probe exactly once")
+        fresh, durable = self.observe_verification()
+        check(durable == record and fresh["binding"] != observed["binding"],
+              "saved verification was lost or the consumed observation was reused")
+        check(self.canonical_registry_snapshot() == registry_before,
+              "saved verification changed the canonical configuration or revision")
+        print("PASS: one saved-credential probe persists its exact result without changing the SSH configuration revision")
+
     def readiness_post(self, path, body, deadline):
         remaining = deadline - time.monotonic()
         check(remaining > 0, "replacement Runner readiness deadline exceeded")
@@ -1018,12 +1093,18 @@ class ConnectionAcceptance(Smoke):
               "saved connection was incorrectly reported as loaded")
         check("password" not in json.dumps(listed).replace("password-fixture", ""),
               "inventory disclosed authentication data")
+        self.begin_stage("verification_history")
+        _, saved_verification = self.observe_verification()
         print("PASS: scope, real host-key inspection, wrong password, changed key, password/plain/encrypted-key login, staged save")
 
         self.begin_stage("runner_restart")
         listed = self.restart_runner()
         check(listed["resources"][0]["active"] and not listed["resources"][0]["pending_restart"],
               "saved connection was not loaded after Runner restart")
+        observed, restarted_verification = self.observe_verification()
+        check(restarted_verification == saved_verification,
+              "the real saved verification result did not survive Runner restart")
+        self.verify_saved_once(observed, restarted_verification)
         session = self.tool("work_on_project", {"project": self.project,
             "instruction": "Verify the disposable SSH execution target"}, self.owner)
         check(session.get("resolved_project") == self.project,

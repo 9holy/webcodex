@@ -49,10 +49,19 @@ webcodex coding-agent prepare-codex --experimental \
 不登录、不重启服务。JSON profile 可交给已有配置管理入口；交互用户使用 Desktop 完成
 版本冲突检查、保存和启用，无需手改 TOML。
 
-Windows 的 .cmd/.bat/PowerShell 启动器不会被交给 shell 执行。请选择真实 Codex 原生
+Windows 自动发现优先使用 PATH 选中的 Codex 安装。标准 npm codex.cmd 和 codex.ps1
+启动器通过同目录下固定的 node_modules/@openai/codex 包布局识别；准备时选用启动器
+同目录或 PATH 中的原生 node.exe，以及包内 bin/codex.js 的绝对路径，不执行 shell
+启动器。只有默认 codex 命令在 PATH 中不存在时，才额外检查
+[官方 Windows 安装器](https://chatgpt.com/codex/install.ps1)的
+LOCALAPPDATA/Programs/OpenAI/Codex/bin/codex.exe 和 APPDATA/npm 固定位置。
+显式指定的路径或 PATH 已选中的安装验证失败时，不会自动换用其他安装。
+
+自定义 .cmd/.bat/PowerShell 启动器不会被交给 shell 执行。可选择真实 Codex 原生
 可执行文件，或显式选择 Node 原生可执行文件，并使用 --codex-arg 配置固定的 Codex
-启动脚本绝对路径。检测版本、生成 schema 和运行 app-server 使用同一命令；模型输入
-不能替换命令或固定参数。
+启动脚本绝对路径。收据保存解析后的命令，并同时绑定 Node 和脚本的哈希，后续 PATH
+变化不会改用其他安装。检测版本、生成 schema 和运行 app-server 使用同一命令。
+固定启动参数最多八项，自动选中的 npm 脚本路径占一项；模型输入不能替换这些参数。
 
 预检执行所选安装的 --version 和 app-server generate-json-schema --experimental，
 验证适配器实际使用的协议，然后把精确版本、可执行文件/显式启动脚本哈希、schema

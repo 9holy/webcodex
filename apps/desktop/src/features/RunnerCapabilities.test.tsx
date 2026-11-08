@@ -11,7 +11,7 @@ import { CodingAgentsPanel } from "./extensions/CodingAgentsPanel";
 import { SshResourcesPanel } from "./extensions/SshResourcesPanel";
 import { RunnerCapabilityAuthorization } from "./extensions/RunnerCapabilityAuthorization";
 
-const api = vi.hoisted(() => ({ prepareCodexCodingAgent: vi.fn(), saveCodingAgent: vi.fn(), removeCodingAgent: vi.fn(), runnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), registerSshResource: vi.fn(), removeSshResource: vi.fn(), inspectSshConnection: vi.fn(), probeSshConnection: vi.fn(), authorizeRunnerCapabilities: vi.fn(), runnerCapabilityAuthorization: vi.fn() }));
+const api = vi.hoisted(() => ({ prepareCodexCodingAgent: vi.fn(), saveCodingAgent: vi.fn(), removeCodingAgent: vi.fn(), runnerSettings: vi.fn(), restartOwnedRunner: vi.fn(), sshResources: vi.fn(), registerSshResource: vi.fn(), removeSshResource: vi.fn(), inspectSshConnection: vi.fn(), probeSshConnection: vi.fn(), verifySavedSshResource: vi.fn(), authorizeRunnerCapabilities: vi.fn(), runnerCapabilityAuthorization: vi.fn() }));
 const query = vi.hoisted(() => vi.fn());
 vi.mock("../lib/desktop-api", () => ({ desktopApi: api }));
 vi.mock("./workspace/WorkspaceContext", () => ({ workspaceQuery: query }));
@@ -244,10 +244,13 @@ describe("Desktop SSH Resources", () => {
     expect(api.restartOwnedRunner).not.toHaveBeenCalled();
   });
 
-  it("separates a verified connection from loaded configuration and clears verification on restart", async () => {
+  it("persists recorded verification through refresh, restart and remount without probing again", async () => {
     const fingerprint = `SHA256:${"A".repeat(43)}`;
     let rows: SshResource[] = [];
-    api.sshResources.mockImplementation(async () => inventory(rows, "observed"));
+    const checkedAt = 1_700_000_000;
+    const snapshot = (observation: string) => ({ ...inventory(rows, observation), verification_supported: true,
+      verifications: rows.map(row => ({ name: row.name, verification: { checked_at: checkedAt, error_kind: null } })) });
+    api.sshResources.mockImplementation(async () => snapshot("observed"));
     api.inspectSshConnection.mockResolvedValue({ success: true, error_kind: null, inspection: {
       challenge_id: "fixture-challenge", expires_at: Math.floor(Date.now() / 1000) + 300,
       host_keys: [{ algorithm: "ssh-ed25519", fingerprint }],
@@ -255,10 +258,10 @@ describe("Desktop SSH Resources", () => {
     api.probeSshConnection.mockResolvedValue({ success: true, error_kind: null, verified: true });
     api.registerSshResource.mockImplementation(async () => {
       rows = [resource("production", "managed", true)];
-      return { success: true, error_kind: null, restart_required: true, inventory: inventory(rows, "saved") };
+      return { success: true, error_kind: null, restart_required: true, inventory: snapshot("saved") };
     });
     api.restartOwnedRunner.mockImplementation(async () => { rows = [resource("production")]; return state(); });
-    render(<Harness mode="ssh" />);
+    const rendered = render(<Harness mode="ssh" />);
     await waitFor(() => expect(screen.getByRole("button", { name: "Add SSH Resource" })).toBeEnabled());
     fireEvent.click(screen.getByRole("button", { name: "Add SSH Resource" }));
     await screen.findByRole("dialog", { name: "Add SSH resource" });
@@ -272,15 +275,85 @@ describe("Desktop SSH Resources", () => {
     await screen.findByText("Connection verified");
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     const saved = await screen.findByRole("article", { name: "production" });
-    expect(within(saved).getByText("Connection verified")).toBeInTheDocument();
+    expect(within(saved).getByText(/Last connection check succeeded/)).toBeInTheDocument();
+    expect(saved.querySelector("time")).toHaveAttribute("datetime", new Date(checkedAt * 1000).toISOString());
+    fireEvent.click(screen.getByRole("button", { name: "Refresh SSH Resources" }));
+    await waitFor(() => expect(api.sshResources).toHaveBeenCalledTimes(3));
     expect(within(saved).queryByText(/Loaded in Runner/)).not.toBeInTheDocument();
     expect(api.restartOwnedRunner).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Restart Runner" }));
     await waitFor(() => expect(api.restartOwnedRunner).toHaveBeenCalledExactlyOnceWith(target));
     const loaded = await screen.findByRole("article", { name: "production" });
     expect(within(loaded).getByText(/Loaded in Runner/)).toBeInTheDocument();
-    expect(within(loaded).getByText("Connection not verified")).toBeInTheDocument();
-    expect(within(loaded).queryByText("Connection verified")).not.toBeInTheDocument();
+    expect(within(loaded).getByText(/Last connection check succeeded/)).toBeInTheDocument();
+    expect(api.probeSshConnection).toHaveBeenCalledTimes(1);
+    expect(api.verifySavedSshResource).not.toHaveBeenCalled();
+    rendered.unmount();
+    render(<Harness mode="ssh" />);
+    expect(within(await screen.findByRole("article", { name: "production" })).getByText(/Last connection check succeeded/)).toBeInTheDocument();
+    expect(api.verifySavedSshResource).not.toHaveBeenCalled();
+  });
+
+  it("shows each saved result and only rechecks after an explicit click, preserving failed check time", async () => {
+    const resources = [resource("success"), resource("failed"), resource("unknown"), resource("static", "static")];
+    const snapshot = (): SshResourcesSnapshot => ({ ...inventory(resources, "saved-observation"), verification_supported: true,
+      verifications: [
+        { name: "success", verification: { checked_at: 1_700_000_000, error_kind: null } },
+        { name: "failed", verification: { checked_at: 1_700_000_001, error_kind: "ssh_authentication_failed" } },
+        { name: "unknown", verification: null },
+      ] });
+    api.sshResources.mockImplementation(async () => snapshot());
+    const after = snapshot();
+    after.verifications![2].verification = { checked_at: 1_700_000_100, error_kind: "ssh_connection_timeout" };
+    api.verifySavedSshResource.mockResolvedValue({ success: false, error_kind: "ssh_connection_timeout", restart_required: false, inventory: after });
+    render(<Harness mode="ssh" />);
+    const unknown = await screen.findByRole("article", { name: "unknown" });
+    expect(within(unknown).getByText("Connection not verified")).toBeInTheDocument();
+    expect(within(screen.getByRole("article", { name: "success" })).getByText(/Last connection check succeeded/)).toBeInTheDocument();
+    expect(within(screen.getByRole("article", { name: "failed" })).getByText(/Last connection check failed/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Verify SSH resource static" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Refresh SSH Resources" }));
+    await waitFor(() => expect(api.sshResources).toHaveBeenCalledTimes(2));
+    expect(api.verifySavedSshResource).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Verify SSH resource unknown" }));
+    await waitFor(() => expect(api.verifySavedSshResource).toHaveBeenCalledExactlyOnceWith(target, "saved-observation", "unknown"));
+    const failed = screen.getByRole("article", { name: "unknown" });
+    expect(within(failed).getByText(/Last connection check failed/)).toBeInTheDocument();
+    expect(failed.querySelector("time")).toHaveAttribute("datetime", new Date(1_700_000_100_000).toISOString());
+    expect(within(failed).queryByText(/Last connection check succeeded/)).not.toBeInTheDocument();
+    expect(api.probeSshConnection).not.toHaveBeenCalled();
+    expect(api.restartOwnedRunner).not.toHaveBeenCalled();
+  });
+
+  it("does not invent verification for imported or legacy resources and does not replay uncertain checks", async () => {
+    const legacy = inventory([resource("legacy")]);
+    api.sshResources.mockResolvedValue(legacy);
+    const rendered = render(<Harness mode="ssh" />);
+    expect(within(await screen.findByRole("article", { name: "legacy" })).getByText("Connection not verified")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Verify SSH resource legacy" })).not.toBeInTheDocument();
+    rendered.unmount();
+    const current = { ...legacy, verification_supported: true, verifications: [{ name: "legacy", verification: null }] };
+    api.sshResources.mockResolvedValue(current);
+    api.verifySavedSshResource.mockRejectedValue({ message: "private-check-error" });
+    render(<Harness mode="ssh" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Verify SSH resource legacy" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("Operation status uncertain"));
+    expect(api.verifySavedSshResource).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).not.toContain("private-check-error");
+    expect(within(await screen.findByRole("article", { name: "legacy" })).getByText("Connection not verified")).toBeInTheDocument();
+  });
+
+  it("keeps configured resources visible when optional verification history is unavailable", async () => {
+    api.sshResources.mockResolvedValue({ ...inventory([resource("saved")]), verification_supported: true,
+      verification_unavailable: true, verifications: [{ name: "saved", verification: null }] });
+    render(<Harness mode="ssh" />);
+    const row = await screen.findByRole("article", { name: "saved" });
+    expect(within(row).getByText(/Loaded in Runner/)).toBeInTheDocument();
+    expect(within(row).getByText("Connection not verified")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("Verification history could not be read safely");
+    expect(screen.getByRole("button", { name: "Verify SSH resource saved" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Remove saved" })).toBeEnabled();
+    expect(api.verifySavedSshResource).not.toHaveBeenCalled();
   });
 
   it("discards an open SSH credential form when the selected Runner changes", async () => {

@@ -319,6 +319,112 @@ class RunnerRestartReadinessTests(unittest.TestCase):
         acceptance.tool.assert_not_called()
 
 
+class SavedVerificationAcceptanceTests(unittest.TestCase):
+    def fixture(self):
+        temporary = tempfile.TemporaryDirectory(prefix="wc-verification-history-")
+        self.addCleanup(temporary.cleanup)
+        acceptance = object.__new__(ConnectionAcceptance)
+        acceptance.root = Path(temporary.name)
+        acceptance.owner, acceptance.logs = "fixture-owner", []
+        counts = {name: 0 for name in FIXTURE_COUNTERS}
+        acceptance.ssh = SimpleNamespace(password="fixture-password-canary", passphrase="fixture-passphrase-canary",
+                                         diagnostic_counts=lambda: counts.copy())
+        registry = acceptance.root / "managed-ssh-resources.json"
+        registry.write_text(json.dumps({"version": 1, "revision": 7, "resources": {}}))
+        before = {"checked_at": 1_700_000_000, "error_kind": None}
+        after = {"checked_at": 1_700_000_010, "error_kind": None}
+        return acceptance, counts, registry, before, after
+
+    @staticmethod
+    def status(record, binding="fresh-binding"):
+        return {"verification_supported": True, "verification_unavailable": False, "binding": binding,
+                "verifications": [{"name": "password-fixture", "verification": record}]}
+
+    def test_one_saved_probe_preserves_canonical_revision_and_reads_its_exact_history(self):
+        acceptance, counts, registry, before, after = self.fixture()
+        original = registry.read_bytes()
+        calls = []
+
+        def post(path, body, token):
+            calls.append((path.rsplit("/", 1)[1], body, token))
+            if path.endswith("/verify_saved"):
+                self.assertEqual(body, {"binding": "old-binding", "name": "password-fixture"})
+                counts["successful_passwords"] += 1
+                counts["executions"] += 1
+                return {"success": True, "output": {"resource": "password-fixture", "persisted": True, "verification": after}}
+            self.assertTrue(path.endswith("/status"))
+            self.assertEqual(body, {"runner": "ssh-setup-runner"})
+            return {"success": True, "output": self.status(after)}
+
+        acceptance.post = post
+        with mock.patch("scripts.e2e_ssh_connections.time.time", return_value=1_700_000_010), \
+                mock.patch("builtins.print"):
+            acceptance.verify_saved_once(self.status(before, "old-binding"), before)
+        self.assertEqual([call[0] for call in calls], ["verify_saved", "status"])
+        self.assertEqual(acceptance.canonical_registry_snapshot()[0], 7)
+        self.assertEqual(registry.read_bytes(), original)
+
+    def test_history_read_rejects_missing_wrong_or_private_evidence_and_never_probes(self):
+        for change in ["missing", "resource", "timestamp", "failure", "private", "unavailable", "unsupported", "effect"]:
+            with self.subTest(change=change):
+                acceptance, counts, _, before, _ = self.fixture()
+                status = self.status(before.copy())
+                if change == "missing":
+                    status["verifications"] = []
+                elif change == "resource":
+                    status["verifications"][0]["name"] = "other"
+                elif change == "timestamp":
+                    status["verifications"][0]["verification"]["checked_at"] = True
+                elif change == "failure":
+                    status["verifications"][0]["verification"]["error_kind"] = "ssh_authentication_failed"
+                elif change == "private":
+                    status["verifications"][0]["verification"]["private"] = "fixture-private-marker"
+                elif change == "unavailable":
+                    status["verification_unavailable"] = True
+                elif change == "unsupported":
+                    status["verification_supported"] = False
+
+                def post(path, body, token):
+                    self.assertTrue(path.endswith("/status"))
+                    if change == "effect":
+                        counts["executions"] += 1
+                    return {"success": True, "output": status}
+
+                acceptance.post = mock.Mock(side_effect=post)
+                with self.assertRaises(AssertionError) as error:
+                    acceptance.observe_verification()
+                self.assertNotIn("fixture-private-marker", str(error.exception))
+                acceptance.post.assert_called_once()
+
+    def test_saved_probe_failure_or_contract_mismatch_never_retries(self):
+        for change in ["operator_failure", "resource", "persisted", "stale_time", "no_auth", "double_auth", "no_exec", "double_exec", "registry"]:
+            with self.subTest(change=change):
+                acceptance, counts, registry, before, after = self.fixture()
+                calls = []
+
+                def post(path, body, token):
+                    calls.append(path.rsplit("/", 1)[1])
+                    if path.endswith("/status"):
+                        return {"success": True, "output": self.status(after)}
+                    self.assertTrue(path.endswith("/verify_saved"))
+                    if change == "operator_failure":
+                        return {"success": False, "output": {"error_kind": "ssh_connection_failed"}}
+                    counts["successful_passwords"] += {"no_auth": 0, "double_auth": 2}.get(change, 1)
+                    counts["executions"] += {"no_exec": 0, "double_exec": 2}.get(change, 1)
+                    if change == "registry":
+                        registry.write_text(json.dumps({"version": 1, "revision": 8, "resources": {}}))
+                    output = {"resource": "other" if change == "resource" else "password-fixture",
+                              "persisted": change != "persisted", "verification": before if change == "stale_time" else after}
+                    return {"success": True, "output": output}
+
+                acceptance.post = post
+                with mock.patch("scripts.e2e_ssh_connections.time.time", return_value=1_700_000_010), \
+                        self.assertRaises(AssertionError):
+                    acceptance.verify_saved_once(self.status(before, "old-binding"), before)
+                self.assertEqual(calls.count("verify_saved"), 1)
+                self.assertTrue(set(calls) <= {"verify_saved", "status"})
+
+
 class SshFixtureInputTests(unittest.TestCase):
     def empty_fixture(self):
         fixture = object.__new__(SshFixture)

@@ -294,6 +294,10 @@ fn ssh_resource_trace_payload(
 ) -> Value {
     let (action, resource_name, target_present, default_cwd_present) = match request {
         SshResourceRequest::List => ("list", None, false, false),
+        SshResourceRequest::Status => ("status", None, false, false),
+        SshResourceRequest::VerifySaved { name, .. } => {
+            ("verify_saved", Some(name.as_str()), false, false)
+        }
         SshResourceRequest::Inspect { .. } => ("inspect", None, false, false),
         SshResourceRequest::Probe { .. } => ("probe", None, false, false),
         SshResourceRequest::RegisterConnection {

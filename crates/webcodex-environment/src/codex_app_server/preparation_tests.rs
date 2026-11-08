@@ -1,5 +1,24 @@
 use super::*;
 
+#[test]
+fn preparation_discovery_diagnostics_keep_fixed_distinct_codes() {
+    for code in [
+        "codex_not_found",
+        "codex_requires_native_executable",
+        "codex_npm_layout_invalid",
+        "codex_node_not_found",
+        "codex_launcher_arguments_invalid",
+    ] {
+        let diagnostic = preparation_error(code);
+        assert_eq!(diagnostic.code, code);
+        assert!(!diagnostic.message.is_empty());
+        assert!(!diagnostic.recovery.is_empty());
+    }
+    let unknown = preparation_error("private-diagnostic-sentinel");
+    assert_eq!(unknown.code, "codex_prepare_failed");
+    assert!(!unknown.to_string().contains("private-diagnostic-sentinel"));
+}
+
 fn fixture_profile(python: &Path, adapter: &Path, receipt: &Path) -> PreparedCodex {
     PreparedCodex {
         status: "ready".into(),

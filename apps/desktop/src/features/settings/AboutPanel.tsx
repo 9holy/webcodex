@@ -28,6 +28,14 @@ function AboutPanelContent({ state, updates }: AboutPanelProps) {
   const identity = desktopIdentity(state);
   const showWorkflow = Boolean(updates?.local?.view.upgrade || updates?.local?.view.restart_required || updates?.status?.update_available || updates?.status?.download?.pending_install || updates?.status?.download?.error_kind === "recovery_required");
   const [linkError, setLinkError] = useState(false);
+  const [inspectionBusy, setInspectionBusy] = useState(false);
+  const inspecting = useRef(false);
+  const inspect = async () => {
+    if (!updates || inspecting.current || updates.actionBusy || state.current_operation) return;
+    inspecting.current = true; setInspectionBusy(true);
+    try { await updates.refreshLocal(true); }
+    finally { inspecting.current = false; setInspectionBusy(false); }
+  };
   useEffect(() => {
     const controller = new AbortController(); observation.current = controller;
     const request = ++runtimeRequest.current;
@@ -75,7 +83,7 @@ function AboutPanelContent({ state, updates }: AboutPanelProps) {
       <div><dt>{p(updates?.manualError || updates?.status?.cached ? "latestKnownStableRelease" : "latestStableRelease")}</dt><dd>{updates?.status?.latest?.version ?? p(updates?.manualError ? "runtimeVersionUnavailable" : "runtimeStartupNotChecked")}</dd></div>
       <div><dt>{p("localRuntimeVersions")}</dt><dd>{runtimeVersions || p(runtimeUnconfirmed ? "runtimeVersionUnavailable" : "runtimeStartupNotChecked")}</dd></div>
       <div><dt>{p("localRuntimeCompatibility")}</dt><dd>{compatibility}</dd></div></dl>
-    {updates && <><UpdateComponents local={updates.local} /><button type="button" className="secondary-button" disabled={updates.actionBusy || Boolean(state.current_operation)} onClick={() => void updates.refreshLocal(true)}>{u("Inspect installed files")}</button>{updates.localError && <p role="status">{u("Local update status could not be confirmed.")}</p>}</>}
+    {updates && <><UpdateComponents local={updates.local} /><button type="button" className="secondary-button" disabled={inspectionBusy || updates.actionBusy || Boolean(state.current_operation)} onClick={() => void inspect()}>{u(inspectionBusy ? "Inspecting local components…" : "Inspect installed files")}</button>{updates.localError && <p role="status">{u("Local update status could not be confirmed.")}</p>}</>}
     <p className="field-help">{p("localRuntimeVersionsHelp")}</p>
     <button type="button" className="secondary-button" disabled={runtimeBusy || Boolean(state.current_operation)} onClick={() => void recheck()}>{p("recheckLocalRuntime")}</button>
     {runtimeBusy && <p role="status">{p("checkingLocalRuntime")}</p>}

@@ -59,6 +59,7 @@ export const desktopApi = {
   removeCodingAgent: (target: SettingsTarget, providerId: string, expectedRevision: number) =>
     invoke<DesktopState>("remove_coding_agent", { request: { target, provider_id: providerId, expected_revision: expectedRevision } }),
   sshResources: () => invoke<SshResourcesSnapshot>("ssh_resource_list"),
+  verifySavedSshResource: (expected: SettingsTarget, observation_id: string, name: string) => invoke<SshMutationResult>("ssh_resource_verify_saved", { request: { expected, observation_id, name } }),
   runnerCapabilityAuthorization: (expected: SettingsTarget) =>
     invoke<RunnerCapabilityAuthorizationSnapshot>("runner_capability_authorization", { expected }),
   authorizeRunnerCapabilities: (expected: SettingsTarget, capability: "runner_capabilities" | "coding_approval" | "detached_execution" = "runner_capabilities") =>

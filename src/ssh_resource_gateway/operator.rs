@@ -49,16 +49,25 @@ pub(crate) struct RemoveInput {
 
 pub(crate) enum OperatorRequest {
     List(ListInput),
+    Status(ListInput),
     Inspect(InspectInput),
     Probe(ProbeInput),
     Register(RegisterInput),
     Remove(RemoveInput),
+    VerifySaved(RemoveInput),
 }
 
 impl OperatorRequest {
     fn policy(&self) -> SpecializedOperationPolicy {
         match self {
-            Self::List(_) => SshResourceOperation::List.policy(),
+            Self::List(_) | Self::Status(_) => SshResourceOperation::List.policy(),
+            Self::VerifySaved(_) => SpecializedOperationPolicy::management(
+                SpecializedSource::SshResource,
+                "verify_saved",
+                SCOPE_SSH_LOCAL,
+                true,
+                false,
+            ),
             Self::Inspect(_) => SpecializedOperationPolicy::read(
                 SpecializedSource::SshResource,
                 "inspect",
@@ -77,6 +86,8 @@ impl OperatorRequest {
     fn audit_identity(&self) -> Value {
         match self {
             Self::List(input) => json!({"action":"list","runner":input.runner}),
+            Self::Status(input) => json!({"action":"status","runner":input.runner}),
+            Self::VerifySaved(input) => json!({"action":"verify_saved","resource_name":input.name}),
             Self::Inspect(_) => json!({"action":"inspect","endpoint_present":true}),
             Self::Probe(_) => {
                 json!({"action":"probe","endpoint_present":true,"authentication_present":true})
@@ -162,6 +173,43 @@ async fn execute(
     auth: &AuthContext,
 ) -> Result<Value, GatewayError> {
     match request {
+        OperatorRequest::Status(input) => {
+            let runner = resolve_runner(runtime, &input.runner, Some(auth)).await?;
+            if !runner.verification_history {
+                let mut value = list_resolved(runtime, &runner, Some(auth)).await?;
+                value["setup_supported"] = json!(runner.connection_setup);
+                value["verification_supported"] = json!(false);
+                value["verification_unavailable"] = json!(false);
+                value["verifications"] = json!([]);
+                return Ok(value);
+            }
+            let response =
+                execute_exact(runtime, &runner, SshResourceRequest::Status, Some(auth)).await?;
+            let SshResourceResponse::Status {
+                revision,
+                resources,
+                verifications,
+                verification_unavailable,
+            } = response
+            else {
+                return response_to_error(response);
+            };
+            let mut value = list_projection(runtime, &runner, Some(auth), revision, resources);
+            value["setup_supported"] = json!(runner.connection_setup);
+            value["verification_supported"] = json!(true);
+            value["verifications"] = json!(verifications);
+            value["verification_unavailable"] = json!(verification_unavailable);
+            Ok(value)
+        }
+        OperatorRequest::VerifySaved(input) => {
+            execute_bound(runtime, input.binding, auth, true, |expected_revision| {
+                SshResourceRequest::VerifySaved {
+                    expected_revision,
+                    name: input.name,
+                }
+            })
+            .await
+        }
         OperatorRequest::List(input) => {
             let runner = resolve_runner(runtime, &input.runner, Some(auth)).await?;
             let mut value = list_resolved(runtime, &runner, Some(auth)).await?;
@@ -242,7 +290,9 @@ async fn execute_bound(
     request.validate().map_err(|_| {
         GatewayError::new("ssh_resource_invalid", "SSH connection request is invalid")
     })?;
-    if request.requires_connection_setup() && !runner.connection_setup {
+    if (request.requires_connection_setup() && !runner.connection_setup)
+        || (request.requires_verification_history() && !runner.verification_history)
+    {
         return Err(GatewayError::new(
             "ssh_connection_setup_unsupported",
             "Upgrade this Runner to configure SSH connection authentication",
@@ -255,6 +305,15 @@ async fn execute_bound(
         return Err(binding_required_error());
     }
     let response = execute_exact(runtime, &runner, request, Some(auth)).await?;
+    if let SshResourceResponse::VerifySaved {
+        resource,
+        persisted,
+        verification,
+        ..
+    } = response
+    {
+        return Ok(json!({"resource":resource,"persisted":persisted,"verification":verification}));
+    }
     if mutation {
         return render_mutation_response(runtime, &binding_id, response);
     }

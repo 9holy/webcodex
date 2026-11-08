@@ -18,6 +18,8 @@ CONTRACT = "webcodex-codex-acp-v1"
 MAX_SCHEMA = 4 * 1024 * 1024
 MAX_RECEIPT = 16 * 1024
 MAX_EXECUTABLE = 1024 * 1024 * 1024
+MAX_NPM_PACKAGE = 64 * 1024
+WINDOWS = os.name == "nt"
 
 
 class Failure(Exception):
@@ -55,22 +57,86 @@ def fingerprint(path):
     return digest.hexdigest()
 
 
-def resolve_command(binary, arguments):
-    path = shutil.which(binary) if not os.path.isabs(binary) else binary
-    if not path or not Path(path).is_file():
-        raise Failure("codex_not_found")
-    path = str(Path(path).resolve())
-    if Path(path).suffix.lower() in (".cmd", ".bat", ".ps1"):
-        raise Failure("codex_requires_native_executable")
+def launcher_arguments(arguments):
     if len(arguments) > 8 or any(not isinstance(arg, str) or len(arg) > 4096
                                  or "\x00" in arg for arg in arguments):
         raise Failure("codex_launcher_arguments_invalid")
-    return [path, *arguments]
+
+
+def npm_command(shim, arguments):
+    # npm's Windows shims have this fixed sibling package layout. Never read or
+    # execute shell text, invoke npm, or search other installation directories.
+    if shim.name.lower() not in ("codex.cmd", "codex.ps1"):
+        raise Failure("codex_requires_native_executable")
+    package = shim.parent / "node_modules" / "@openai" / "codex"
+    script = package / "bin" / "codex.js"
+    try:
+        with (package / "package.json").open("rb") as stream:
+            raw = stream.read(MAX_NPM_PACKAGE + 1)
+        if len(raw) > MAX_NPM_PACKAGE:
+            raise ValueError("package limit")
+        metadata = parse_json(raw)
+        if (not isinstance(metadata, dict) or metadata.get("name") != "@openai/codex"
+                or metadata.get("bin") != {"codex": "bin/codex.js"}
+                or not script.is_file()):
+            raise ValueError("package layout")
+        script = script.resolve(strict=True)
+    except (OSError, ValueError, RuntimeError):
+        raise Failure("codex_npm_layout_invalid") from None
+    try:
+        local_node = shim.parent / "node.exe"
+        node = local_node if local_node.exists() else shutil.which("node.exe")
+        if not node or not Path(node).is_file() or Path(node).suffix.lower() != ".exe":
+            raise Failure("codex_node_not_found")
+        node = Path(node).resolve(strict=True)
+        if node.suffix.lower() != ".exe":
+            raise Failure("codex_node_not_found")
+    except (OSError, ValueError, RuntimeError):
+        raise Failure("codex_node_not_found") from None
+    resolved_arguments = [str(script), *arguments]
+    launcher_arguments(resolved_arguments)
+    return [str(node), *resolved_arguments]
+
+
+def default_windows_codex():
+    # These are the two standard per-user install locations, not a directory
+    # scan. A selected-but-invalid installation must never fall through.
+    local = os.environ.get("LOCALAPPDATA")
+    if local and Path(local).is_absolute():
+        standalone = Path(local) / "Programs" / "OpenAI" / "Codex" / "bin" / "codex.exe"
+        if standalone.exists():
+            return standalone
+    roaming = os.environ.get("APPDATA")
+    if roaming and Path(roaming).is_absolute():
+        for name in ("codex.cmd", "codex.ps1"):
+            shim = Path(roaming) / "npm" / name
+            if shim.exists():
+                return shim
+    return None
+
+
+def resolve_command(binary, arguments):
+    launcher_arguments(arguments)
+    try:
+        path = shutil.which(binary) if not os.path.isabs(binary) else binary
+        if path is None and WINDOWS and binary == "codex":
+            path = default_windows_codex()
+        if not path or not Path(path).is_file():
+            raise Failure("codex_not_found")
+        path = Path(path).resolve(strict=True)
+    except (OSError, ValueError, RuntimeError):
+        raise Failure("codex_not_found") from None
+    if path.suffix.lower() in (".cmd", ".bat", ".ps1"):
+        if WINDOWS:
+            return npm_command(path, arguments)
+        raise Failure("codex_requires_native_executable")
+    return [str(path), *arguments]
 
 
 def command_files(command):
     # Bind interpreter launchers to their explicit script as well as the native
-    # executable. Do not scan directories or read unrelated configuration.
+    # executable, including the absolute Node/script pair discovered from npm.
+    # Do not scan directories or read unrelated configuration.
     return {arg: fingerprint(arg) for index, arg in enumerate(command)
             if index == 0 or os.path.isabs(arg) and Path(arg).is_file()}
 

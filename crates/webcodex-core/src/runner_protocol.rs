@@ -1191,6 +1191,12 @@ runner_capabilities! {
         #[serde(default, skip_serializing_if = "is_false")]
         pub ssh_connection_setup: bool = false;
     }
+    /// Operator-only saved connection checks and durable verification history.
+    SshVerificationHistory => RUNNER_CAPABILITY_SSH_VERIFICATION_HISTORY("ssh_verification_history"),
+    v2_baseline = false {
+        #[serde(default, skip_serializing_if = "is_false")]
+        pub ssh_verification_history: bool = false;
+    }
     /// First-class read/check and fenced activation of the exact Runner process's
     /// startup-bound configuration path. Missing on older Runners is false; Servers
     /// must never fall back to PID/signal emulation for this operation.
@@ -3074,6 +3080,7 @@ mod envelope_tests {
                 mcp_gateway_resource_links: false,
                 managed_ssh_resources: false,
                 ssh_connection_setup: false,
+                ssh_verification_history: false,
                 runner_config_control: false,
                 instruction_runtime: false,
             },
@@ -3203,6 +3210,37 @@ mod envelope_tests {
         let enabled: RunnerCapabilities =
             serde_json::from_str(r#"{"mcp_gateway_resource_links":true}"#).unwrap();
         assert!(enabled.supports(RunnerCapabilityId::McpGatewayResourceLinks));
+    }
+
+    #[test]
+    fn ssh_verification_history_is_an_optional_additive_registration_capability() {
+        let legacy: RunnerCapabilities = serde_json::from_str(
+            r#"{"shell":true,"managed_ssh_resources":true,"ssh_connection_setup":true}"#,
+        )
+        .unwrap();
+        assert!(!legacy.ssh_verification_history);
+        assert!(!RunnerCapabilityId::SshVerificationHistory.is_v2_baseline());
+        assert!(serde_json::to_value(&legacy)
+            .unwrap()
+            .get("ssh_verification_history")
+            .is_none());
+        let enabled: RunnerCapabilities = serde_json::from_str(
+            r#"{"shell":true,"ssh_verification_history":true,"future_unknown_capability":true}"#,
+        )
+        .unwrap();
+        assert!(enabled.shell && enabled.ssh_verification_history);
+        // The registration wire is a tolerant object of booleans, not a closed
+        // enum list. Older peers ignore new fields without losing known features.
+        #[derive(Deserialize)]
+        struct PublishedCapabilities {
+            shell: bool,
+            managed_ssh_resources: bool,
+            ssh_connection_setup: bool,
+        }
+        let mut wire = serde_json::to_value(legacy).unwrap();
+        wire["ssh_verification_history"] = serde_json::json!(true);
+        let older: PublishedCapabilities = serde_json::from_value(wire).unwrap();
+        assert!(older.shell && older.managed_ssh_resources && older.ssh_connection_setup);
     }
 
     #[test]
