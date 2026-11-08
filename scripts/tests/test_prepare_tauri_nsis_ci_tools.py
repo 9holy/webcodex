@@ -74,6 +74,142 @@ class TauriNsisCiToolsTests(unittest.TestCase):
         if self.parent.exists():
             self.assertEqual(list(self.parent.glob(".webcodex-nsis-*")), [])
 
+    def prefetch_inputs(self):
+        inputs = self.root / "prefetched"
+        inputs.mkdir()
+        (inputs / "nsis-3.11.zip").write_bytes(self.archive)
+        (inputs / "nsis_tauri_utils.dll").write_bytes(self.plugin)
+        return inputs
+
+    def test_prefetched_inputs_create_and_reverify_cache_without_network_or_source_writes(self):
+        inputs = self.prefetch_inputs()
+        before = {path.name: (path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes())
+                  for path in inputs.iterdir()}
+        for outcome in ("created", "reused"):
+            result = tools.prepare_tools(self.parent, inputs)
+            self.assertEqual(result["outcome"], outcome)
+            self.assertEqual(result["verified_files"], len(self.contents) + 1)
+            self.assertEqual(result["archive_sha256"], hashlib.sha256(self.archive).hexdigest())
+            self.assertEqual(result["archive_sha1"], hashlib.sha1(self.archive).hexdigest())
+            self.assertEqual(result["plugin_sha256"], hashlib.sha256(self.plugin).hexdigest())
+            self.assertEqual(result["plugin_sha1"], hashlib.sha1(self.plugin).hexdigest())
+        self.assertEqual(before, {path.name: (path.stat().st_ino, path.stat().st_mtime_ns, path.read_bytes())
+                                  for path in inputs.iterdir()})
+        self.download.assert_not_called()
+        self.assert_no_stage()
+
+    def test_bad_prefetched_inputs_fail_closed_without_network_or_adoption(self):
+        inputs = self.prefetch_inputs()
+        for basename, original in (("nsis-3.11.zip", self.archive), ("nsis_tauri_utils.dll", self.plugin)):
+            for kind in ("digest", "short", "oversize", "missing"):
+                with self.subTest(input=basename, kind=kind):
+                    path = inputs / basename
+                    if kind == "missing":
+                        path.unlink()
+                        expected = FileNotFoundError
+                    else:
+                        content = bytes([original[0] ^ 1]) + original[1:] if kind == "digest" else (
+                            original[:-1] if kind == "short" else original + b"x")
+                        path.write_bytes(content)
+                        expected = tools.PreparationError
+                    with self.assertRaises(expected):
+                        tools.prepare_tools(self.parent, inputs)
+                    self.assertFalse((self.parent / "NSIS").exists())
+                    self.assert_no_stage()
+                    if kind != "missing":
+                        self.assertEqual(path.read_bytes(), content)
+                    path.write_bytes(original)
+        self.download.assert_not_called()
+
+    def test_prefetched_hardlink_and_reparse_file_are_rejected(self):
+        inputs = self.prefetch_inputs()
+        archive = inputs / "nsis-3.11.zip"
+        link = self.root / "same-file"
+        os.link(archive, link)
+        with self.assertRaisesRegex(tools.PreparationError, "unsafe_file"):
+            tools.prepare_tools(self.parent, inputs)
+        link.unlink()
+        original = Path.lstat
+
+        def reparse(path, *args, **kwargs):
+            info = original(path, *args, **kwargs)
+            if path == archive:
+                return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=tools.REPARSE_POINT)
+            return info
+
+        with mock.patch.object(Path, "lstat", reparse):
+            with self.assertRaisesRegex(tools.PreparationError, "unsafe_file"):
+                tools.prepare_tools(self.parent, inputs)
+        self.assertEqual(archive.read_bytes(), self.archive)
+        self.assertFalse((self.parent / "NSIS").exists())
+        self.download.assert_not_called()
+        self.assert_no_stage()
+
+    def test_input_directory_is_existing_absolute_and_has_no_reparse_ancestors(self):
+        for path, error in ((Path("relative-inputs"), tools.PreparationError),
+                            (self.root / "missing-inputs", FileNotFoundError),
+                            (self.root / ".." / "inputs", tools.PreparationError)):
+            with self.subTest(path=path), self.assertRaises(error):
+                tools.prepare_tools(self.parent, path)
+        self.assertFalse((self.root / "missing-inputs").exists())
+        inputs = self.prefetch_inputs()
+        original = Path.lstat
+
+        def reparse(path, *args, **kwargs):
+            info = original(path, *args, **kwargs)
+            if path == inputs:
+                return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=tools.REPARSE_POINT)
+            return info
+
+        with mock.patch.object(Path, "lstat", reparse):
+            with self.assertRaisesRegex(tools.PreparationError, "unsafe_directory"):
+                tools.prepare_tools(self.parent, inputs)
+        self.download.assert_not_called()
+        self.assertFalse(self.parent.exists())
+
+    def test_prefetched_copy_rejects_changed_input_directory_before_extraction(self):
+        inputs = self.prefetch_inputs()
+        first = tools._input_directory_identity(inputs)
+        with mock.patch.object(tools, "_input_directory_identity", side_effect=[first, first + ((1, 1),)]), \
+                mock.patch.object(tools, "_extract_tools") as extract:
+            with self.assertRaisesRegex(tools.PreparationError, "input_directory_changed"):
+                tools.prepare_tools(self.parent, inputs)
+        extract.assert_not_called()
+        self.download.assert_not_called()
+        self.assertFalse((self.parent / "NSIS").exists())
+        self.assert_no_stage()
+
+    def test_prefetched_mode_still_rejects_changed_cache_without_repair(self):
+        inputs = self.prefetch_inputs()
+        tools.prepare_tools(self.parent, inputs)
+        altered = self.parent / "NSIS/Include/MUI2.nsh"
+        changed = b"X" + self.contents["Include/MUI2.nsh"][1:]
+        altered.write_bytes(changed)
+        with self.assertRaisesRegex(tools.PreparationError, "cache_file_digest"):
+            tools.prepare_tools(self.parent, inputs)
+        self.assertEqual(altered.read_bytes(), changed)
+        self.download.assert_not_called()
+        self.assert_no_stage()
+
+    def test_extraction_consumes_verified_owned_copies_of_prefetched_inputs(self):
+        inputs = self.prefetch_inputs()
+        original = tools._extract_tools
+
+        def change_originals(archive, plugin, tree, digest):
+            self.assertEqual(archive.parent, tree.parent)
+            self.assertEqual(plugin.parent, tree.parent)
+            self.assertNotEqual(archive.parent, inputs)
+            (inputs / archive.name).write_bytes(b"changed original archive after the verified copy")
+            (inputs / plugin.name).write_bytes(b"changed original plugin after the verified copy")
+            return original(archive, plugin, tree, digest)
+
+        with mock.patch.object(tools, "_extract_tools", change_originals):
+            self.assertEqual(tools.prepare_tools(self.parent, inputs)["outcome"], "created")
+        self.assertEqual((self.parent / "NSIS/makensis.exe").read_bytes(), self.contents["makensis.exe"])
+        self.assertEqual((self.parent / "NSIS" / tools.PLUGIN).read_bytes(), self.plugin)
+        self.download.assert_not_called()
+        self.assert_no_stage()
+
     def test_creates_complete_official_tree_plus_plugin(self):
         result = tools.prepare_tools(self.parent)
         self.assertEqual(result["outcome"], "created")

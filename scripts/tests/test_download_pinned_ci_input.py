@@ -19,6 +19,8 @@ from scripts import download_pinned_ci_input as download
 
 
 URL = "https://github.com/example/project/releases/download/v1/input.bin"
+API_URL = "https://api.github.com/repos/example/project/releases/assets/1"
+SOURCEFORGE_URL = "https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11.zip"
 
 
 def asset_for(data: bytes, *, sha1: bool = False) -> download.PinnedAsset:
@@ -120,6 +122,88 @@ class TransferTests(unittest.TestCase):
         self.assertEqual(opener.open.call_args.args[0].get_header("Accept"), "application/octet-stream")
         self.assertEqual(self.output.read_bytes(), data)
 
+    def test_initial_api_503_uses_browser_once_then_only_the_first_final_url(self):
+        data = b"a" * download.CHUNK_BYTES + b"b" * download.CHUNK_BYTES + b"tail"
+        binary = "https://release-assets.githubusercontent.com/input?private=fixture"
+        asset = replace(asset_for(data, sha1=True), api_url=API_URL)
+        bounds = [(0, download.CHUNK_BYTES - 1),
+                  (download.CHUNK_BYTES, 2 * download.CHUNK_BYTES - 1),
+                  (2 * download.CHUNK_BYTES, len(data) - 1)]
+        error_body = io.BytesIO(b"not part of the pinned object")
+        responses = [urllib.error.HTTPError(API_URL, 503, "private detail", None, error_body)]
+        responses += [Response(data[a:b + 1], 206,
+            [("Content-Range", f"bytes {a}-{b}/{len(data)}")], url=binary) for a, b in bounds]
+        with mock.patch.object(download.time, "sleep") as sleep:
+            opener = self.transfer(asset, responses)
+        self.assertEqual(self.output.read_bytes(), data)
+        self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list],
+                         [API_URL, URL, binary, binary])
+        self.assertEqual([call.args[0].get_header("Range") for call in opener.open.call_args_list],
+                         [f"bytes={a}-{b}" for a, b in [bounds[0], *bounds]])
+        self.assertTrue(error_body.closed)
+        sleep.assert_not_called()
+
+    def test_browser_only_entry_also_pins_its_first_final_url(self):
+        data = b"a" * download.CHUNK_BYTES + b"b" * download.CHUNK_BYTES + b"tail"
+        binary = "https://release-assets.githubusercontent.com/input?private=first"
+        later_redirect = "https://release-assets.githubusercontent.com/input?private=later"
+        bounds = [(0, download.CHUNK_BYTES - 1),
+                  (download.CHUNK_BYTES, 2 * download.CHUNK_BYTES - 1),
+                  (2 * download.CHUNK_BYTES, len(data) - 1)]
+        responses = [Response(data[a:b + 1], 206,
+            [("Content-Range", f"bytes {a}-{b}/{len(data)}")],
+            url=binary if a == 0 else later_redirect) for a, b in bounds]
+        opener = self.transfer(asset_for(data), responses)
+        self.assertEqual(self.output.read_bytes(), data)
+        self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list],
+                         [URL, binary, binary])
+
+    def test_third_official_entry_accepts_a_complete_pinned_200_without_range_relaxation(self):
+        data = b"x" * (download.CHUNK_BYTES + 1)
+        asset = replace(asset_for(data, sha1=True), api_url=API_URL,
+                        sourceforge_url=SOURCEFORGE_URL)
+        responses = [
+            urllib.error.HTTPError(API_URL, 502, "private detail", None, None),
+            urllib.error.HTTPError(URL, 504, "private detail", None, None),
+            Response(data, 200, [("Content-Length", str(len(data)))],
+                     url="https://official.dl.sourceforge.net/project/nsis/input.zip"),
+        ]
+        with mock.patch.object(download.time, "sleep") as sleep:
+            opener = self.transfer(asset, responses)
+        self.assertEqual(self.output.read_bytes(), data)
+        self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list],
+                         [API_URL, URL, SOURCEFORGE_URL])
+        self.assertEqual([call.args[0].get_header("Range") for call in opener.open.call_args_list],
+                         [f"bytes=0-{download.CHUNK_BYTES - 1}"] * 3)
+        self.assertTrue(all(call.kwargs == {"timeout": 30} for call in opener.open.call_args_list))
+        sleep.assert_not_called()
+
+    def test_initial_open_budget_is_shared_and_each_official_entry_is_used_once(self):
+        base = asset_for(b"expected")
+        for asset, urls in (
+            (base, [URL]),
+            (replace(base, api_url=API_URL), [API_URL, URL]),
+            (replace(base, api_url=API_URL, sourceforge_url=SOURCEFORGE_URL),
+             [API_URL, URL, SOURCEFORGE_URL]),
+            (replace(base, api_url=API_URL, sourceforge_url=URL), [API_URL, URL]),
+        ):
+            for status in (502, 503, 504):
+                with self.subTest(entries=len(urls), status=status):
+                    opener = mock.Mock()
+                    opener.open.side_effect = [
+                        urllib.error.HTTPError(url, status, "private detail", None, None)
+                        for url in urls
+                    ] + [Response(b"expected", 200)]
+                    with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
+                            mock.patch.object(download.time, "sleep") as sleep:
+                        with self.assertRaises(urllib.error.HTTPError) as raised:
+                            download._download_to_staging(asset, self.output)
+                    self.assertEqual(raised.exception.code, status)
+                    self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list], urls)
+                    self.assertLessEqual(opener.open.call_count, 3)
+                    sleep.assert_not_called()
+                    self.assertEqual(list(self.root.iterdir()), [])
+
     def test_partial_api_response_without_binary_redirect_cannot_repeat_api(self):
         data = b"x" * (download.CHUNK_BYTES + 1)
         api = "https://api.github.com/repos/example/project/releases/assets/1"
@@ -202,7 +286,7 @@ class TransferTests(unittest.TestCase):
         data = b"x" * download.CHUNK_BYTES + b"tail"
         api = "https://api.github.com/repos/example/project/releases/assets/1"
         binary = "https://release-assets.githubusercontent.com/input?private=fixture"
-        asset = replace(asset_for(data, sha1=True), api_url=api)
+        asset = replace(asset_for(data, sha1=True), api_url=api, sourceforge_url=SOURCEFORGE_URL)
         responses = [
             Response(data[:download.CHUNK_BYTES], 206,
                      [("Content-Range", f"bytes 0-{download.CHUNK_BYTES - 1}/{len(data)}")], url=binary),
@@ -221,50 +305,119 @@ class TransferTests(unittest.TestCase):
                          + [f"bytes={download.CHUNK_BYTES}-{len(data) - 1}"] * 3)
         self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
 
-    def test_retryable_open_error_stops_after_three_attempts_and_removes_staging(self):
+    def test_retryable_range_open_error_stops_after_three_attempts_without_switching_source(self):
+        data = b"x" * download.CHUNK_BYTES + b"tail"
+        binary = "https://release-assets.githubusercontent.com/input?private=fixture"
+        asset = replace(asset_for(data), api_url=API_URL, sourceforge_url=SOURCEFORGE_URL)
         for status in (502, 503, 504):
             with self.subTest(status=status):
                 opener = mock.Mock()
                 opener.open.side_effect = [
-                    urllib.error.HTTPError(URL, status, "private detail", None, None)
+                    Response(data[:download.CHUNK_BYTES], 206,
+                             [("Content-Range", f"bytes 0-{download.CHUNK_BYTES - 1}/{len(data)}")],
+                             url=binary),
+                ] + [
+                    urllib.error.HTTPError(binary, status, "private detail", None, None)
                     for _ in range(3)
                 ]
                 with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
                         mock.patch.object(download.time, "sleep") as sleep:
                     with self.assertRaises(urllib.error.HTTPError) as raised:
-                        download._download_to_staging(asset_for(b"expected"), self.output)
+                        download._download_to_staging(asset, self.output)
                 self.assertEqual(raised.exception.code, status)
-                self.assertEqual(opener.open.call_count, 3)
+                self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list],
+                                 [API_URL, binary, binary, binary])
                 self.assertEqual(sleep.call_args_list, [mock.call(1), mock.call(2)])
                 self.assertEqual(list(self.root.iterdir()), [])
 
     def test_other_http_open_errors_are_not_retried(self):
-        for status in (401, 403, 404, 429, 500):
+        asset = replace(asset_for(b"expected"), api_url=API_URL, sourceforge_url=SOURCEFORGE_URL)
+        for status in (401, 403, 404, 429, 500, 501):
             with self.subTest(status=status):
                 opener = mock.Mock()
                 opener.open.side_effect = urllib.error.HTTPError(URL, status, "private detail", None, None)
                 with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
                         mock.patch.object(download.time, "sleep") as sleep:
                     with self.assertRaises(urllib.error.HTTPError):
-                        download._download_to_staging(asset_for(b"expected"), self.output)
+                        download._download_to_staging(asset, self.output)
                 self.assertEqual(opener.open.call_count, 1)
                 sleep.assert_not_called()
                 self.assertEqual(list(self.root.iterdir()), [])
 
     def test_body_read_http_error_is_not_retried_after_partial_bytes(self):
-        response = Response(b"expected", 200)
-        response.read = mock.Mock(side_effect=[
-            b"ex", urllib.error.HTTPError(URL, 504, "private detail", None, None),
-        ])
-        opener = mock.Mock()
-        opener.open.return_value = response
-        with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
-                mock.patch.object(download.time, "sleep") as sleep:
-            with self.assertRaises(urllib.error.HTTPError):
-                download._download_to_staging(asset_for(b"expected"), self.output)
-        self.assertEqual(opener.open.call_count, 1)
-        sleep.assert_not_called()
-        self.assertEqual(list(self.root.iterdir()), [])
+        asset = replace(asset_for(b"expected"), api_url=API_URL, sourceforge_url=SOURCEFORGE_URL)
+        for prefix in ([], [b"ex"]):
+            with self.subTest(partial=bool(prefix)):
+                response = Response(b"expected", 200)
+                response.read = mock.Mock(side_effect=prefix + [
+                    urllib.error.HTTPError(URL, 504, "private detail", None, None),
+                ])
+                opener = mock.Mock()
+                opener.open.return_value = response
+                with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
+                        mock.patch.object(download.time, "sleep") as sleep:
+                    with self.assertRaises(urllib.error.HTTPError):
+                        download._download_to_staging(asset, self.output)
+                self.assertEqual(opener.open.call_count, 1)
+                sleep.assert_not_called()
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_initial_transport_failure_does_not_switch_official_entry(self):
+        asset = replace(asset_for(b"expected"), api_url=API_URL, sourceforge_url=SOURCEFORGE_URL)
+        for error in (urllib.error.URLError("private detail"), TimeoutError("private detail")):
+            with self.subTest(error=type(error).__name__):
+                opener = mock.Mock()
+                opener.open.side_effect = error
+                with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
+                        mock.patch.object(download.time, "sleep") as sleep:
+                    with self.assertRaises(type(error)):
+                        download._download_to_staging(asset, self.output)
+                self.assertEqual(opener.open.call_count, 1)
+                sleep.assert_not_called()
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_response_header_body_or_hash_errors_never_try_unused_official_entries(self):
+        data = b"expected"
+        base = replace(asset_for(data, sha1=True), api_url=API_URL, sourceforge_url=SOURCEFORGE_URL)
+        for response, asset, code in (
+            (Response(data, 200, [("Content-Encoding", "gzip")]), base, "content_encoding"),
+            (Response(data, 206, [("Content-Range", "bytes 0-7/9")]), base, "content_range"),
+            (Response(data, 200, [("Content-Length", "9")]), base, "content_length"),
+            (Response(data[:-1], 200), base, "chunk_length"),
+            (Response(data + b"extra", 200), base, "chunk_length"),
+            (Response(b"corrupt!", 200), base, "sha256"),
+            (Response(data, 200), replace(base, sha1="0" * 40), "sha1"),
+            (Response(data, 503), base, "http_status"),
+        ):
+            with self.subTest(code=code):
+                opener = mock.Mock()
+                opener.open.side_effect = [
+                    urllib.error.HTTPError(API_URL, 503, "private detail", None, None),
+                    response,
+                ]
+                with mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
+                        mock.patch.object(download.time, "sleep") as sleep:
+                    with self.assertRaises(download.DownloadError) as raised:
+                        download._download_to_staging(asset, self.output)
+                self.assertEqual(raised.exception.code, code)
+                self.assertEqual([call.args[0].full_url for call in opener.open.call_args_list],
+                                 [API_URL, URL])
+                sleep.assert_not_called()
+                self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_all_initial_entries_require_https_without_credentials_before_open(self):
+        base = replace(asset_for(b"expected"), api_url=API_URL, sourceforge_url=SOURCEFORGE_URL)
+        for field in ("url", "api_url", "sourceforge_url"):
+            for url, code in (("http://github.com/input", "https_required"),
+                              ("https://user:password@github.com/input", "url_credentials")):
+                with self.subTest(field=field, code=code):
+                    opener = mock.Mock()
+                    with mock.patch.object(download.urllib.request, "build_opener", return_value=opener):
+                        with self.assertRaises(download.DownloadError) as raised:
+                            download._download_to_staging(replace(base, **{field: url}), self.output)
+                    self.assertEqual(raised.exception.code, code)
+                    opener.open.assert_not_called()
+                    self.assertEqual(list(self.root.iterdir()), [])
 
     def test_internal_exclusive_open_never_removes_existing_file(self):
         self.output.write_bytes(b"existing")
@@ -414,7 +567,7 @@ class RequestBoundaryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             asset = replace(asset_for(b"expected"),
-                            api_url="https://api.github.com/repos/example/project/releases/assets/1")
+                            api_url=API_URL, sourceforge_url=SOURCEFORGE_URL)
             key = "v8-linux-x64"
             opener = mock.Mock()
             opener.open.side_effect = [
@@ -427,7 +580,7 @@ class RequestBoundaryTests(unittest.TestCase):
                 self.assertEqual(download._worker_main(key, str(root / "payload"), str(root / "error")), 1)
                 self.assertEqual((root / "error").read_text(), "http_504")
                 self.assertFalse((root / "payload").exists())
-                expected = {"phase": "api_entry", "chunk_start": 0, "chunk_end": 7, "attempt": 3}
+                expected = {"phase": "sourceforge_entry", "chunk_start": 0, "chunk_end": 7, "attempt": 3}
                 self.assertEqual(json.loads((root / "request").read_text()), expected)
                 output = io.StringIO()
                 with mock.patch.object(download.sys, "stderr", output):
@@ -440,8 +593,11 @@ class RequestBoundaryTests(unittest.TestCase):
                 for invalid in (
                     dict(expected, url="https://private.example/secret"),
                     dict(expected, phase="https://private.example/secret"),
+                    dict(expected, phase="binary_range"),
+                    dict(expected, phase="api_entry"),
+                    dict(expected, phase="browser_entry"),
                     dict(expected, chunk_start=True), dict(expected, chunk_end=8),
-                    dict(expected, attempt=4), "x" * 513,
+                    dict(expected, attempt=0), dict(expected, attempt=4), "x" * 513,
                 ):
                     with self.subTest(invalid=type(invalid).__name__):
                         (root / "request").write_text(json.dumps(invalid))
@@ -449,6 +605,55 @@ class RequestBoundaryTests(unittest.TestCase):
                         with mock.patch.object(download.sys, "stderr", output):
                             download._emit_request_diagnostic(key, root / "error", "http_504")
                         self.assertEqual(output.getvalue(), "")
+
+    def test_initial_diagnostic_ordinal_is_shared_and_later_ranges_stay_distinct(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            key = "v8-linux-x64"
+            for api, expected_phase, expected_attempt in ((None, "browser_entry", 1),
+                                                         (API_URL, "browser_entry", 2)):
+                asset = replace(asset_for(b"expected"), api_url=api)
+                opener = mock.Mock()
+                opener.open.side_effect = urllib.error.HTTPError(URL, 503, "private detail", None, None)
+                with mock.patch.object(download, "ASSETS", {key: asset}), \
+                        mock.patch.object(download.urllib.request, "build_opener", return_value=opener):
+                    self.assertEqual(download._worker_main(key, str(root / "payload"), str(root / "error")), 1)
+                    expected = {"phase": expected_phase, "chunk_start": 0, "chunk_end": 7,
+                                "attempt": expected_attempt}
+                    self.assertEqual(json.loads((root / "request").read_text()), expected)
+                    output = io.StringIO()
+                    with mock.patch.object(download.sys, "stderr", output):
+                        download._emit_request_diagnostic(key, root / "error", "http_503")
+                    self.assertEqual(json.loads(output.getvalue())["last_request"], expected)
+                self.assertEqual(opener.open.call_count, expected_attempt)
+            data = b"x" * download.CHUNK_BYTES + b"tail"
+            asset = replace(asset_for(data), api_url=API_URL, sourceforge_url=SOURCEFORGE_URL)
+            binary = "https://release-assets.githubusercontent.com/input?private=fixture"
+            opener = mock.Mock()
+            opener.open.side_effect = [
+                Response(data[:download.CHUNK_BYTES], 206,
+                         [("Content-Range", f"bytes 0-{download.CHUNK_BYTES - 1}/{len(data)}")], url=binary),
+            ] + [urllib.error.HTTPError(binary, 504, "private detail", None, None) for _ in range(3)]
+            with mock.patch.object(download, "ASSETS", {key: asset}), \
+                    mock.patch.object(download.urllib.request, "build_opener", return_value=opener), \
+                    mock.patch.object(download.time, "sleep"):
+                self.assertEqual(download._worker_main(key, str(root / "payload"), str(root / "error")), 1)
+                expected = {"phase": "binary_range", "chunk_start": download.CHUNK_BYTES,
+                            "chunk_end": len(data) - 1, "attempt": 3}
+                self.assertEqual(json.loads((root / "request").read_text()), expected)
+                output = io.StringIO()
+                with mock.patch.object(download.sys, "stderr", output):
+                    download._emit_request_diagnostic(key, root / "error", "http_504")
+                self.assertEqual(json.loads(output.getvalue())["last_request"], expected)
+                self.assertNotIn("private", output.getvalue())
+                for invalid in (dict(expected, phase="browser_entry"), dict(expected, phase="api_entry"),
+                                dict(expected, phase="sourceforge_entry")):
+                    (root / "request").write_text(json.dumps(invalid))
+                    output = io.StringIO()
+                    with mock.patch.object(download.sys, "stderr", output):
+                        download._emit_request_diagnostic(key, root / "error", "http_504")
+                    self.assertEqual(output.getvalue(), "")
+            self.assertFalse((root / "payload").exists())
 
     def test_registry_has_only_six_fixed_official_inputs(self):
         expected = {
@@ -473,7 +678,16 @@ class RequestBoundaryTests(unittest.TestCase):
             download._require_https(asset.url)
             repo, asset_id = api_assets[key]
             self.assertEqual(asset.api_url, f"https://api.github.com/repos/{repo}/releases/assets/{asset_id}")
+            self.assertEqual(asset.sourceforge_url, SOURCEFORGE_URL if key == "tauri-nsis" else None)
+            entries = download._initial_entries(asset)
+            self.assertEqual([phase for phase, _ in entries],
+                             ["api_entry", "browser_entry"]
+                             + (["sourceforge_entry"] if key == "tauri-nsis" else []))
+            self.assertEqual(len({url for _, url in entries}), len(entries))
+        self.assertEqual((download.WHOLE_FILE_TIMEOUT_SECONDS, download.SOCKET_TIMEOUT_SECONDS,
+                          download.CHUNK_BYTES, download.OPEN_ATTEMPTS), (180, 30, 1024 * 1024, 3))
         self.assertIsNone(asset_for(b"fixture").api_url)
+        self.assertIsNone(asset_for(b"fixture").sourceforge_url)
         with self.assertRaises(TypeError):
             download.ASSETS["new"] = asset_for(b"arbitrary")
         with self.assertRaisesRegex(download.DownloadError, "unknown_asset"):

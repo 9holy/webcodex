@@ -2,8 +2,10 @@
 """Download fixed old CI inputs; this is not the public candidate release gate.
 
 Each request is anonymous and uses the runner's normal urllib network routing.
-Only the fixed public release-asset API endpoints below supply binary bytes.
-Only opening a request may retry HTTP 502/503/504 twice, within the same deadline.
+The initial request tries each fixed official entry at most once, moving forward
+only on opening HTTP 502/503/504 before open() returns a response or bytes are written.
+Later ranges keep the first successful HTTPS binary URL and may retry opening
+HTTP 502/503/504 twice, within the same deadline. Integrity errors never switch source.
 There are no credentials, configurable URLs, or integrity overrides.
 A separate process bounds the complete transfer and verification on Windows too.
 Only a verified, complete file is published, without replacing an existing path.
@@ -34,6 +36,7 @@ class PinnedAsset:
     sha256: str
     sha1: str | None = None
     api_url: str | None = None
+    sourceforge_url: str | None = None
 
 
 ASSETS = MappingProxyType({
@@ -62,7 +65,8 @@ ASSETS = MappingProxyType({
         "nsis-3.11/nsis-3.11.zip",
         2361546, "c7d27f780ddb6cffb4730138cd1591e841f4b7edb155856901cdf5f214394fa1",
         "EF7FF767E5CBD9EDD22ADD3A32C9B8F4500BB10D",
-        api_url="https://api.github.com/repos/tauri-apps/binary-releases/releases/assets/317051073"),
+        api_url="https://api.github.com/repos/tauri-apps/binary-releases/releases/assets/317051073",
+        sourceforge_url="https://downloads.sourceforge.net/project/nsis/NSIS%203/3.11/nsis-3.11.zip"),
     "tauri-nsis-utils": PinnedAsset(
         "https://github.com/tauri-apps/nsis-tauri-utils/releases/download/"
         "nsis_tauri_utils-v0.5.3/nsis_tauri_utils.dll",
@@ -132,19 +136,53 @@ def _copy_exact(response, output, length: int, sha256, sha1) -> None:
         raise DownloadError("chunk_length")
 
 
+def _initial_entries(asset: PinnedAsset) -> tuple[tuple[str, str], ...]:
+    entries = []
+    for phase, url in (("api_entry", asset.api_url), ("browser_entry", asset.url),
+                       ("sourceforge_entry", asset.sourceforge_url)):
+        if url is not None:
+            _require_https(url)
+            if all(previous != url for _, previous in entries):
+                entries.append((phase, url))
+    return tuple(entries[:OPEN_ATTEMPTS])
+
+
+def _record_request_diagnostic(diagnostic_file: Path | None, *, phase: str,
+                               start: int, end: int, attempt: int) -> None:
+    if diagnostic_file is not None:
+        try:
+            diagnostic_file.write_text(json.dumps({
+                "phase": phase, "chunk_start": start, "chunk_end": end,
+                "attempt": attempt,
+            }), encoding="ascii")
+        except OSError:
+            pass  # Diagnostics must not replace the actual transfer error.
+
+
+def _open_initial_request(opener, entries: tuple[tuple[str, str], ...], headers: dict,
+                          *, end: int, diagnostic_file: Path | None):
+    # One shared opening budget, not OPEN_ATTEMPTS retries per entry. Returning
+    # any response ends source selection, before header/body/hash validation.
+    for attempt, (phase, url) in enumerate(entries, 1):
+        _record_request_diagnostic(diagnostic_file, phase=phase, start=0,
+                                   end=end, attempt=attempt)
+        request = urllib.request.Request(url, headers=headers)
+        try:
+            return opener.open(request, timeout=SOCKET_TIMEOUT_SECONDS)
+        except urllib.error.HTTPError as error:
+            if error.code not in RETRYABLE_HTTP_STATUS or attempt == len(entries):
+                raise
+            error.close()
+    raise DownloadError("http_status")
+
+
 def _open_request(opener, request, *, phase: str, start: int, end: int,
                   diagnostic_file: Path | None):
-    # No body bytes or digest state have changed when open() raises HTTPError.
-    # Body/header/integrity failures remain outside this retry boundary.
+    # Only the unchanged, unwritten current range may retry opening. This does
+    # not select another source or handle body/header/integrity failures.
     for attempt in range(1, OPEN_ATTEMPTS + 1):
-        if diagnostic_file is not None:
-            try:
-                diagnostic_file.write_text(json.dumps({
-                    "phase": phase, "chunk_start": start, "chunk_end": end,
-                    "attempt": attempt,
-                }), encoding="ascii")
-            except OSError:
-                pass  # Diagnostics must not replace the actual transfer error.
+        _record_request_diagnostic(diagnostic_file, phase=phase, start=start,
+                                   end=end, attempt=attempt)
         try:
             return opener.open(request, timeout=SOCKET_TIMEOUT_SECONDS)
         except urllib.error.HTTPError as error:
@@ -157,9 +195,8 @@ def _open_request(opener, request, *, phase: str, start: int, end: int,
 def _download_to_staging(asset: PinnedAsset, destination: Path, *,
                          diagnostic_file: Path | None = None) -> None:
     """Internal worker: its parent enforces the whole-file wall-clock deadline."""
-    _require_https(asset.url)
-    request_url = asset.api_url or asset.url
-    _require_https(request_url)
+    initial_entries = _initial_entries(asset)
+    request_url = initial_entries[0][1]
     # Preserve urllib's default proxy handling and the runner's network routing.
     opener = urllib.request.build_opener(HTTPSOnlyRedirectHandler())
     sha256 = hashlib.sha256()
@@ -177,10 +214,18 @@ def _download_to_staging(asset: PinnedAsset, destination: Path, *,
                 }
                 if asset.api_url is not None:
                     headers["Accept"] = "application/octet-stream"
-                request = urllib.request.Request(request_url, headers=headers)
-                phase = "api_entry" if request_url == asset.api_url else "binary_range"
-                with _open_request(opener, request, phase=phase, start=start, end=end,
-                                   diagnostic_file=diagnostic_file) as response:
+                if start == 0:
+                    response = _open_initial_request(
+                        opener, initial_entries, headers, end=end,
+                        diagnostic_file=diagnostic_file,
+                    )
+                else:
+                    request = urllib.request.Request(request_url, headers=headers)
+                    response = _open_request(
+                        opener, request, phase="binary_range", start=start, end=end,
+                        diagnostic_file=diagnostic_file,
+                    )
+                with response:
                     final_url = response.geturl()
                     _require_https(final_url)
                     encoding = _single_header(response.headers, "Content-Encoding", "content_encoding")
@@ -209,9 +254,10 @@ def _download_to_staging(asset: PinnedAsset, destination: Path, *,
                     total += length
                     if response.status == 200:
                         break
-                    if asset.api_url is not None:
+                    if start == 0:
                         # Reuse the verified HTTPS binary location, not the API,
-                        # for the remaining ranges. Never log this transient URL.
+                        # browser or mirror entry, for every remaining range.
+                        # Never log this transient URL or select another source.
                         request_url = final_url
             if total != asset.size:
                 raise DownloadError("file_size")
@@ -284,7 +330,7 @@ def _emit_request_diagnostic(key: str, error_file: Path, code: str) -> None:
             "phase", "chunk_start", "chunk_end", "attempt"
         }:
             return
-        if record["phase"] not in {"api_entry", "binary_range"}:
+        if record["phase"] not in {"api_entry", "browser_entry", "sourceforge_entry", "binary_range"}:
             return
         start, end, attempt = (record[name] for name in ("chunk_start", "chunk_end", "attempt"))
         if any(type(value) is not int for value in (start, end, attempt)):
@@ -294,7 +340,14 @@ def _emit_request_diagnostic(key: str, error_file: Path, code: str) -> None:
                 and end == min(start + CHUNK_BYTES, asset.size) - 1
                 and 1 <= attempt <= OPEN_ATTEMPTS):
             return
-    except (OSError, ValueError, KeyError, TypeError):
+        if record["phase"] == "binary_range":
+            if start == 0:
+                return
+        else:
+            entries = _initial_entries(asset)
+            if start != 0 or attempt > len(entries) or entries[attempt - 1][0] != record["phase"]:
+                return
+    except (OSError, ValueError, KeyError, TypeError, DownloadError):
         return
     try:
         print(json.dumps({"event": "pinned_ci_input_failure", "asset_key": key,

@@ -465,21 +465,99 @@ class V8WorkflowInputTests(unittest.TestCase):
         self.assertEqual(self.environment_file.read_text(encoding="utf-8"), "KEEP=original\n")
 
 
+class NsisInputPrefetchTests(unittest.TestCase):
+    workflows = ("ci.yml", "extended-native.yml", "release-build.yml")
+
+    def execute(self, workflow: str, temporary: Path, download) -> None:
+        from scripts import download_pinned_ci_input as downloader
+
+        text = (Path(".github/workflows") / workflow).read_text(encoding="utf-8")
+        step = text.split("      - name: Prefetch pinned Windows NSIS inputs\n", 1)[1]
+        step = step.split("\n      - ", 1)[0]
+        code = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        with mock.patch.dict(os.environ, {"GITHUB_WORKSPACE": str(Path.cwd()),
+                                          "RUNNER_TEMP": str(temporary)}, clear=True), \
+             mock.patch.object(sys, "path", list(sys.path)), \
+             mock.patch.object(downloader, "download_asset", side_effect=download):
+            exec(code, {"__name__": "__main__"})
+
+    def test_each_workflow_downloads_only_the_two_fixed_inputs_to_a_new_directory(self) -> None:
+        for workflow in self.workflows:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "webcodex-nsis-inputs"
+                calls = []
+
+                def download(key, destination):
+                    calls.append((key, destination))
+                    with destination.open("xb") as output:
+                        output.write(b"verified input fixture")
+                    return destination
+
+                self.execute(workflow, Path(temporary), download)
+                self.assertEqual(calls, [("tauri-nsis", root / "nsis-3.11.zip"),
+                                         ("tauri-nsis-utils", root / "nsis_tauri_utils.dll")])
+                self.assertEqual(sorted(path.name for path in root.iterdir()),
+                                 ["nsis-3.11.zip", "nsis_tauri_utils.dll"])
+
+    def test_existing_input_directory_is_not_reused_or_overwritten(self) -> None:
+        for workflow in self.workflows:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary) / "webcodex-nsis-inputs"
+                root.mkdir()
+                sentinel = root / "existing"
+                sentinel.write_bytes(b"keep")
+                download = mock.Mock()
+                with self.assertRaises(FileExistsError):
+                    self.execute(workflow, Path(temporary), download)
+                download.assert_not_called()
+                self.assertEqual(list(root.iterdir()), [sentinel])
+                self.assertEqual(sentinel.read_bytes(), b"keep")
+
+    def test_failed_second_input_propagates_without_fallback_or_an_accepted_plugin(self) -> None:
+        for workflow in self.workflows:
+            with self.subTest(workflow=workflow), tempfile.TemporaryDirectory() as temporary:
+                calls = []
+
+                def download(key, destination):
+                    calls.append(key)
+                    if key == "tauri-nsis-utils":
+                        raise RuntimeError("bounded input failure")
+                    destination.write_bytes(b"verified archive fixture")
+                    return destination
+
+                with self.assertRaisesRegex(RuntimeError, "bounded input failure"):
+                    self.execute(workflow, Path(temporary), download)
+                self.assertEqual(calls, ["tauri-nsis", "tauri-nsis-utils"])
+                root = Path(temporary) / "webcodex-nsis-inputs"
+                self.assertEqual([path.name for path in root.iterdir()], ["nsis-3.11.zip"])
+
+
 class WorkflowContractTests(unittest.TestCase):
     def test_fixed_ci_inputs_preserve_native_build_and_test_boundaries(self) -> None:
         ci = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
         extended = Path(".github/workflows/extended-native.yml").read_text(encoding="utf-8")
         release = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
-        for workflow, step_name, build in (
-            (ci, "Build unsigned NSIS installer", "npm exec tauri -- build"),
-            (extended, "Build unsigned Windows ARM64 Desktop NSIS candidate", "tauri.js build"),
-            (release, "Build unsigned native Windows Desktop NSIS candidate", "tauri.js build"),
+        for workflow, job_name, first_build, step_name, build in (
+            (ci, "test-windows-desktop", "Check Desktop frontend", "Build unsigned NSIS installer", "npm exec tauri -- build"),
+            (extended, "windows-arm64", "Verify native Windows ARM64 host and runtime surfaces", "Build unsigned Windows ARM64 Desktop NSIS candidate", "tauri.js build"),
+            (release, "windows", "Build and verify native Windows candidate", "Build unsigned native Windows Desktop NSIS candidate", "tauri.js build"),
         ):
             with self.subTest(step=step_name):
-                step = workflow.split(f"      - name: {step_name}\n", 1)[1].split("\n      - name:", 1)[0]
+                job = workflow.split(f"  {job_name}:\n", 1)[1]
+                prefetch_name = "      - name: Prefetch pinned Windows NSIS inputs\n"
+                self.assertEqual(workflow.count(prefetch_name), 1)
+                prefetch = job.split(prefetch_name, 1)[1].split("\n      - ", 1)[0]
+                self.assertIn("shell: python", prefetch)
+                self.assertNotIn("if:", prefetch)
+                self.assertNotIn("continue-on-error:", prefetch)
+                self.assertLess(job.index("actions/setup-python@"), job.index(prefetch_name))
+                self.assertLess(job.index(prefetch_name), job.index(f"      - name: {first_build}\n"))
+                step = job.split(f"      - name: {step_name}\n", 1)[1].split("\n      - ", 1)[0]
                 self.assertIn('python "$env:GITHUB_WORKSPACE\\scripts\\prepare_tauri_nsis_ci_tools.py"', step)
                 self.assertIn("--tools-directory (Join-Path $env:LOCALAPPDATA 'tauri')", step)
+                self.assertIn("--input-directory (Join-Path $env:RUNNER_TEMP 'webcodex-nsis-inputs')", step)
                 self.assertIn('if ($LASTEXITCODE -ne 0) { throw "Pinned Tauri NSIS tools preparation failed" }', step)
+                self.assertNotIn("continue-on-error:", step)
                 self.assertLess(step.index("prepare_tauri_nsis_ci_tools.py"), step.index(build))
         for workflow in (ci, extended):
             self.assertIn("scripts.tests.test_download_pinned_ci_input scripts.tests.test_prepare_tauri_nsis_ci_tools", workflow)
@@ -489,6 +567,11 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("download_asset(asset_keys[key], destination)", fixture)
         self.assertIn("actual != expected", fixture)
         self.assertNotIn("urlopen", fixture)
+        windows_desktop = ci.split("  test-windows-desktop:\n", 1)[1]
+        self.assertLess(windows_desktop.index("Download pinned real Windows installer fixtures"),
+                        windows_desktop.index("Check Desktop frontend"))
+        self.assertLess(windows_desktop.index("Download pinned real Windows installer fixtures"),
+                        windows_desktop.index("Check Desktop Rust"))
         self.assertIn("$previous = $env:PREVIOUS_INSTALLER", ci)
         experiments = ci.split("      - name: Run experimental Code Mode and receipt tests\n", 1)[1]
         experiments = experiments.split("\n      - name:", 1)[0]

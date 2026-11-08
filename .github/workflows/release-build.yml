@@ -682,6 +682,26 @@ jobs:
           fetch-tags: true
           persist-credentials: false
           ref: refs/tags/${{ inputs.tag }}
+      - name: Install Python for Windows installer inputs
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Prefetch pinned Windows NSIS inputs
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import sys
+
+          sys.path.insert(0, os.environ['GITHUB_WORKSPACE'])
+          from scripts.download_pinned_ci_input import download_asset
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'webcodex-nsis-inputs'
+          root.mkdir(exist_ok=False)
+          download_asset('tauri-nsis', root / 'nsis-3.11.zip')
+          download_asset('tauri-nsis-utils', root / 'nsis_tauri_utils.dll')
+
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with:
           targets: ${{ matrix.rust_target }}
@@ -806,18 +826,14 @@ jobs:
           "DESKTOP_INSTALLER_NAME=$installerName" >> $env:GITHUB_ENV
           "DESKTOP_INSTALLER_PATH=$installerPath" >> $env:GITHUB_ENV
 
-      - name: Install Python for Windows installer inputs
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: '3.12'
-
       - name: Build unsigned native Windows Desktop NSIS candidate
         working-directory: apps/desktop
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           python "$env:GITHUB_WORKSPACE\scripts\prepare_tauri_nsis_ci_tools.py" `
-            --tools-directory (Join-Path $env:LOCALAPPDATA 'tauri')
+            --tools-directory (Join-Path $env:LOCALAPPDATA 'tauri') `
+            --input-directory (Join-Path $env:RUNNER_TEMP 'webcodex-nsis-inputs')
           if ($LASTEXITCODE -ne 0) { throw "Pinned Tauri NSIS tools preparation failed" }
           $env:CARGO_TARGET_DIR = $env:DESKTOP_TAURI_TARGET
           node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --config $env:DESKTOP_TAURI_CONFIG --ci --no-sign -- --locked

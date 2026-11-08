@@ -5,7 +5,8 @@ This does not install a product or alter Tauri's checks. The shared downloader
 owns transport and fixed input pins; this module owns archive layout and cache
 adoption. Preserve every official ZIP member, then add the separately pinned
 plugin. Reuse an existing cache only after comparing its entire tree with those
-verified inputs. Never repair, merge into, or replace an existing cache.
+verified inputs. Prefetched originals are copied into owned staging and checked
+again before extraction. Never repair, merge into, or replace an existing cache.
 """
 
 from __future__ import annotations
@@ -98,6 +99,19 @@ def _ensure_directory(path: Path) -> Path:
     return path
 
 
+def _input_directory_identity(path: Path) -> tuple:
+    """Inspect existing inputs without creating directories or following links."""
+    require(path.is_absolute() and path != Path(path.anchor), "input_directory_absolute")
+    require(".." not in path.parts, "unsafe_path")
+    current = Path(path.anchor)
+    identities = [_identity(_directory(current))]
+    for component in path.parts[1:]:
+        _component(component)
+        current /= component
+        identities.append(_identity(_directory(current)))
+    return tuple(identities)
+
+
 @contextmanager
 def _regular_file(path: Path):
     before = path.lstat()
@@ -155,12 +169,25 @@ def _project_contract() -> None:
     require(len(flags) <= 1 and all(bundle[name] is False for name in flags), "tauri_cache_directory")
 
 
-def _verified_input(key: str, destination: Path) -> tuple[int, str, str]:
-    result = pinned.download_asset(key, destination)
-    require(isinstance(result, Path) and result == destination, "download_destination")
+def _verified_input(key: str, destination: Path, input_directory: Path | None) -> tuple[int, str, str]:
     asset = pinned.ASSETS[key]
     require(asset.sha1 is not None, "tauri_input_sha1")
     expected = (asset.size, asset.sha256, asset.sha1.lower())
+    if input_directory is None:
+        result = pinned.download_asset(key, destination)
+        require(isinstance(result, Path) and result == destination, "download_destination")
+    else:
+        basename = {"tauri-nsis": "nsis-3.11.zip", "tauri-nsis-utils": "nsis_tauri_utils.dll"}[key]
+        # Copy only these bounded original inputs into our exclusive staging
+        # directory. Extraction never reads mutable prefetched paths directly.
+        with _regular_file(input_directory / basename) as source, destination.open("xb") as output:
+            require(os.fstat(source.fileno()).st_size == asset.size, "file_size")
+            count = 0
+            while chunk := source.read(min(READ_BYTES, asset.size - count + 1)):
+                count += len(chunk)
+                require(count <= asset.size, "file_size")
+                output.write(chunk)
+            require(count == asset.size, "file_size")
     require(_hash_file(destination, asset.size) == expected, "input_digest")
     return expected
 
@@ -281,8 +308,9 @@ def _rename_no_replace(source: Path, destination: Path) -> None:
         raise OSError(error, "exclusive cache adoption failed")
 
 
-def prepare_tools(tools_directory: Path) -> dict:
+def prepare_tools(tools_directory: Path, input_directory: Path | None = None) -> dict:
     _project_contract()
+    input_identity = _input_directory_identity(input_directory) if input_directory is not None else None
     parent = _ensure_directory(tools_directory)
     target = parent / "NSIS"
     if os.path.lexists(target):
@@ -291,8 +319,10 @@ def prepare_tools(tools_directory: Path) -> dict:
     stage_identity = _identity(_directory(stage))
     try:
         archive, plugin = stage / "nsis-3.11.zip", stage / "nsis_tauri_utils.dll"
-        archive_digest = _verified_input("tauri-nsis", archive)
-        plugin_digest = _verified_input("tauri-nsis-utils", plugin)
+        archive_digest = _verified_input("tauri-nsis", archive, input_directory)
+        plugin_digest = _verified_input("tauri-nsis-utils", plugin, input_directory)
+        if input_directory is not None:
+            require(_input_directory_identity(input_directory) == input_identity, "input_directory_changed")
         tree = stage / "NSIS"
         expected, directories = _extract_tools(archive, plugin, tree, plugin_digest)
         require(_hash_file(archive, archive_digest[0]) == archive_digest, "input_changed")
@@ -320,9 +350,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tools-directory", required=True, type=Path,
                         help="Absolute CI cache parent; Windows default is LOCALAPPDATA/tauri")
+    parser.add_argument("--input-directory", type=Path,
+                        help="Existing absolute directory containing the two fixed original inputs; reverified before use")
     args = parser.parse_args(argv)
     try:
-        report = prepare_tools(args.tools_directory)
+        report = prepare_tools(args.tools_directory, args.input_directory)
     except PreparationError as error:
         report = {"ok": False, "code": error.code}
     except pinned.DownloadError as error:
