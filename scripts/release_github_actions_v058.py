@@ -28,7 +28,7 @@ SPEC = base.ReleaseSpec(
      "source_sha": "9d9200a9da040e1c72f8f627b077285cf954d02b",
      "source_tree": "dcf635afc1b7d5ad669fd756d1f6506f4d72ab17",
      "ci_run_id": 42523755555, "ci_run_attempt": 1,
-     "evidence_run_id": 42523756080, "evidence_run_attempt": 2,
+     "evidence_run_id": 42523756080, "evidence_run_attempt": 1,
      "notes_path": ".github/release-requests/v0.5.8-notes.md",
      "notes_sha256": "7024711b2a96e8a26faff45fd0fa58f5b083356e74f02dd05ab7ec6cbd885f3f"},
     ".github/release-requests/v0.5.8.json",
