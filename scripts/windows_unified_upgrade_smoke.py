@@ -272,7 +272,7 @@ $result=@{files=@{}; exists=@{}}
 try {
   $paths=$env:WEBCODEX_UPGRADE_SMOKE_PATHS | ConvertFrom-Json
   foreach($item in $paths.PSObject.Properties) {
-    $result.exists[$item.Name]=[bool](Test-Path -LiteralPath $item.Value)
+    $result.exists[$item.Name]=[bool]([IO.Directory]::Exists($item.Value) -or [IO.File]::Exists($item.Value))
   }
   $stage='token_identity'
   $identity=[Security.Principal.WindowsIdentity]::GetCurrent()
@@ -280,7 +280,11 @@ try {
   $result.token_owner=$identity.Owner.Value
   foreach($item in $paths.PSObject.Properties) {
     $stage='file_owner_' + $item.Name
-    $acl=Get-Acl -LiteralPath $item.Value
+    if ([IO.Directory]::Exists($item.Value)) {
+      $acl=[IO.Directory]::GetAccessControl($item.Value)
+    } else {
+      $acl=[IO.File]::GetAccessControl($item.Value)
+    }
     $result.files[$item.Name]=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
   }
 } catch {
