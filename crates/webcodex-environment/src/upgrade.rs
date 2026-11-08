@@ -16,6 +16,7 @@ use webcodex_core::desktop_runtime_contract::{MachineBuildInfo, DESKTOP_RUNTIME_
 mod candidate_relocation_tests;
 #[cfg(unix)]
 mod desktop_tree;
+pub(crate) mod installed_paths;
 mod journal_codec;
 mod observation;
 #[cfg(all(test, target_os = "linux"))]
@@ -421,6 +422,9 @@ pub(crate) async fn verify_prepared_installation_for(
         ));
     }
     let root = receipt_path.parent().ok_or_else(SetupDiagnostic::io)?;
+    #[cfg(windows)]
+    installed_paths::existing_directory(root)?;
+    #[cfg(not(windows))]
     if root.canonicalize().map_err(|_| SetupDiagnostic::io())? != root {
         return Err(error(
             "upgrade_receipt",
@@ -435,7 +439,7 @@ pub(crate) async fn verify_prepared_installation_for(
         )
     })?;
     if receipt.schema_version != receipt.package_flavor.source_schema()
-        || receipt.environment_dir != root
+        || !installed_paths::same_location(&receipt.environment_dir, root)?
         || receipt.operation_id.is_empty()
         || receipt.environment_id.is_empty()
     {
@@ -467,7 +471,7 @@ pub(crate) async fn verify_prepared_installation_for(
     }
     if journal.phase != Phase::SnapshotReady
         || !journal.candidate.provenance_verified
-        || receipt != prepared_receipt(root, &journal)
+        || receipt != prepared_receipt(&receipt.environment_dir, &journal)
     {
         return Err(error(
             "upgrade_receipt",
@@ -1310,6 +1314,19 @@ pub async fn verify_same_installed_package(
     let candidate = verify_upgrade_candidate(candidate_dir)?;
     verify_published_provenance(&candidate).await?;
     verify_candidate_executable_headers(&candidate)?;
+    verify_same_installed_package_contents(&candidate, expected_runtime_dir, expected_target)
+}
+
+fn verify_same_installed_package_contents(
+    candidate: &UpgradeCandidate,
+    expected_runtime_dir: &Path,
+    expected_target: Option<InstallerTarget>,
+) -> SetupResultValue<()> {
+    #[cfg(windows)]
+    let canonical_runtime = installed_paths::existing_directory(expected_runtime_dir)?;
+    #[cfg(windows)]
+    let expected_runtime_dir = canonical_runtime.as_path();
+    #[cfg(not(windows))]
     if !expected_runtime_dir.is_absolute()
         || expected_runtime_dir
             .canonicalize()
@@ -1336,11 +1353,7 @@ pub async fn verify_same_installed_package(
         ));
     }
     #[cfg(windows)]
-    if expected_runtime_dir
-        .file_name()
-        .and_then(|name| name.to_str())
-        != Some("webcodex-runtime")
-    {
+    if !installed_paths::runtime_directory_name(expected_runtime_dir) {
         return Err(error(
             "installer_targets",
             "The Windows package runtime target differs",

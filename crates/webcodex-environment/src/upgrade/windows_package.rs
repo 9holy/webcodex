@@ -50,9 +50,7 @@ fn require_windows() -> SetupResultValue<()> {
 }
 
 fn targets(runtime: &Path) -> SetupResultValue<BTreeMap<String, PathBuf>> {
-    if !runtime.is_absolute()
-        || runtime.file_name().and_then(|s| s.to_str()) != Some("webcodex-runtime")
-    {
+    if !runtime.is_absolute() || !installed_paths::runtime_directory_name(runtime) {
         return Err(error(
             "installer_targets",
             "The Windows package runtime target is invalid",
@@ -172,11 +170,7 @@ async fn classify_inner(
     checked_owner(store.root(), &owner)?;
     if let Some(record) = store.load_environment()? {
         checked_owner(&store.root().join("environment.json"), &owner)?;
-        if record.request.account.identity != owner
-            || record.request.binaries.cli != files["webcodex"]
-            || record.request.binaries.server != files["webcodex-server"]
-            || record.request.binaries.runner != files["webcodex-runner"]
-        {
+        if record.request.account.identity != owner {
             return Err(error(
                 "installer_owner",
                 "The installed Environment owner or runtime target differs",
@@ -184,6 +178,19 @@ async fn classify_inner(
         }
         for path in files.values() {
             owner_path(path, &owner)?;
+        }
+        for (saved, name) in [
+            (&record.request.binaries.cli, "webcodex"),
+            (&record.request.binaries.server, "webcodex-server"),
+            (&record.request.binaries.runner, "webcodex-runner"),
+        ] {
+            owner_path(saved, &owner)?;
+            if !installed_paths::same_location(saved, &files[name])? {
+                return Err(error(
+                    "installer_owner",
+                    "The installed Environment owner or runtime target differs",
+                ));
+            }
         }
         return Ok(InstallationKind::Environment);
     }
@@ -304,12 +311,24 @@ fn load_bound(store: &EnvironmentStore, runtime: &Path) -> SetupResultValue<Pack
     if journal.schema_version != 1
         || !journal.candidate.provenance_verified
         || journal.owner_identity != owner
-        || journal.runtime_dir != runtime
         || journal.kind != InstallationKind::Unconfigured
-        || receipt(&journal).targets != expected
         || journal.programs.len() != expected.len()
         || uuid::Uuid::parse_str(&journal.operation_id).is_err()
     {
+        return Err(error(
+            "upgrade_receipt",
+            "The package owner, installation target or operation changed",
+        ));
+    }
+    let recorded = receipt(&journal).targets;
+    let mut matching_targets = recorded.len() == expected.len();
+    for (name, target) in &expected {
+        matching_targets &= match recorded.get(name) {
+            Some(recorded) => installed_paths::same_location(recorded, target)?,
+            None => false,
+        };
+    }
+    if !installed_paths::same_location(&journal.runtime_dir, runtime)? || !matching_targets {
         return Err(error(
             "upgrade_receipt",
             "The package owner, installation target or operation changed",

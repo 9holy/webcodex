@@ -79,6 +79,9 @@ pub fn verify_installer_targets(
             "Installer destinations must be absolute",
         ));
     }
+    #[cfg(windows)]
+    let directory = crate::upgrade::installed_paths::existing_directory(directory)?;
+    #[cfg(not(windows))]
     let directory = directory.canonicalize().map_err(|_| {
         diagnostic(
             "installer_targets",
@@ -87,7 +90,11 @@ pub fn verify_installer_targets(
     })?;
     for name in ["webcodex", "webcodex-server", "webcodex-runner"] {
         let expected = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-        if receipt.targets.get(name) != Some(&expected) {
+        let matches = match receipt.targets.get(name) {
+            Some(target) => crate::upgrade::installed_paths::same_location(target, &expected)?,
+            None => false,
+        };
+        if !matches {
             return Err(diagnostic(
                 "installer_targets",
                 "The package destinations do not match the prepared runtime",
@@ -101,9 +108,8 @@ pub fn verify_installer_targets(
     let desktop = (directory == Path::new("/Library/Application Support/WebCodex/runtime"))
         .then(|| PathBuf::from("/Applications/WebCodex Desktop.app"));
     #[cfg(windows)]
-    let desktop = (directory.file_name().and_then(|name| name.to_str())
-        == Some("webcodex-runtime"))
-    .then(|| directory.parent().unwrap().join("WebCodex.exe"));
+    let desktop = crate::upgrade::installed_paths::runtime_directory_name(&directory)
+        .then(|| directory.parent().unwrap().join("WebCodex.exe"));
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
     let desktop: Option<PathBuf> = None;
     if receipt.package_flavor == crate::unified_update::PackageFlavor::Runtime {
@@ -131,7 +137,11 @@ pub fn verify_installer_targets(
         ));
     }
     if let Some(desktop) = desktop {
-        if receipt.desktop_target.as_ref() != Some(&desktop) {
+        let matches = match &receipt.desktop_target {
+            Some(target) => crate::upgrade::installed_paths::same_location(target, &desktop)?,
+            None => false,
+        };
+        if !matches {
             return Err(diagnostic(
                 "installer_targets",
                 "The managed Desktop target is absent or differs from the package destination",

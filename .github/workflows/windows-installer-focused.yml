@@ -1,0 +1,56 @@
+name: Windows installer focused validation
+
+on:
+  push:
+    branches: ['diagnostic/windows-unified-upgrade-paths']
+    paths:
+      - '.github/workflows/windows-installer-focused.yml'
+      - 'crates/webcodex-environment/**'
+      - 'scripts/build_windows_unified_bootstrap.py'
+      - 'scripts/tests/test_windows_installer_native.py'
+
+permissions:
+  contents: read
+
+jobs:
+  protected-paths:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          shared-key: windows-core-ci
+      - name: Check source formatting
+        run: cargo fmt --all -- --check
+      - name: Exercise protected Windows installer paths and recovery
+        shell: pwsh
+        run: |
+          cargo test --locked -p webcodex-environment --lib upgrade::windows_package::tests
+          if ($LASTEXITCODE -ne 0) { throw "Windows package path and recovery tests failed" }
+          cargo test --locked -p webcodex-environment --lib installer_authorization::tests
+          if ($LASTEXITCODE -ne 0) { throw "Windows installer authorization tests failed" }
+  installer-diagnostics:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Compile and execute actual NSIS failure branches
+        shell: pwsh
+        env:
+          WEBCODEX_REQUIRE_NSIS_TESTS: '1'
+        run: |
+          choco install nsis --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "NSIS installation failed" }
+          python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native -v
+          if ($LASTEXITCODE -ne 0) { throw "Native NSIS lifecycle and diagnostic tests failed" }

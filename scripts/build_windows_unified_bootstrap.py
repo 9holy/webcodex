@@ -14,6 +14,68 @@ import prepare_windows_unified_installer as candidate
 
 INSTALLER_HOOKS = Path(__file__).resolve().parents[1] / "apps/desktop/src-tauri/windows/installer-hooks.nsh"
 
+# Only fixed diagnostic categories are displayed. Lifecycle output can contain
+# paths or other private details and must never become an installer log dump.
+CLASSIFICATION_DIAGNOSTICS = {
+    "installer_owner": (
+        "The saved Environment targets or Windows ownership do not match this installation. Keep its original folder and use the Windows account that owns it.",
+        "已保存的运行环境路径或 Windows 归属与本次安装不匹配。请保留原安装目录，并使用拥有该运行环境的 Windows 账户。",
+    ),
+    "package_identity": (
+        "Setup could not verify the installed Runtime version or program identity. The existing installation needs to be checked before it can be upgraded.",
+        "无法验证已有 Runtime 的版本或程序身份。需要先检查已有安装，才能继续升级。",
+    ),
+    "setup_busy": (
+        "Another operation is using this Environment. Wait for that operation to finish, then retry setup.",
+        "另一个操作正在使用此运行环境。请等待该操作结束后重试安装。",
+    ),
+    "legacy_installation_incomplete": (
+        "The existing installation is missing required programs. Restore its original Runtime before upgrading.",
+        "已有安装缺少必要的程序。请先恢复原 Runtime，再进行升级。",
+    ),
+    "upgrade_pending": (
+        "An earlier upgrade still needs recovery. Resume that operation before starting another upgrade.",
+        "上一次升级尚待恢复。请先恢复该操作，再开始新的升级。",
+    ),
+    "state_io": (
+        "Setup could not safely read or save the Environment state. Check its directory permissions and available disk space.",
+        "无法安全读取或保存运行环境状态。请检查目录权限和可用磁盘空间。",
+    ),
+}
+
+
+def classification_diagnostic_lines() -> list[str]:
+    lines = [
+        'LangString WebCodexClassifyUnknown 1033 "Setup could not verify the existing installation or Environment. Use the diagnostic code below when reporting this error."',
+        'LangString WebCodexClassifyUnknown 2052 "无法验证已有安装或运行环境。反馈此错误时，请附上下方的诊断代码。"',
+        'LangString WebCodexClassifyStopped 1033 "Installation files have not been replaced.$\\r$\\nDiagnostic code: $WebCodexClassificationCode"',
+        'LangString WebCodexClassifyStopped 2052 "安装文件尚未替换。$\\r$\\n诊断代码：$WebCodexClassificationCode"',
+    ]
+    for code, (english, chinese) in CLASSIFICATION_DIAGNOSTICS.items():
+        lines.extend([
+            f'LangString WebCodexClassify_{code} 1033 "{english}"',
+            f'LangString WebCodexClassify_{code} 2052 "{chinese}"',
+        ])
+    lines.extend([
+        'Function WebCodexClassificationFailed',
+        '  StrCpy $WebCodexClassificationCode "installer_classify_failed"',
+        '  StrCpy $WebCodexFailureReason "$(WebCodexClassifyUnknown)"',
+    ])
+    for code in CLASSIFICATION_DIAGNOSTICS:
+        lines.extend([
+            f'  StrCpy $R0 $1 {len(code) + 1}',
+            f'  ${{If}} $R0 == "{code}:"',
+            f'    StrCpy $WebCodexClassificationCode "{code}"',
+            f'    StrCpy $WebCodexFailureReason "$(WebCodexClassify_{code})"',
+            '  ${EndIf}',
+        ])
+    lines.extend([
+        '  DetailPrint "WebCodex: $WebCodexClassificationCode"',
+        '  MessageBox MB_ICONSTOP "$WebCodexFailureReason$\\r$\\n$\\r$\\n$(WebCodexClassifyStopped)" /SD IDOK',
+        'FunctionEnd',
+    ])
+    return lines
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -86,6 +148,8 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         'Var WebCodexUpgradePrepared',
         'Var WebCodexUpgradeTargetFile',
         'Var WebCodexBoundOperation',
+        'Var WebCodexClassificationCode',
+        'Var WebCodexFailureReason',
         '',
         f'!include {nsis_quote(INSTALLER_HOOKS)}',
         '!define MUI_ABORTWARNING',
@@ -110,6 +174,8 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         'LangString WebCodexDirectoryMismatch 2052 "本次升级必须使用已有安装目录：$\\r$\\n$WebCodexRegisteredDir$\\r$\\n$\\r$\\n所选目录不同，安装文件尚未替换。请保留已有目录；安装程序不会移动已有运行环境。"',
         'LangString WebCodexDirectoryInvalid 1033 "Choose one absolute installation folder. The existing installation location must be a valid Windows path."',
         'LangString WebCodexDirectoryInvalid 2052 "请选择一个完整的安装目录。已有安装位置必须是有效的 Windows 路径。"',
+        '',
+        *classification_diagnostic_lines(),
         '',
         'Function .onInit',
         '  StrCpy $WebCodexUpgradeTargetFile ""',
@@ -290,7 +356,7 @@ def render(candidate_dir: Path, inner_installer: Path, output: Path, platform: s
         '    Goto webcodex_classification_trim',
         '  ${EndIf}',
         '  ${If} $0 != 0',
-        '    MessageBox MB_ICONSTOP "The installed package identity or Environment ownership could not be verified. Quit the old Desktop and stop its Runtime before retrying." /SD IDOK',
+        '    Call WebCodexClassificationFailed',
         '    SetErrorLevel 1',
         '    Abort',
         '  ${EndIf}',
