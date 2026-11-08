@@ -218,8 +218,12 @@ async fn registered_group_owned_child() {
     let probe = f
         .runtime
         .join(format!("security-probe-{}", uuid::Uuid::new_v4()));
-    std::fs::write(&probe, b"new controlled recovery copy").unwrap();
-    crate::storage::secure_windows_path(&probe).unwrap();
+    let mut remaining = SNAPSHOT_LIMIT;
+    copy_bounded_with(&journal.programs[0].backup, &mut remaining, || {
+        windows_installation::create_recovery_file(&probe, original_security)
+    })
+    .unwrap();
+    assert_eq!(digest(&probe).unwrap(), journal.programs[0].sha256);
     windows_installation::restore_security(&probe, original_security).unwrap();
     assert!(windows_installation::security_matches(
         &probe,

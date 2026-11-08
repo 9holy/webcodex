@@ -325,6 +325,13 @@ impl ProgramAuthority {
     }
 }
 
+pub(super) fn create_recovery_file(
+    path: &Path,
+    snapshot: &WindowsProgramSecurity,
+) -> SetupResultValue<std::fs::File> {
+    security::create_recovery_file(path, snapshot)
+}
+
 pub(super) fn restore_security(
     path: &Path,
     snapshot: &WindowsProgramSecurity,

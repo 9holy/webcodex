@@ -2,25 +2,33 @@
 use super::*;
 use std::ffi::c_void;
 use std::fs::File;
-use std::os::windows::{fs::OpenOptionsExt, io::AsRawHandle};
+use std::os::windows::{
+    ffi::OsStrExt,
+    fs::OpenOptionsExt,
+    io::{AsRawHandle, FromRawHandle},
+};
 use std::ptr::null_mut;
-use windows_sys::Win32::Foundation::{CloseHandle, LocalFree, GENERIC_ALL, GENERIC_WRITE, HANDLE};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, LocalFree, GENERIC_ALL, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+};
 use windows_sys::Win32::Security::Authorization::{
     ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertSidToStringSidW,
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SetSecurityInfo,
     SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
-    GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
-    GetTokenInformation, IsValidAcl, IsValidSid, TokenOwner, ACCESS_ALLOWED_ACE, ACE_HEADER,
-    DACL_SECURITY_INFORMATION, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION,
-    PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED, TOKEN_OWNER, TOKEN_QUERY,
+    GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, GetSecurityDescriptorGroup,
+    GetSecurityDescriptorOwner, GetSecurityDescriptorSacl, GetTokenInformation, IsValidAcl,
+    IsValidSid, TokenOwner, ACCESS_ALLOWED_ACE, ACE_HEADER, DACL_SECURITY_INFORMATION,
+    INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    SECURITY_ATTRIBUTES, SE_DACL_PROTECTED, TOKEN_OWNER, TOKEN_QUERY,
     UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    DELETE, FILE_APPEND_DATA, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    CreateFileW, CREATE_NEW, DELETE, FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD,
+    FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_READ_ATTRIBUTES,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_ATTRIBUTES, FILE_WRITE_DATA, FILE_WRITE_EA,
+    READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE};
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
@@ -146,6 +154,24 @@ fn inspect_descriptor(descriptor: *mut c_void) -> SetupResultValue<(String, bool
     Ok((sid_string(owner)?, control & SE_DACL_PROTECTED != 0))
 }
 
+// `capacity` is the allocation size returned by the native SDDL converter, not
+// the string length. Read only the initialized prefix through its first NUL.
+// SAFETY: `text` must point to that allocation, or a readable test buffer of
+// `capacity` WCHARs. The converter guarantees an initialized NUL-terminated string.
+unsafe fn descriptor_string(text: *const u16, capacity: usize) -> SetupResultValue<String> {
+    if text.is_null() || capacity == 0 || capacity > MAX_DESCRIPTOR {
+        return Err(invalid());
+    }
+    let mut length = 0;
+    while length < capacity && unsafe { *text.add(length) } != 0 {
+        length += 1;
+    }
+    if length == 0 || length == capacity {
+        return Err(invalid());
+    }
+    String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).map_err(|_| invalid())
+}
+
 pub(super) fn capture(path: &Path) -> SetupResultValue<WindowsProgramSecurity> {
     let file = open(path, false)?;
     let mut descriptor = null_mut();
@@ -181,12 +207,7 @@ pub(super) fn capture(path: &Path) -> SetupResultValue<WindowsProgramSecurity> {
         return Err(invalid());
     }
     let text_allocation = Local(text.cast());
-    if length == 0 || length as usize > MAX_DESCRIPTOR {
-        return Err(invalid());
-    }
-    let descriptor =
-        String::from_utf16(unsafe { std::slice::from_raw_parts(text, length as usize - 1) })
-            .map_err(|_| invalid())?;
+    let descriptor = unsafe { descriptor_string(text, length as usize) }?;
     drop(text_allocation);
     drop(allocation);
     verify_installed_target_path(path)?;
@@ -220,6 +241,22 @@ fn decode(snapshot: &WindowsProgramSecurity) -> SetupResultValue<Local> {
     let descriptor = Local(descriptor);
     let (owner, protected) = inspect_descriptor(descriptor.0)?;
     if owner != snapshot.owner_identity || protected != snapshot.dacl_protected {
+        return Err(invalid());
+    }
+    // This retained descriptor grants authority for Owner and DACL only. In
+    // particular, passing it at file creation must not also assign a Group or
+    // SACL supplied by a modified journal.
+    let mut group = null_mut();
+    let mut sacl = null_mut();
+    let mut present = 0;
+    let mut defaulted = 0;
+    if unsafe { GetSecurityDescriptorGroup(descriptor.0, &mut group, &mut defaulted) } == 0
+        || !group.is_null()
+        || unsafe {
+            GetSecurityDescriptorSacl(descriptor.0, &mut present, &mut sacl, &mut defaulted)
+        } == 0
+        || present != 0
+    {
         return Err(invalid());
     }
     Ok(descriptor)
@@ -285,7 +322,7 @@ pub(super) fn check_writers(
     Ok(())
 }
 
-pub(super) fn restore(path: &Path, snapshot: &WindowsProgramSecurity) -> SetupResultValue<()> {
+fn restore_descriptor(snapshot: &WindowsProgramSecurity) -> SetupResultValue<Local> {
     let current = current_account()?.identity;
     if snapshot.owner_identity != current
         && !(snapshot.owner_identity == ADMINISTRATORS && token_owner()?.as_str() == ADMINISTRATORS)
@@ -295,7 +332,56 @@ pub(super) fn restore(path: &Path, snapshot: &WindowsProgramSecurity) -> SetupRe
     if snapshot.owner_identity == ADMINISTRATORS {
         check_writers(snapshot, &current, false)?;
     }
-    let descriptor = decode(snapshot)?;
+    decode(snapshot)
+}
+
+pub(super) fn create_recovery_file(
+    path: &Path,
+    snapshot: &WindowsProgramSecurity,
+) -> SetupResultValue<File> {
+    let descriptor = restore_descriptor(snapshot)?;
+    installed_paths::existing_directory(path.parent().ok_or_else(invalid)?)?;
+    if path.file_name().is_none_or(|name| {
+        name.encode_wide()
+            .any(|unit| unit == 0 || unit == u16::from(b':'))
+    }) {
+        return Err(invalid());
+    }
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE | READ_CONTROL | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            &attributes,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        // CREATE_NEW did not give this call ownership of the name. In
+        // particular, an existing entry must never be removed as cleanup.
+        return Err(invalid());
+    }
+    let file = unsafe { File::from_raw_handle(handle.cast()) };
+    verify_installed_target_path(path)?;
+    Ok(file)
+}
+
+pub(super) fn restore(path: &Path, snapshot: &WindowsProgramSecurity) -> SetupResultValue<()> {
+    let descriptor = restore_descriptor(snapshot)?;
+    // Creation with the original descriptor can preserve an inherited DACL's
+    // original control bits. SetSecurityInfo would convert that model even if
+    // all permissions were unchanged, so leave an exact new copy untouched.
+    if capture(path)? == *snapshot {
+        return Ok(());
+    }
     let mut owner = null_mut();
     let mut acl = null_mut();
     let mut present = 0;
@@ -330,7 +416,10 @@ pub(super) fn restore(path: &Path, snapshot: &WindowsProgramSecurity) -> SetupRe
         return Err(invalid());
     }
     drop(file);
-    if capture(path)? != *snapshot {
+    let restored = capture(path)?;
+    if restored != *snapshot {
+        #[cfg(test)]
+        tests::report_restore_difference(snapshot, &restored);
         return Err(error(
             "upgrade_restore_security",
             "The original program security could not be restored",

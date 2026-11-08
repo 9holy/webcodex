@@ -2573,6 +2573,23 @@ fn verify_stopped(_store: &EnvironmentStore, journal: &UpgradeJournal) -> SetupR
     Ok(())
 }
 fn copy_bounded(source: &Path, target: &Path, remaining: &mut u64) -> SetupResultValue<()> {
+    copy_bounded_with(source, remaining, || {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        options.open(target).map_err(|_| SetupDiagnostic::io())
+    })
+}
+
+fn copy_bounded_with(
+    source: &Path,
+    remaining: &mut u64,
+    create_output: impl FnOnce() -> SetupResultValue<std::fs::File>,
+) -> SetupResultValue<()> {
     let meta = std::fs::symlink_metadata(source).map_err(|_| SetupDiagnostic::io())?;
     if !meta.is_file() || meta.is_symlink() || meta.len() > *remaining {
         return Err(error(
@@ -2619,14 +2636,7 @@ fn copy_bounded(source: &Path, target: &Path, remaining: &mut u64) -> SetupResul
             "Snapshot source grew beyond its bound",
         ));
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
-    }
-    let mut output = options.open(target).map_err(|_| SetupDiagnostic::io())?;
+    let mut output = create_output()?;
     let copied = std::io::copy(&mut input.take(*remaining + 1), &mut output)
         .map_err(|_| SetupDiagnostic::io())?;
     if copied > *remaining {
@@ -2993,6 +3003,15 @@ fn restore_program(backup: &ProgramBackup) -> SetupResultValue<()> {
         .target
         .with_extension(format!("restore-{}", uuid::Uuid::new_v4().simple()));
     let mut remaining = SNAPSHOT_LIMIT;
+    #[cfg(windows)]
+    if let Some(snapshot) = &backup.windows_security {
+        copy_bounded_with(&backup.backup, &mut remaining, || {
+            windows_installation::create_recovery_file(&temporary, snapshot)
+        })?;
+    } else {
+        copy_bounded(&backup.backup, &temporary, &mut remaining)?;
+    }
+    #[cfg(not(windows))]
     copy_bounded(&backup.backup, &temporary, &mut remaining)?;
     if digest(&temporary)? != backup.sha256 {
         return Err(error(
