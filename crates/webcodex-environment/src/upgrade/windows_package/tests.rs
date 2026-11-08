@@ -9,15 +9,37 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temp = crate::test_tempdir().unwrap();
+        Self::in_directory(temp, true)
+    }
+    #[cfg(windows)]
+    fn group_owned() -> Self {
+        let directory = std::env::var_os("LOCALAPPDATA").expect("native per-user directory");
+        let temp = tempfile::Builder::new()
+            .prefix("webcodex-owner-native-")
+            .tempdir_in(directory)
+            .unwrap();
+        Self::in_directory(temp, false)
+    }
+    fn in_directory(temp: tempfile::TempDir, private_programs: bool) -> Self {
         let store = EnvironmentStore::open(temp.path().join("environment")).unwrap();
         let runtime = temp.path().join("installed/webcodex-runtime");
-        ensure_private_directory(runtime.parent().unwrap()).unwrap();
-        ensure_private_directory(&runtime).unwrap();
+        if private_programs {
+            ensure_private_directory(runtime.parent().unwrap()).unwrap();
+            ensure_private_directory(&runtime).unwrap();
+        } else {
+            std::fs::create_dir_all(&runtime).unwrap();
+        }
+        // The published Windows Desktop resolves its runtime before recording
+        // these paths, while NSIS supplies the ordinary DOS spelling.
+        #[cfg(windows)]
+        let runtime = runtime.canonicalize().unwrap();
         let mut artifacts = BTreeMap::new();
         for (name, target) in targets(&runtime).unwrap() {
             std::fs::write(&target, format!("old {name}")).unwrap();
             #[cfg(windows)]
-            crate::storage::secure_windows_path(&target).unwrap();
+            if private_programs {
+                crate::storage::secure_windows_path(&target).unwrap();
+            }
             let path = temp.path().join(format!("new-{name}.exe"));
             std::fs::write(&path, format!("new {name}")).unwrap();
             let build_info: MachineBuildInfo = serde_json::from_value(json!({
@@ -83,6 +105,31 @@ impl Fixture {
             );
         }
         assert!(self.store.load_environment().unwrap().is_none());
+    }
+    fn environment_record(&self) -> EnvironmentRecord {
+        let files = targets(&self.runtime).unwrap();
+        EnvironmentRecord {
+            schema_version: 1,
+            environment_id: "original-environment".into(),
+            request: SetupRequest {
+                runner_display_name: None,
+                service_scope: crate::service::ServiceScope::User,
+                mode: EnvironmentMode::Join,
+                server_url: "https://fixture.invalid".into(),
+                project: None,
+                runner: Some(true),
+                account: current_account().unwrap(),
+                binaries: RuntimeBinaries {
+                    cli: files["webcodex"].clone(),
+                    server: files["webcodex-server"].clone(),
+                    runner: files["webcodex-runner"].clone(),
+                },
+            },
+            username: None,
+            runner_client_id: Some("original-runner".into()),
+            projects: Vec::new(),
+            configured: true,
+        }
     }
 }
 
@@ -207,29 +254,7 @@ fn backup_corruption_blocks_restoration_without_overwriting_installed_files() {
 #[tokio::test]
 async fn environment_owner_path_is_preserved_and_package_coordinator_cannot_adopt_it() {
     let f = Fixture::new();
-    let files = targets(&f.runtime).unwrap();
-    let mut record = EnvironmentRecord {
-        schema_version: 1,
-        environment_id: "original-environment".into(),
-        request: SetupRequest {
-            runner_display_name: None,
-            service_scope: crate::service::ServiceScope::User,
-            mode: EnvironmentMode::Join,
-            server_url: "https://fixture.invalid".into(),
-            project: None,
-            runner: Some(true),
-            account: current_account().unwrap(),
-            binaries: RuntimeBinaries {
-                cli: files["webcodex"].clone(),
-                server: files["webcodex-server"].clone(),
-                runner: files["webcodex-runner"].clone(),
-            },
-        },
-        username: None,
-        runner_client_id: Some("original-runner".into()),
-        projects: Vec::new(),
-        configured: true,
-    };
+    let mut record = f.environment_record();
     f.store.save_environment(&record).unwrap();
     assert_eq!(
         classify_inner(&f.store, &f.runtime).await.unwrap(),
@@ -250,3 +275,8 @@ async fn environment_owner_path_is_preserved_and_package_coordinator_cannot_adop
         "original-environment"
     );
 }
+
+#[cfg(windows)]
+mod windows_owners;
+#[cfg(windows)]
+mod windows_paths;

@@ -842,10 +842,12 @@ jobs:
           retention-days: 7
       - name: Run Windows library and CLI tests
         run: cargo test --locked -p webcodex-runner-config -p webcodex-process -p webcodex-cli
-      - name: Run Windows unified upgrade transactions including native v0.4.3 fixture
+      - name: Run Windows unified upgrade and service transactions
         run: |
           cargo test --locked -p webcodex-environment --lib upgrade::
           if ($LASTEXITCODE -ne 0) { throw "Windows upgrade tests failed" }
+          cargo test --locked -p webcodex-environment --lib upgrade::windows_package::tests::windows_owners::registered_group_owned_installation_lifecycle -- --exact --ignored
+          if ($LASTEXITCODE -ne 0) { throw "Registered administrator-owned installation lifecycle failed" }
           cargo test --locked -p webcodex-environment --lib service::windows::
           if ($LASTEXITCODE -ne 0) { throw "Windows service tests failed" }
       - name: Test Computer helper ownership and native Task Scheduler roundtrip
@@ -959,7 +961,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "NSIS compiler installation failed" }
           python -c "from scripts.tests.test_windows_installer_native import nsis_compiler; assert nsis_compiler() is not None, 'Required NSIS compiler is unavailable'"
           if ($LASTEXITCODE -ne 0) { throw "Native installer gate cannot skip without NSIS" }
-          python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native -v
+          python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native scripts.tests.test_windows_desktop_hashes -v
           if ($LASTEXITCODE -ne 0) { throw "Native installer directory/upgrade contracts failed" }
       - name: Test native SSH acceptance fixture before compiling Desktop
         shell: pwsh
@@ -1032,6 +1034,80 @@ jobs:
           "short=$short" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
           "built_at=$builtAt" >> $env:GITHUB_OUTPUT
+      - name: Download pinned real Windows installer fixtures
+        shell: python
+        run: |
+          import hashlib
+          import os
+          from pathlib import Path, PurePosixPath
+          import shutil
+          import tarfile
+          import urllib.request
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'webcodex-unified-reproduction-inputs'
+          root.mkdir(exist_ok=False)
+          assets = {
+              'PREVIOUS_INSTALLER': (
+                  'https://github.com/yyjeqhc/webcodex/releases/download/v0.5.0/webcodex-desktop-v0.5.0-win32-x64-setup.exe',
+                  'dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6'),
+              'PUBLISHED_INSTALLER': (
+                  'https://github.com/9holy/webcodex/releases/download/v0.5.3/webcodex-unified-v0.5.3-win32-x64.exe',
+                  '7a43d294780f8af8a3e22853d81065ccca4546fda1e8316156a2dad9b9c812ab'),
+              'PUBLISHED_RUNTIME': (
+                  'https://github.com/9holy/webcodex/releases/download/v0.5.3/webcodex-v0.5.3-win32-x64.tar.gz',
+                  '95cb8d1d9b3756e531a48f85032d7aeb0771fe141ec09940b308f25fdc6a1be6'),
+          }
+          paths = {}
+          for key, (url, expected) in assets.items():
+              destination = root / url.rsplit('/', 1)[1]
+              with urllib.request.urlopen(url, timeout=120) as response, destination.open('xb') as output:
+                  shutil.copyfileobj(response, output)
+              with destination.open('rb') as stream:
+                  actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+              if actual != expected:
+                  raise SystemExit(f'{key} did not match its pinned published digest')
+              paths[key] = destination
+              print(f'{key}: SHA-256 verified')
+          cli = root / 'published-cli' / 'webcodex.exe'
+          cli.parent.mkdir()
+          with tarfile.open(paths['PUBLISHED_RUNTIME'], 'r:gz') as archive:
+              members = [member for member in archive.getmembers()
+                         if PurePosixPath(member.name).name == 'webcodex.exe']
+              if len(members) != 1 or not members[0].isfile() or not (0 < members[0].size < 200_000_000):
+                  raise SystemExit('Published runtime must contain exactly one bounded regular CLI')
+              with archive.extractfile(members[0]) as source, cli.open('xb') as output:
+                  shutil.copyfileobj(source, output)
+          paths['PUBLISHED_CLI'] = cli
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              for key, path in paths.items():
+                  print(f'{key}={path}', file=output)
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              print('PREVIOUS_INSTALLER_SHA256=dcc391d0c26e3334c60967c269fffff20312e2b059e61f3f1140779ffacdb6c6', file=output)
+              print('PUBLISHED_INSTALLER_SHA256=7a43d294780f8af8a3e22853d81065ccca4546fda1e8316156a2dad9b9c812ab', file=output)
+      - name: Verify real Windows Environment classification before Desktop packaging
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          python scripts/windows_unified_upgrade_smoke.py `
+            --verify-classifier --platform win32-x64 `
+            --previous-installer $env:PREVIOUS_INSTALLER `
+            --previous-installer-sha256 $env:PREVIOUS_INSTALLER_SHA256 `
+            --published-installer $env:PUBLISHED_INSTALLER `
+            --published-installer-sha256 $env:PUBLISHED_INSTALLER_SHA256 `
+            --published-cli $env:PUBLISHED_CLI `
+            --candidate-cli target/dogfood/webcodex.exe `
+            --candidate-version "${{ steps.runtime.outputs.version }}" `
+            --candidate-source-sha "${{ steps.runtime.outputs.source }}" `
+            --report (Join-Path $env:RUNNER_TEMP "windows-unified-classifier-report.json")
+          if ($LASTEXITCODE -ne 0) { throw "Real installed Windows Environment classification failed" }
+      - name: Retain real Windows classifier evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: windows-unified-classifier-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/windows-unified-classifier-report.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Stage exact runtime for Desktop bundle
         id: desktop_bundle
         shell: pwsh

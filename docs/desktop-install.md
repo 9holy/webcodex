@@ -133,6 +133,26 @@ using standard setup. The full installer and the standard installer's update
 path check the selected files, and do not stop other installations by executable
 name.
 
+**Windows installation checks.** Starting with v0.5.4, the full installer shows
+a specific diagnostic code. Ordinary Windows paths and the extended paths saved
+by the system are compared against the actual destination; manual changes to
+saved Environment paths are unnecessary. Use the original Windows account and
+the original installation's permission level, including elevation when that
+installation used it.
+
+| Diagnostic code | Next step |
+|---|---|
+| `setup_busy` | Wait for the current Environment operation to finish, then retry. |
+| `installer_owner` | Check the original directory, Windows account and installation permission level. |
+| `installer_registration` | Recover the original installation registration and keep its directory. |
+| `installer_program_acl` | Restore the original program permissions before upgrading. |
+| `package_identity` / `legacy_installation_incomplete` | Check and restore the original Runtime installation while retaining Environment data. |
+| `upgrade_pending` / `upgrade_receipt_owner` | Use the original account and Environment directory to recover the saved upgrade. |
+
+These installation identity checks run before program replacement. When
+reporting a failure, include the installer filename and diagnostic code so an
+identity or permission failure can be distinguished from a busy program.
+
 macOS signing has three explicit modes: `self-signed` is the current persistent fallback for public releases and long-lived dogfood; `developer-id` uses Developer ID Application plus notarization/stapling when Apple credentials are available; `adhoc` is only for disposable CI/local verification and promises no TCC upgrade continuity. Keep the same self-signed certificate **and private key** across builds and upgrades. Recreating a certificate with the same name changes identity. Both Desktop (`dev.webcodex.desktop`) and bundled Runner (`dev.webcodex.runner`) use certificate-anchored designated requirements without binary cdhash. Final app/DMG verification runs after Tauri nested signing. This does not preserve grants from historical ad-hoc builds automatically: users may need to reauthorize the new persistent identity once. Self-signed distribution is not Apple notarized; use **System Settings → Privacy & Security → Open Anyway** if Gatekeeper requires it, without disabling Gatekeeper globally.
 
 Launch WebCodex Desktop after installation.

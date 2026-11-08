@@ -56,12 +56,14 @@ fn projection_uses_only_allowlisted_component_metadata_and_never_private_canarie
         backup: PathBuf::from(canary),
         sha256: canary.into(),
         name: "webcodex".into(),
+        windows_security: None,
     }];
     journal.desktop = Some(DesktopBackup {
         target: PathBuf::from(canary),
         backup: PathBuf::from(canary),
         sha256: canary.into(),
         directory_modes_sha256: canary.into(),
+        windows_security: None,
     });
     journal.all_services = vec![ServiceSpec {
         scope: ServiceScope::User,
@@ -338,6 +340,7 @@ async fn headless_recovery_checks_the_current_phase_inside_the_effect_lock() {
         backup: store.root().join("program-backup"),
         sha256: digest(&program).unwrap(),
         name: "webcodex".into(),
+        windows_security: None,
     });
     save(&store, &journal).unwrap();
     let before = std::fs::read(store.root().join("upgrade.json")).unwrap();
