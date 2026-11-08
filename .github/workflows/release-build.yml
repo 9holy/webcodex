@@ -825,17 +825,7 @@ jobs:
             "$hash  $env:DESKTOP_INSTALLER_NAME`n",
             [System.Text.Encoding]::ASCII
           )
-
-      - name: Smoke native Windows Desktop NSIS candidate
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          & .\scripts\desktop_install_windows_smoke.ps1 `
-            -Installer $env:DESKTOP_INSTALLER_PATH `
-            -Version $env:VERSION `
-            -SourceSha $env:SOURCE_SHA `
-            -BuiltAt ([Int64]$env:WEBCODEX_BUILT_AT) `
-            -Platform $env:WEBCODEX_RELEASE_PLATFORM
+          "DESKTOP_INSTALLER_SHA256=$hash" >> $env:GITHUB_ENV
 
       - name: Install Python for Windows unified installer provenance
         if: inputs.include_unified_installers
@@ -878,17 +868,47 @@ jobs:
             --workflow-ref $env:GITHUB_WORKFLOW_REF `
             --output-dir $candidate
           if ($LASTEXITCODE -ne 0) { throw "Native Windows provenance collection failed" }
-          $prepared = Join-Path $env:RUNNER_TEMP "unified-nsis-$env:WEBCODEX_RELEASE_PLATFORM"
-          python scripts\prepare_windows_unified_installer.py `
-            --candidate-dir $candidate `
-            --platform $env:WEBCODEX_RELEASE_PLATFORM `
-            --output-dir $prepared
-          if ($LASTEXITCODE -ne 0) { throw "Windows unified NSIS staging failed" }
+          $manifest = Get-Content -LiteralPath (Join-Path $candidate "source-manifest.json") -Raw | ConvertFrom-Json
+          $programHashes = [ordered]@{}
+          foreach ($name in @("webcodex", "webcodex-server", "webcodex-runner", "webcodex-desktop")) {
+            $programHashes[$name] = $manifest.artifacts.$name.sha256
+          }
+          $expectedProgramHashes = Join-Path $env:RUNNER_TEMP "unified-program-hashes-$env:WEBCODEX_RELEASE_PLATFORM.json"
+          [System.IO.File]::WriteAllText($expectedProgramHashes, ($programHashes | ConvertTo-Json -Compress) + "`n", [System.Text.Encoding]::ASCII)
           "UNIFIED_CANDIDATE=$candidate" >> $env:GITHUB_ENV
-          "UNIFIED_TAURI_CONFIG=$(Join-Path $prepared 'tauri.unified-installer.conf.json')" >> $env:GITHUB_ENV
+          "UNIFIED_EXPECTED_PROGRAM_HASHES=$expectedProgramHashes" >> $env:GITHUB_ENV
           $installerName = "webcodex-unified-v$env:VERSION-$env:WEBCODEX_RELEASE_PLATFORM.exe"
           "UNIFIED_INSTALLER_NAME=$installerName" >> $env:GITHUB_ENV
           "UNIFIED_INSTALLER_PATH=$(Join-Path $env:GITHUB_WORKSPACE (Join-Path 'dist' $installerName))" >> $env:GITHUB_ENV
+
+      - name: Smoke native Windows Desktop NSIS candidate
+        shell: pwsh
+        env:
+          INCLUDE_UNIFIED_INSTALLERS: ${{ inputs.include_unified_installers }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $hash = (Get-FileHash -LiteralPath $env:DESKTOP_INSTALLER_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($env:DESKTOP_INSTALLER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $hash -cne $env:DESKTOP_INSTALLER_SHA256) {
+            throw "Desktop NSIS candidate changed before native smoke"
+          }
+          $smokeOptions = @{}
+          if ($env:INCLUDE_UNIFIED_INSTALLERS -eq "true") {
+            if (-not $env:UNIFIED_EXPECTED_PROGRAM_HASHES -or -not (Test-Path -LiteralPath $env:UNIFIED_EXPECTED_PROGRAM_HASHES -PathType Leaf)) {
+              throw "Unified Windows smoke requires the collected four-program hashes"
+            }
+            $smokeOptions.ExpectedProgramHashes = $env:UNIFIED_EXPECTED_PROGRAM_HASHES
+            $smokeOptions.InstallDir = Join-Path $env:LOCALAPPDATA ("WebCodex Payload Smoke " + [Guid]::NewGuid().ToString("N"))
+          }
+          & .\scripts\desktop_install_windows_smoke.ps1 `
+            -Installer $env:DESKTOP_INSTALLER_PATH `
+            -Version $env:VERSION `
+            -SourceSha $env:SOURCE_SHA `
+            -BuiltAt ([Int64]$env:WEBCODEX_BUILT_AT) `
+            -Platform $env:WEBCODEX_RELEASE_PLATFORM @smokeOptions
+          if ((Get-FileHash -LiteralPath $env:DESKTOP_INSTALLER_PATH -Algorithm SHA256).Hash.ToLowerInvariant() -cne $hash) {
+            throw "Desktop NSIS candidate changed during native smoke"
+          }
+          "VERIFIED_DESKTOP_INSTALLER_SHA256=$hash" >> $env:GITHUB_ENV
 
       - name: Install NSIS compiler for the outer bootstrap
         if: inputs.include_unified_installers
@@ -910,14 +930,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE "target\unified-$env:WEBCODEX_RELEASE_PLATFORM-release-tauri"
-          node node_modules/@tauri-apps/cli/tauri.js build --bundles nsis --config $env:UNIFIED_TAURI_CONFIG --ci --no-sign -- --locked
-          if ($LASTEXITCODE -ne 0) { throw "Unified Tauri payload NSIS build failed" }
-          $bundleDir = Join-Path $env:CARGO_TARGET_DIR "release\bundle\nsis"
-          $built = @(Get-ChildItem -LiteralPath $bundleDir -Filter "*-setup.exe" -File)
-          if ($built.Count -ne 1) { throw "Expected exactly one inner Tauri installer, found $($built.Count)" }
-          $inner = Join-Path $env:RUNNER_TEMP "webcodex-tauri-inner-$env:WEBCODEX_RELEASE_PLATFORM.exe"
-          Copy-Item -LiteralPath $built[0].FullName -Destination $inner
+          # The standard NSIS already contains the exact Desktop and Runtime
+          # bytes collected above. Rebuilding Desktop here would invalidate
+          # that manifest even when its source and version were unchanged.
+          $inner = $env:DESKTOP_INSTALLER_PATH
+          $innerHash = (Get-FileHash -LiteralPath $inner -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($env:VERIFIED_DESKTOP_INSTALLER_SHA256 -cnotmatch '^[0-9a-f]{64}$' -or $innerHash -cne $env:VERIFIED_DESKTOP_INSTALLER_SHA256) {
+            throw "Verified Desktop NSIS candidate changed before outer packaging"
+          }
           $sourceManifest = Join-Path $env:GITHUB_WORKSPACE "dist\webcodex-unified-v$env:VERSION-$env:WEBCODEX_RELEASE_PLATFORM.source-manifest.json"
           $publicSourceManifest = Join-Path $env:GITHUB_WORKSPACE "dist\webcodex-source-v$env:VERSION-$env:WEBCODEX_RELEASE_PLATFORM.json"
           $candidateSums = Join-Path $env:GITHUB_WORKSPACE "dist\webcodex-unified-v$env:VERSION-$env:WEBCODEX_RELEASE_PLATFORM.candidate-SHA256SUMS"

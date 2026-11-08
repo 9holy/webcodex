@@ -907,6 +907,56 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn('expected="$name $version (commit $short_source, dirty=false, built_at=$built_at)"', ci)
         self.assertNotIn('$expected = "$name $version (commit $short, dirty=false, built_at=$builtAt)"', ci)
 
+    def test_windows_outer_reuses_the_manifest_checked_standard_installer(self) -> None:
+        workflow = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
+        windows = workflow.split("  windows:", 1)[1].split("\n  runtime-native:", 1)[0]
+        collect_at = windows.index("      - name: Collect native Windows unified installer inputs")
+        smoke_at = windows.index("      - name: Smoke native Windows Desktop NSIS candidate")
+        outer_at = windows.index("      - name: Build native Tauri payload and outer Windows bootstrap")
+        upload_at = windows.index("      - name: Upload Windows unified installer and provenance")
+        self.assertLess(collect_at, smoke_at)
+        self.assertLess(smoke_at, outer_at)
+        self.assertLess(outer_at, upload_at)
+        self.assertEqual(windows.count("node node_modules/@tauri-apps/cli/tauri.js build"), 1)
+        self.assertEqual(windows.count("& .\\scripts\\desktop_install_windows_smoke.ps1"), 1)
+        self.assertNotIn("UNIFIED_TAURI_CONFIG", windows)
+        self.assertNotIn("target\\unified-", windows)
+
+        collect = windows[collect_at:smoke_at]
+        self.assertIn("if: inputs.include_unified_installers", collect)
+        self.assertIn('(Join-Path $candidate "source-manifest.json") -Raw | ConvertFrom-Json', collect)
+        self.assertIn('@("webcodex", "webcodex-server", "webcodex-runner", "webcodex-desktop")', collect)
+        self.assertIn("$programHashes[$name] = $manifest.artifacts.$name.sha256", collect)
+        self.assertIn('"UNIFIED_EXPECTED_PROGRAM_HASHES=$expectedProgramHashes" >> $env:GITHUB_ENV', collect)
+
+        smoke = windows[smoke_at:windows.index("      - name: Install NSIS compiler for the outer bootstrap")]
+        # Core-only builds still run the same single smoke without requiring a
+        # unified candidate; unified builds cannot silently omit the hash gate.
+        self.assertNotIn("\n        if:", smoke)
+        self.assertIn("INCLUDE_UNIFIED_INSTALLERS: ${{ inputs.include_unified_installers }}", smoke)
+        self.assertIn("$smokeOptions = @{}", smoke)
+        self.assertIn('if ($env:INCLUDE_UNIFIED_INSTALLERS -eq "true")', smoke)
+        self.assertIn("if (-not $env:UNIFIED_EXPECTED_PROGRAM_HASHES -or -not (Test-Path", smoke)
+        self.assertIn("$smokeOptions.ExpectedProgramHashes = $env:UNIFIED_EXPECTED_PROGRAM_HASHES", smoke)
+        self.assertIn("$smokeOptions.InstallDir = Join-Path $env:LOCALAPPDATA", smoke)
+        self.assertIn("-Installer $env:DESKTOP_INSTALLER_PATH", smoke)
+        self.assertIn("-Platform $env:WEBCODEX_RELEASE_PLATFORM @smokeOptions", smoke)
+        self.assertIn('$env:DESKTOP_INSTALLER_SHA256 -cnotmatch \'^[0-9a-f]{64}$\'', smoke)
+        self.assertIn("$hash -cne $env:DESKTOP_INSTALLER_SHA256", smoke)
+        self.assertIn(".Hash.ToLowerInvariant() -cne $hash", smoke)
+        self.assertLess(smoke.index("& .\\scripts\\desktop_install_windows_smoke.ps1"),
+                        smoke.index('"VERIFIED_DESKTOP_INSTALLER_SHA256=$hash" >> $env:GITHUB_ENV'))
+
+        outer = windows[outer_at:upload_at]
+        self.assertIn("$inner = $env:DESKTOP_INSTALLER_PATH", outer)
+        self.assertIn("Get-FileHash -LiteralPath $inner -Algorithm SHA256", outer)
+        self.assertIn('$env:VERIFIED_DESKTOP_INSTALLER_SHA256 -cnotmatch \'^[0-9a-f]{64}$\'', outer)
+        self.assertIn("$innerHash -cne $env:VERIFIED_DESKTOP_INSTALLER_SHA256", outer)
+        self.assertLess(outer.index("$innerHash -cne $env:VERIFIED_DESKTOP_INSTALLER_SHA256"),
+                        outer.index("build_windows_unified_bootstrap.py"))
+        self.assertIn("--inner-installer $inner", outer)
+        self.assertNotIn("Copy-Item -LiteralPath $built", outer)
+
     def test_server_image_publication_is_separate_and_multi_arch(self) -> None:
         candidate = Path(".github/workflows/release-build.yml").read_text(encoding="utf-8")
         image = Path(".github/workflows/release-image.yml").read_text(encoding="utf-8")

@@ -54,13 +54,19 @@ Assert-ExpectedProgramHashes $Installed $expected
     def test_four_actual_candidate_hashes_pass(self):
         self.assertEqual(self.execute().returncode, 0)
 
-    def test_same_architecture_old_desktop_fails_before_uninstall(self):
-        desktop = self.installed / "WebCodex.exe"
-        desktop.write_bytes(synthetic_pe(0x8664) + b"old Desktop same architecture")
-        result = self.execute()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn(b"webcodex-desktop", result.stderr)
-        self.assertTrue(desktop.exists())
+    def test_each_same_architecture_changed_program_fails_before_uninstall(self):
+        for name, relative in self.paths.items():
+            with self.subTest(program=name):
+                program = self.installed / relative
+                original = program.read_bytes()
+                try:
+                    program.write_bytes(synthetic_pe(0x8664) + name.encode() + b"different build")
+                    result = self.execute()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(f"installed {name} bytes differ".encode(), result.stderr)
+                    self.assertTrue(program.exists())
+                finally:
+                    program.write_bytes(original)
 
     def test_missing_extra_duplicate_or_oversized_identity_rejected(self):
         good = self.hashes.read_text()

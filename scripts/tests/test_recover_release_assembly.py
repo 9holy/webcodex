@@ -33,20 +33,10 @@ def origin() -> dict:
 
 
 def original_workflow() -> bytes:
-    # The forward producer fix changes exactly these four lines. Reconstruct
-    # the frozen input fixture without requiring history in a shallow checkout.
-    text = (ROOT / ".github/workflows/release-build.yml").read_text(encoding="utf-8")
-    prefix_text, text = text.split("\n  unified-native:\n", 1)
-    for command in ("sha256sum", "shasum -a 256"):
-        for variable in ("source_name", "filename"):
-            indent = 10 if command == "shasum -a 256" else (14 if variable == "source_name" else 16)
-            prefix = "\n" + " " * indent
-            fixed = prefix + f'(cd dist && {command} "${variable}" > "${variable}.sha256")'
-            old = prefix + f'{command} "dist/${variable}" > "dist/${variable}.sha256"'
-            if text.count(fixed) != 1:
-                raise AssertionError("the forward producer fix no longer has its reviewed four-line scope")
-            text = text.replace(fixed, old)
-    data = (prefix_text + "\n  unified-native:\n" + text).encode("utf-8")
+    # Exact .github/workflows/release-build.yml from the fixed recovery origin
+    # 2299ffe5bcc0f3965e11b753fabc3fb558769de8. Current producer changes must not
+    # redefine the historical input, and shallow CI needs no Git history.
+    data = (ROOT / "scripts/tests/fixtures/release-build-v0.5.2.yml").read_bytes()
     if hashlib.sha256(data).hexdigest() != "16b4742ec1f8eee5203a48d5635332a0c89b21a94c75a112a6849129597032ba":
         raise AssertionError("the frozen v0.5.2 workflow fixture differs")
     return data
