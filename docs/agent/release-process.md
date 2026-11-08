@@ -255,8 +255,8 @@ prerelease assets remain unchanged. A corrected product requires a new version;
 its evidence cannot replace the retained v0.5.4 failure.
 
 The shared Windows worker selects a code-owned specification only for the exact
-`(v0.5.4, release-publish-v054.yml)`, `(v0.5.5, release-publish-v055.yml)`, or
-`(v0.5.6, release-publish-v056.yml)`
+`(v0.5.4, release-publish-v054.yml)`, `(v0.5.5, release-publish-v055.yml)`,
+`(v0.5.6, release-publish-v056.yml)`, or `(v0.5.7, release-publish-v057.yml)`
 tag/controller-workflow pair. It then requires finalized pins and validates the
 complete request before downloads or installer execution. Unknown or crossed
 pairs have no fallback. The acceptance workflow, native x64/ARM64 matrix, fixed
@@ -318,6 +318,32 @@ without dispatching another workflow; final success still requires Windows
 public-byte verification. This delivery profile does not relax exact-source CI
 or source-evidence qualification. Notes describe the candidate until its evidence
 is complete, and no previous tag, Release or asset may be replaced.
+
+### Fixed v0.5.7 continuation after the failed preflight
+
+The v0.5.7 [fixed entry](../../scripts/release_github_actions_v057.py),
+[request](../../.github/release-requests/v0.5.7.json),
+[reviewed notes input](../../.github/release-requests/v0.5.7-notes.md), and
+[publisher](../../.github/workflows/release-publish-v057.yml) inherit the v0.5.6
+Windows controller. Only the new fixed specification and finalization guard
+differ; the authenticated dispatcher, 28 checkpoints, exact 11-asset Windows
+bundle, ten native install/upgrade scenarios, same-Release promotion and
+`make_latest: false` remain required. v0.5.4/v0.5.5 retain their three-scenario
+contracts, and v0.5.6 retains its five-scenario contract per architecture.
+
+The v0.5.6 authoritative build [42504713257](https://github.com/9holy/webcodex/actions/runs/42504713257)
+failed at deterministic preflight because all-platform updater test fixtures
+inherited the Windows-only workflow scope. Native jobs and assembly did not run;
+no build artifacts or Release were created. Its source tag, fixed controller,
+request, workflow and failed publication [42504442536](https://github.com/9holy/webcodex/actions/runs/42504442536)
+remain unchanged. v0.5.7 isolates each test fixture's scope while preserving
+production validation, and takes the normal exact-source qualification path.
+
+Keep the v0.5.7 source SHA/tree at explicit 40-zero placeholders and CI/evidence
+run IDs at `1` until the new source and successful exact attempts are fixed.
+Finalize code and JSON together after those proofs, with a reviewed notes digest,
+in a separate control commit. Neither unfinished pins nor earlier-version reports
+can authorize downloads, installation, publication or promotion for this version.
 
 ### Failed pre-publication tag reclaim
 
