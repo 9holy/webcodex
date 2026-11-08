@@ -559,13 +559,15 @@ def validate_server_image_release_record(
     return identity
 
 
-def validate_github_assets(release: dict, version: str, *, unified_installers: bool | None = None, require_runtime_installers: bool = False) -> dict[str, dict]:
+def validate_github_assets(release: dict, version: str, *, unified_installers: bool | None = None, require_runtime_installers: bool = False, expected_prerelease: bool = False) -> dict[str, dict]:
+    if type(expected_prerelease) is not bool:
+        raise VerificationError("expected prerelease state must be an explicit boolean")
     if (
         release.get("tag_name") != f"v{version}"
         or release.get("draft") is not False
-        or release.get("prerelease") is not False
+        or release.get("prerelease") is not expected_prerelease
     ):
-        raise VerificationError("GitHub Release is missing, draft/prerelease, or attached to the wrong tag")
+        raise VerificationError("GitHub Release is missing, draft, in the wrong prerelease state, or attached to the wrong tag")
     required = {canonical_archive_name(version, platform) for platform in PLATFORMS}
     required.add("SHA256SUMS")
     required.update(
@@ -934,7 +936,7 @@ def verify_supplemental_desktop_asset(
     )
 
 
-def verify_public_release(version: str, timeout: float, *, repo: str = REPO, github_only: bool = False, require_unified_installers: bool = False, require_runtime_installers: bool = False) -> None:
+def verify_public_release(version: str, timeout: float, *, repo: str = REPO, github_only: bool = False, require_unified_installers: bool = False, require_runtime_installers: bool = False, expected_prerelease: bool = False) -> None:
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise VerificationError("invalid GitHub repository")
     if not github_only:
@@ -951,7 +953,7 @@ def verify_public_release(version: str, timeout: float, *, repo: str = REPO, git
     release = fetch_json(release_url, timeout)
     if require_runtime_installers and not require_unified_installers:
         raise VerificationError("Runtime requirement needs explicit Full requirement")
-    assets = validate_github_assets(release, version, unified_installers=True if require_unified_installers else None, require_runtime_installers=require_runtime_installers)
+    assets = validate_github_assets(release, version, unified_installers=True if require_unified_installers else None, require_runtime_installers=require_runtime_installers, expected_prerelease=expected_prerelease)
     runtime_selected = "manifest-v2.json" in assets
 
     with tempfile.TemporaryDirectory(prefix=f"webcodex-v{version}-verify-") as temp:

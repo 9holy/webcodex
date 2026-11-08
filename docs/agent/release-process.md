@@ -179,6 +179,70 @@ defaults to `9holy/webcodex`; other publishers must set that value explicitly.
 Downloaded metadata and runtime environment
 variables cannot select a different publisher.
 
+### Fixed v0.5.4 Windows acceptance before stable promotion
+
+The v0.5.4 [`publisher`](../../.github/workflows/release-publish-v054.yml) uses a
+separate, code-owned [`specification and controller`](../../scripts/release_github_actions_v054.py).
+Its fixed [`request`](../../.github/release-requests/v0.5.4.json) cannot select a
+different source, bypass Windows acceptance, or change publication stages. Source
+commit/tree and successful CI/evidence pins must be finalized together in reviewed
+control code and the matching request. Explicit zero/source and run-ID placeholders
+fail before publication authentication or writes. The v0.5.2 and v0.5.3 entry points
+keep their existing behavior and recovery contracts.
+
+Windows full installers verify their source manifest through the immutable public
+Release download URL before even a fresh installation. They therefore cannot be
+fully accepted while the same build is still assembling or while its Release is
+a draft. v0.5.4 resolves that ordering through these fixed stages:
+
+1. Keep the existing exact-source readiness, annotated tag, native build, bundle
+   collection, frozen asset list, and complete draft digest/size checks.
+2. Retain the preview publication intent, then publish that same Release with
+   `draft=false`, `prerelease=true`, and `make_latest=false`. Independently verify
+   its real public bytes with the public verifier's explicit prerelease opt-in.
+   Ordinary public verification still requires a stable Release by default.
+3. Retain one correlated Windows acceptance request and dispatch the
+   [read-only acceptance workflow](../../.github/workflows/release-windows-acceptance.yml).
+   It runs on native x64 and ARM64 Windows runners from the exact reviewed control
+   commit. Each runner downloads the frozen public assets, verifies their actual
+   sizes/digests, validates the source manifest's version/source/platform/build-run
+   identity, and safely extracts only the three named Runtime programs.
+4. On each architecture, execute the real full installer for a fresh install, an
+   unconfigured upstream v0.5.0 upgrade, and a configured upstream v0.5.0 upgrade.
+   The old upstream and v0.5.3 comparison bytes have fixed SHA-256 pins. All four
+   installed program hashes, including Desktop, must match the public source
+   manifest before cleanup. Configured upgrade acceptance additionally retains
+   the original installation and Environment identities, private-state digests,
+   and owned cleanup result. Classifier or harness success does not satisfy this
+   gate. Children do not inherit the repository or Actions runtime tokens.
+5. Require both native jobs and both bounded, same-attempt report artifacts to
+   succeed. Freeze their exact run/attempt, artifact and report digests in the
+   promotion intent, upload its checkpoint, then set the **same Release** to
+   `prerelease=false` and `make_latest=true`. Verify the actual `/releases/latest`
+   response before starting image or Intel Desktop publication. The v0.5.4
+   publisher also waits for the Intel job and its public DMG/checksum pair.
+
+No stage deletes, replaces, or reuploads a published asset, moves the tag, fakes
+the API's prerelease flag, or invents provenance for an unpublished source. A
+failed Windows acceptance leaves an immutable public prerelease and does not
+promote stable/latest. Product changes after that point require a new version.
+
+For recovery, rerun the **same publisher run**, retaining its artifacts. It restores
+the newest verified checkpoint, observes the same Release and acceptance run, and
+does not create a new publication identity. If Windows acceptance itself needs an
+authorized rerun, rerun its original workflow run as the repository owner; the
+publisher can observe its newer attempt before the promotion intent is frozen.
+Once promotion is prepared, a different attempt or replacement report cannot
+silently replace that proof. Unknown preview/promotion responses are reconciled
+from actual Release state; an unknown effect still absent from GitHub is not
+automatically repeated. Keep the reviewed `main` control commit unchanged while
+new acceptance or post-publication dispatches remain necessary.
+
+The new request/workflows and publication code belong in the later control commit,
+after the product source commit and successful proof runs have been fixed. The
+optional four-program hash check in the ordinary Windows smoke helper can ship
+with the product source; existing invocations retain their original behavior.
+
 ### Failed pre-publication tag reclaim
 
 A version tag may be reclaimed only when the human requester explicitly names that
