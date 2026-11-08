@@ -17,6 +17,7 @@ SOURCE_SHA = "a" * 40
 RUN_ID = 123456
 VERSION = "0.4.3"
 SOURCE_REF = f"release/v{VERSION}"
+WINDOWS_PLATFORMS = ("win32-x64", "win32-arm64")
 
 
 def _archive_bytes(platform: str) -> bytes:
@@ -31,7 +32,11 @@ def _archive_bytes(platform: str) -> bytes:
     return output.getvalue()
 
 
-def _write_bundle(root: Path, tag: str, build_kind: str, *, unified: bool = False, guarded: bool = False) -> tuple[str, dict[str, str]]:
+def _write_bundle(root: Path, tag: str, build_kind: str, *, unified: bool = False, guarded: bool = False, platform_scope: str = "all") -> tuple[str, dict[str, str]]:
+    platforms = WINDOWS_PLATFORMS if platform_scope == "windows" else collector.PLATFORMS
+    desktop_platforms = WINDOWS_PLATFORMS if platform_scope == "windows" else collector.primary_desktop_platforms_for_version(VERSION)
+    installer_targets = {f"{platform}-exe": (platform, "exe") for platform in WINDOWS_PLATFORMS} if platform_scope == "windows" else collector.INSTALLER_TARGETS
+    scope_marker = {"platform_scope": "windows"} if platform_scope == "windows" else {}
     stem = (
         f"webcodex-v{VERSION}"
         if build_kind == "release"
@@ -40,7 +45,7 @@ def _write_bundle(root: Path, tag: str, build_kind: str, *, unified: bool = Fals
     artifact_hashes: dict[str, str] = {}
     artifact_payload: dict[str, dict[str, str]] = {}
     checksum_lines = []
-    for platform in collector.PLATFORMS:
+    for platform in platforms:
         filename = f"{stem}-{platform}.tar.gz"
         payload = _archive_bytes(platform)
         (root / filename).write_bytes(payload)
@@ -50,7 +55,7 @@ def _write_bundle(root: Path, tag: str, build_kind: str, *, unified: bool = Fals
         checksum_lines.append(f"{digest}  {filename}")
 
     desktop_artifacts: dict[str, dict[str, str]] = {}
-    for platform in collector.primary_desktop_platforms_for_version(VERSION):
+    for platform in desktop_platforms:
         desktop_name = collector.desktop_artifact_filename(
             VERSION,
             platform,
@@ -67,7 +72,7 @@ def _write_bundle(root: Path, tag: str, build_kind: str, *, unified: bool = Fals
     installer_manifest = {}
     if unified:
         source_records = {}
-        for platform in collector.PLATFORMS:
+        for platform in platforms:
             source_name = f"webcodex-source-v{VERSION}-{platform}.json"
             guarded_cli_info = {"schema_version": 1, "binary": "webcodex", "version": VERSION, "git_commit": SOURCE_SHA, "git_dirty": False, "windows_guarded_bootstrap_contract": 1}
             source_payload = json.dumps({
@@ -83,7 +88,7 @@ def _write_bundle(root: Path, tag: str, build_kind: str, *, unified: bool = Fals
             source_digest = hashlib.sha256(source_payload).hexdigest()
             checksum_lines.append(f"{source_digest}  {source_name}")
             source_records[platform] = (source_name, source_digest)
-        for target, (platform, package_format) in collector.INSTALLER_TARGETS.items():
+        for target, (platform, package_format) in installer_targets.items():
             filename = collector.installer_artifact_filename(VERSION, target)
             magic = {
                 "deb": b"!<arch>\n",
@@ -116,9 +121,11 @@ def _write_bundle(root: Path, tag: str, build_kind: str, *, unified: bool = Fals
                 "source_manifest_sha256": source_digest,
             }
     (root / "SHA256SUMS").write_text("\n".join(checksum_lines) + "\n", encoding="ascii")
-    (root / "linux-x64-elf.txt").write_text("ELF x64\n", encoding="utf-8")
-    (root / "linux-arm64-elf.txt").write_text("ELF arm64\n", encoding="utf-8")
+    if platform_scope == "all":
+        (root / "linux-x64-elf.txt").write_text("ELF x64\n", encoding="utf-8")
+        (root / "linux-arm64-elf.txt").write_text("ELF arm64\n", encoding="utf-8")
     release_build = {
+        **scope_marker,
         "tag": tag,
         "version": VERSION,
         "source_sha": SOURCE_SHA,
@@ -133,6 +140,7 @@ def _write_bundle(root: Path, tag: str, build_kind: str, *, unified: bool = Fals
     (root / "release-build.json").write_text(json.dumps(release_build) + "\n", encoding="utf-8")
     if build_kind == "release":
         manifest = {
+            **scope_marker,
             "version": VERSION,
             "binaries": list(collector.BINARIES),
             **({"installers": installer_manifest} if unified else {}),
@@ -141,14 +149,177 @@ def _write_bundle(root: Path, tag: str, build_kind: str, *, unified: bool = Fals
                     "url": f"https://github.com/{collector.DEFAULT_REPO}/releases/download/v{VERSION}/{stem}-{platform}.tar.gz",
                     "sha256": artifact_hashes[platform],
                 }
-                for platform in collector.PLATFORMS
+                for platform in platforms
             },
         }
         (root / "manifest.json").write_text(json.dumps(manifest) + "\n", encoding="utf-8")
         if unified:
             checksum_lines.append(f"{collector.sha256_file(root / 'manifest.json')}  manifest.json")
             (root / "SHA256SUMS").write_text("\n".join(checksum_lines) + "\n", encoding="ascii")
+    if platform_scope == "windows":
+        name = "webcodex-release-manifest.json"
+        (root / name).write_text(json.dumps({"schema_version": 1, "release_version": VERSION,
+            "runtime_version": VERSION, "desktop_runtime_contract": {"min_generation": 1, "max_generation": 1}}))
+        digest = collector.sha256_file(root / name)
+        release_build["runtime_manifest"] = {"filename": name, "sha256": digest}
+        (root / "release-build.json").write_text(json.dumps(release_build) + "\n", encoding="utf-8")
+        checksum_lines.append(f"{digest}  {name}")
+        (root / "SHA256SUMS").write_text("\n".join(checksum_lines) + "\n", encoding="ascii")
     return stem, artifact_hashes
+
+
+class WindowsBundleTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.stem, _ = _write_bundle(self.root, f"v{VERSION}", "release", unified=True, guarded=True, platform_scope="windows")
+        self.kwargs = dict(repo=collector.DEFAULT_REPO, run_id=RUN_ID,
+            expected_source_sha=SOURCE_SHA, expected_tag=f"v{VERSION}",
+            artifact_name=f"{self.stem}-bundle", require_unified_installers=True,
+            platform_scope="windows")
+
+    def verify(self, **changes):
+        return collector.verify_bundle_directory(self.root, **(self.kwargs | changes))
+
+    def refresh_checksums(self):
+        path = self.root / "SHA256SUMS"
+        names = [line.split("  ", 1)[1] for line in path.read_text().splitlines()]
+        path.write_text("".join(f"{collector.sha256_file(self.root / name)}  {name}\n" for name in names))
+
+    def test_windows_requires_both_native_architectures_and_explicit_scope(self):
+        summary = self.verify()
+        self.assertEqual(summary["platform_scope"], "windows")
+        self.assertEqual(set(summary["artifacts"]), set(WINDOWS_PLATFORMS))
+        self.assertEqual(set(summary["desktop_artifacts"]), set(WINDOWS_PLATFORMS))
+        self.assertEqual(set(summary["installer_artifacts"]), {f"{p}-exe" for p in WINDOWS_PLATFORMS})
+        self.assertEqual(len(list(self.root.iterdir())), 12)
+        for changes in ({"platform_scope": "all"}, {"require_unified_installers": False},
+                        {"require_runtime_installers": True}, {"platform_scope": "linux"},
+                        {"platform_scope": "Windows"}, {"platform_scope": ""}):
+            with self.subTest(changes=changes), self.assertRaises(collector.CollectionError):
+                self.verify(**changes)
+
+    def test_windows_scope_marker_cannot_be_omitted_changed_or_inferred(self):
+        for filename in ("release-build.json", "manifest.json"):
+            path = self.root / filename
+            original = path.read_bytes()
+            for marker in (None, "all", "linux", "Windows", False):
+                with self.subTest(file=filename, marker=marker):
+                    document = json.loads(original)
+                    if marker is None:
+                        document.pop("platform_scope")
+                    else:
+                        document["platform_scope"] = marker
+                    path.write_text(json.dumps(document))
+                    self.refresh_checksums()
+                    with self.assertRaisesRegex(collector.CollectionError, "scope"):
+                        self.verify()
+            path.write_bytes(original)
+            self.refresh_checksums()
+
+    def test_windows_rejects_each_missing_program_package_source_or_metadata_file(self):
+        for path in list(self.root.iterdir()):
+            with self.subTest(name=path.name):
+                original = path.read_bytes()
+                path.unlink()
+                with self.assertRaises(collector.CollectionError):
+                    self.verify()
+                path.write_bytes(original)
+
+    def test_windows_runtime_contract_cannot_be_dropped_from_an_otherwise_consistent_bundle(self):
+        path = self.root / "release-build.json"
+        build = json.loads(path.read_text()); build.pop("runtime_manifest")
+        path.write_text(json.dumps(build))
+        (self.root / "webcodex-release-manifest.json").unlink()
+        sums = self.root / "SHA256SUMS"
+        sums.write_text("".join(line + "\n" for line in sums.read_text().splitlines()
+            if not line.endswith("  webcodex-release-manifest.json")))
+        with self.assertRaisesRegex(collector.CollectionError, "missing its Runtime compatibility manifest"):
+            self.verify()
+
+    def test_windows_rejects_missing_architecture_or_extra_platform_in_each_metadata_set(self):
+        path = self.root / "release-build.json"
+        original = json.loads(path.read_text())
+        for field, missing, extra in (("artifacts", "win32-arm64", "linux-x64"),
+                                      ("desktop_artifacts", "win32-arm64", "darwin-arm64"),
+                                      ("installer_artifacts", "win32-arm64-exe", "linux-x64-deb")):
+            for remove in (True, False):
+                with self.subTest(field=field, remove=remove):
+                    changed = json.loads(json.dumps(original))
+                    if remove:
+                        del changed[field][missing]
+                    else:
+                        changed[field][extra] = dict(changed[field][missing])
+                    path.write_text(json.dumps(changed))
+                    with self.assertRaises(collector.CollectionError):
+                        self.verify()
+
+    def test_windows_rejects_non_windows_runtime_installers_npm_and_unselected_files(self):
+        for name in (f"webcodex-v{VERSION}-linux-x64.tar.gz", f"webcodex-desktop-v{VERSION}-darwin-arm64.dmg",
+                     f"webcodex-unified-v{VERSION}-linux-x64.deb", f"webcodex-runtime-v{VERSION}-linux-x64.deb",
+                     "webcodex-npm.tgz", "linux-x64-elf.txt", "manifest-v2.json"):
+            with self.subTest(name=name):
+                path = self.root / name
+                path.write_bytes(b"unselected fixture")
+                with self.assertRaisesRegex(collector.CollectionError, "file set mismatch"):
+                    self.verify()
+                path.unlink()
+
+    def test_windows_retains_actual_payload_and_source_checksum_validation(self):
+        for path in list(self.root.iterdir()):
+            if path.name in ("release-build.json", "SHA256SUMS"):
+                continue
+            with self.subTest(name=path.name):
+                original = path.read_bytes()
+                path.write_bytes(original + b"changed bytes")
+                with self.assertRaisesRegex(collector.CollectionError, "SHA-256"):
+                    self.verify()
+                path.write_bytes(original)
+
+    def test_windows_rejects_rehashed_foreign_source_run_and_candidate_binding(self):
+        platform = "win32-arm64"
+        source_path = self.root / f"webcodex-source-v{VERSION}-{platform}.json"
+        build_path = self.root / "release-build.json"
+        manifest_path = self.root / "manifest.json"
+        originals = {path: path.read_bytes() for path in (source_path, build_path, manifest_path)}
+        for field, bad in (("source_sha", "b" * 40), ("source_workflow_run_id", RUN_ID + 1),
+                           ("source_workflow_ref", f"foreign/repo/.github/workflows/release-build.yml@refs/tags/v{VERSION}"),
+                           ("platform", "win32-x64")):
+            with self.subTest(field=field):
+                source = json.loads(originals[source_path]); source[field] = bad
+                source_path.write_text(json.dumps(source))
+                digest = collector.sha256_file(source_path)
+                build = json.loads(originals[build_path])
+                entry = build["installer_artifacts"][f"{platform}-exe"]
+                entry["source_manifest_sha256"] = entry["candidate_manifest_sha256"] = digest
+                build_path.write_text(json.dumps(build))
+                manifest = json.loads(originals[manifest_path])
+                manifest["installers"][f"{platform}-exe"]["source_manifest_sha256"] = digest
+                manifest_path.write_text(json.dumps(manifest))
+                self.refresh_checksums()
+                with self.assertRaisesRegex(collector.CollectionError, "same-source outer provenance"):
+                    self.verify()
+        for path, data in originals.items():
+            path.write_bytes(data)
+        self.refresh_checksums()
+        build = json.loads(originals[build_path])
+        build["installer_artifacts"][f"{platform}-exe"]["candidate_manifest_sha256"] = "c" * 64
+        build_path.write_text(json.dumps(build))
+        with self.assertRaisesRegex(collector.CollectionError, "same-source outer provenance"):
+            self.verify()
+
+    def test_explicit_all_retains_the_original_full_contract_without_marker(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            stem, _ = _write_bundle(root, f"v{VERSION}", "release", unified=True)
+            kwargs = {key: value for key, value in self.kwargs.items() if key != "platform_scope"}
+            kwargs["artifact_name"] = f"{stem}-bundle"
+            implicit = collector.verify_bundle_directory(root, **kwargs)
+            self.assertEqual(implicit, collector.verify_bundle_directory(root, **kwargs, platform_scope="all"))
+            self.assertNotIn("platform_scope", implicit)
+            self.assertNotIn("platform_scope", json.loads((root / "release-build.json").read_text()))
+            self.assertNotIn("platform_scope", json.loads((root / "manifest.json").read_text()))
 
 
 class RedirectSafetyTests(unittest.TestCase):

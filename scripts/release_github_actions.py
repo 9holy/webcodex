@@ -37,12 +37,14 @@ if __package__:
     from . import release_publication as publication
     from . import release_readiness as readiness
     from . import verify_public_release as public_verifier
+    from . import release_platform_scope as release_scope
 else:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import collect_release_bundle as collector
     import release_publication as publication
     import release_readiness as readiness
     import verify_public_release as public_verifier
+    import release_platform_scope as release_scope
 
 PINNED_REQUEST = {
     "schema_version": 1,
@@ -113,7 +115,12 @@ class ReleaseSpec:
 
     def __post_init__(self) -> None:
         request = dict(self.pinned_request)
-        _require(set(request) == set(PINNED_REQUEST), "发布规格字段不符合固定合同。")
+        fields = set(PINNED_REQUEST)
+        if "platform_scope" in request:
+            _require(type(request["platform_scope"]) is str and request["platform_scope"] in release_scope.SCOPES,
+                     "发布规格的平台范围必须为 all 或 windows。")
+            fields.add("platform_scope")
+        _require(set(request) == fields, "发布规格字段不符合固定合同。")
         _require(all(type(request[key]) is type(value) for key, value in PINNED_REQUEST.items()),
                  "发布规格字段类型不符合固定合同。")
         for key in ("schema_version", "repo", "repo_id", "owner", "owner_id", "github_only",
@@ -137,7 +144,13 @@ class ReleaseSpec:
         object.__setattr__(self, "pinned_request", MappingProxyType(request))
 
     @property
+    def platform_scope(self) -> str:
+        return self.pinned_request.get("platform_scope", "all")
+
+    @property
     def post_workflows(self) -> Mapping[str, tuple[str, str]]:
+        if self.platform_scope == "windows":
+            return MappingProxyType({})
         return MappingProxyType({
             kind: (workflow, f"{title} {self.pinned_request['tag']}")
             for kind, (workflow, title) in _POST_WORKFLOW_DEFINITIONS.items()
@@ -679,6 +692,8 @@ class Controller:
                      and value.get("tag") == self.request["tag"]
                      and value.get("include_unified_installers") is True
                      and value.get("include_runtime_installers") is False, "正式构建的 tag 或安装包选择不一致。")
+            _require(value.get("platform_scope", "all") == self.spec.platform_scope,
+                     "正式构建的平台范围与固定发布规格不一致。")
         return value
 
     def _validate_child_states(self, root: Path | None = None) -> None:
@@ -772,6 +787,7 @@ class Controller:
                         workflow_path=publication.BUILD_WORKFLOW_PATH, include_unified_installers=True,
                         include_runtime_installers=False,
                         run_name=publication._build_run_name(self.request["tag"], request_id))
+            base.update(release_scope.metadata(self.spec.platform_scope))
         return base
 
     def _prepare_workflow(self, kind: str) -> int:
@@ -851,7 +867,8 @@ class Controller:
                                          self.request["evidence_run_id"], self.request["evidence_run_attempt"])
             else:
                 publication._post_build_dispatch(self.client, self.request["tag"], child["request_id"],
-                                                 include_unified_installers=True, include_runtime_installers=False)
+                                                 include_unified_installers=True, include_runtime_installers=False,
+                                                 **release_scope.metadata(self.spec.platform_scope))
         except (readiness.DispatchRejected, publication.DispatchRejected) as exc:
             effect["status"] = "rejected"
             child["dispatch_state"] = "rejected"
@@ -944,6 +961,10 @@ class Controller:
 
     def _check_bundle_summary(self, summary: dict) -> None:
         child = self._child_state("build")
+        try:
+            release_scope.require_metadata(summary, self.spec.platform_scope)
+        except ValueError as exc:
+            raise ReleaseControlError("候选包的平台范围与固定发布规格不一致。") from exc
         _require(summary.get("build_kind") == "release" and summary.get("version") == self.request["version"]
                  and summary.get("source_sha") == self.request["source_sha"]
                  and summary.get("tag") == self.request["tag"]
@@ -953,10 +974,14 @@ class Controller:
     def _bundle_summary(self) -> dict:
         _safe_path(self.bundle_dir)
         summary = publication.verify_bundle(self.bundle_dir, self.request["repo"],
-                                            require_unified_installers=True, require_runtime_installers=False)
+                                            require_unified_installers=True, require_runtime_installers=False,
+                                            **release_scope.metadata(self.spec.platform_scope))
         self._check_bundle_summary(summary)
         _require("installer_manifest_v2" not in summary, "本次请求不包含额外 Runtime 安装包。")
         recorded = self.state.get("bundle")
+        _require(isinstance(recorded, dict)
+                 and recorded.get("platform_scope", "all") == self.spec.platform_scope,
+                 "保留候选包的平台范围记录不一致。")
         _require(isinstance(recorded, dict) and recorded.get("workflow_run_id") == summary["workflow_run_id"]
                  and recorded.get("source_sha") == summary["source_sha"] and recorded.get("tag") == summary["tag"]
                  and recorded.get("sha256sums_sha256") == collector.sha256_file(self.bundle_dir / "SHA256SUMS"),
@@ -978,11 +1003,13 @@ class Controller:
         summary = collector.collect_bundle(repo=self.request["repo"], run_id=child["run_id"],
                                            expected_source_sha=self.request["source_sha"], expected_tag=self.request["tag"],
                                            output_dir=self.bundle_dir, timeout=self.timeout, token=self.client.token,
-                                           require_unified_installers=True, require_runtime_installers=False)
+                                           require_unified_installers=True, require_runtime_installers=False,
+                                           **release_scope.metadata(self.spec.platform_scope))
         self._check_bundle_summary(summary)
         _require("installer_manifest_v2" not in summary, "本次请求不包含额外 Runtime 安装包。")
         receipt = {key: summary[key] for key in ("workflow_run_id", "source_sha", "tag", "bundle_artifact_id", "bundle_artifact_sha256")}
         receipt["sha256sums_sha256"] = collector.sha256_file(self.bundle_dir / "SHA256SUMS")
+        receipt.update(release_scope.metadata(self.spec.platform_scope))
         _require(recorded is None or recorded == receipt, "重新下载的 artifact 身份或内容已改变；不会替换记录。")
         self.state["bundle"] = receipt
         self._save()
@@ -1029,7 +1056,7 @@ class Controller:
 
     def _expected_assets(self) -> dict[str, dict]:
         summary = self._bundle_summary()
-        names = publication.expected_draft_asset_names(summary)
+        names = publication.expected_draft_asset_names(summary, **release_scope.metadata(self.spec.platform_scope))
         result: dict[str, dict] = {}
         _require(1 <= len(names) <= 33, "发布附件白名单数量无效。")
         for name in sorted(names):
@@ -1070,14 +1097,17 @@ class Controller:
             # Existing post-publication adapters own their extra assets. Reuse
             # their canonical names, allowing an in-progress supplemental pair.
             # Only the independent post gate may declare that adapter complete.
-            post_names = {public_verifier.SERVER_IMAGE_METADATA, *public_verifier.SERVER_DEPLOYMENT_ASSETS}
-            for platform in public_verifier.supplemental_desktop_platforms_for_version(self.request["version"]):
-                post_names.add(public_verifier.canonical_desktop_name(self.request["version"], platform))
-                post_names.add(public_verifier.canonical_desktop_checksum_name(self.request["version"], platform))
+            post_names = set()
+            if self.spec.platform_scope == "all":
+                post_names = {public_verifier.SERVER_IMAGE_METADATA, *public_verifier.SERVER_DEPLOYMENT_ASSETS}
+                for platform in public_verifier.supplemental_desktop_platforms_for_version(self.request["version"]):
+                    post_names.add(public_verifier.canonical_desktop_name(self.request["version"], platform))
+                    post_names.add(public_verifier.canonical_desktop_checksum_name(self.request["version"], platform))
             _require(set(by_name) <= set(expected) | post_names, "公开 Release 含有未允许的额外附件。")
             primary_release = {**release, "assets": [item for name, item in by_name.items() if name in expected]}
             public_verifier.validate_github_assets(primary_release, self.request["version"], unified_installers=True,
-                                                  require_runtime_installers=False, expected_prerelease=expected_prerelease)
+                                                  require_runtime_installers=False, expected_prerelease=expected_prerelease,
+                                                  **release_scope.metadata(self.spec.platform_scope))
         else:
             _require(set(by_name) <= set(expected), "草稿包含未允许公开的内部文件或额外附件。")
         if complete:
@@ -1131,7 +1161,8 @@ class Controller:
             return 0
         result = publication.verify_draft_assets(repo=self.request["repo"], bundle_dir=self.bundle_dir,
                                                  timeout=self.timeout, require_unified_installers=True,
-                                                 require_runtime_installers=False)
+                                                 require_runtime_installers=False,
+                                                 **release_scope.metadata(self.spec.platform_scope))
         _require(result.get("release_id") == self.state["release_id"]
                  and result.get("source_sha") == self.request["source_sha"]
                  and result.get("workflow_run_id") == self.state["bundle"]["workflow_run_id"],
@@ -1182,10 +1213,12 @@ class Controller:
             return 0
         public_verifier.verify_public_release(self.request["version"], self.timeout, repo=self.request["repo"],
                                               github_only=True, require_unified_installers=True,
-                                              require_runtime_installers=False)
+                                              require_runtime_installers=False,
+                                              **release_scope.metadata(self.spec.platform_scope))
         self.state["checks"]["public_bytes"] = True
         self._save()
-        print("GitHub 公开安装包的字节验收已通过；Docker 仍由独立 image 工作流验收。")
+        print("Windows 公开安装包的字节验收已通过。" if self.spec.platform_scope == "windows" else
+              "GitHub 公开安装包的字节验收已通过；Docker 仍由独立 image 工作流验收。")
         return 0
 
     def _post_definition(self, kind: str) -> tuple[str, str]:

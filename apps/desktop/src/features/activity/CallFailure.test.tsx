@@ -34,6 +34,26 @@ it("shows a recorded rejection and concrete recovery before expandable technical
   expect(screen.getByText("Returned to HTTP framework")).toBeVisible();
 });
 
+it.each([
+  ["unsupported_resource", "unsupported_resource", "The selected execution target does not support these tool options.", "所选执行目标不支持这些工具选项。"],
+  ["capability_unavailable", "capability_unavailable", "The selected Runner or execution target does not support the requested capability.", "所选 Runner 或执行目标不支持所请求的能力。"],
+  ["agent_capability_unavailable", "capability_unavailable", "The selected Runner or execution target does not support the requested capability.", "所选 Runner 或执行目标不支持所请求的能力。"],
+  ["runtime_error", "runtime_error", "WebCodex recorded a runtime error for this call.", "WebCodex 为此次调用记录了运行时错误。"],
+])("shows the recorded %s reason in English and Chinese", (code, reason, english, chinese) => {
+  const failure: CallFailure = { outcome: "rejected", reason, failure_kind: code, execution_state: "not_started" };
+  expect(show(failure, "run_shell")?.failure).toEqual(failure);
+  expect(screen.getByText("Request rejected")).toBeVisible();
+  expect(screen.getByText(english)).toBeVisible();
+  expect(screen.queryByText(/does not contain a specific, safely displayable failure reason/)).not.toBeInTheDocument();
+  expect(screen.queryByText("Execution failed")).not.toBeInTheDocument();
+  cleanup();
+  localStorage.setItem("webcodex.desktop.locale", "zh-CN");
+  show(failure, "run_shell");
+  expect(screen.getByText("请求已被拒绝，未开始执行")).toBeVisible();
+  expect(screen.getByText(chinese)).toBeVisible();
+  expect(screen.queryByText("这条活动记录没有保存可安全显示的具体失败原因。")).not.toBeInTheDocument();
+});
+
 it("labels the screenshot-sized delay as time since response, never command runtime", () => {
   show();
   expect(screen.getByText("Time since response")).toBeVisible();

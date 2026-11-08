@@ -14,9 +14,11 @@ from pathlib import Path
 try:
     from . import runtime_installer_manifest as runtime_contract
     from . import package_unified_installer as packaging
+    from . import release_platform_scope as release_scope
 except ImportError:
     import runtime_installer_manifest as runtime_contract
     import package_unified_installer as packaging
+    import release_platform_scope as release_scope
 
 ROOT = Path(__file__).resolve().parent.parent
 RUNTIME_PLATFORMS = ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64", "win32-arm64")
@@ -199,6 +201,7 @@ def atomic_write(path: Path, content: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", required=True)
+    parser.add_argument("--platform-scope", choices=release_scope.SCOPES, default="all")
     parser.add_argument("--require-unified-installers", action="store_true")
     parser.add_argument("--require-runtime-installers", action="store_true")
     parser.add_argument("--artifact-dir", required=True, type=Path)
@@ -213,6 +216,10 @@ def main() -> int:
         default=ROOT / "npm" / "webcodex" / "package.json",
     )
     args = parser.parse_args()
+    platforms = release_scope.platforms(args.platform_scope, RUNTIME_PLATFORMS)
+    installer_targets = release_scope.installers(args.platform_scope, INSTALLER_TARGETS)
+    if args.platform_scope == "windows" and (not args.require_unified_installers or args.require_runtime_installers):
+        raise SystemExit("Windows delivery requires both complete Windows installers and no Linux Runtime installers")
 
     if args.require_runtime_installers and not args.require_unified_installers:
         raise SystemExit("Runtime installers require explicit Full installer selection")
@@ -229,7 +236,7 @@ def main() -> int:
     artifacts: dict[str, dict[str, str]] = {}
     checksum_lines: list[str] = []
 
-    for platform in RUNTIME_PLATFORMS:
+    for platform in platforms:
         filename = archive_filename(version, platform)
         path = args.artifact_dir / filename
         if not path.is_file() or path.stat().st_size <= 0:
@@ -250,7 +257,7 @@ def main() -> int:
             "sha256": digest,
         }
 
-    for platform in desktop_platforms_for_version(version):
+    for platform in release_scope.platforms(args.platform_scope, desktop_platforms_for_version(version)):
         desktop_name = desktop_filename(version, platform)
         desktop_path = args.artifact_dir / desktop_name
         if not desktop_path.is_file() or desktop_path.stat().st_size <= 0:
@@ -260,17 +267,17 @@ def main() -> int:
 
     installer_paths = {
         target: args.artifact_dir / installer_filename(version, target)
-        for target in INSTALLER_TARGETS
+        for target in installer_targets
     }
     source_paths = {
         platform: args.artifact_dir / source_manifest_filename(version, platform)
-        for platform in RUNTIME_PLATFORMS
+        for platform in platforms
     }
     present_installers = {target for target, path in installer_paths.items() if path.exists()}
     present_sources = {platform for platform, path in source_paths.items() if path.exists()}
     expected_installer_names = {path.name for path in installer_paths.values()}
     expected_windows_evidence = {
-        name for platform in RUNTIME_PLATFORMS if platform.startswith("win32-")
+        name for platform in platforms if platform.startswith("win32-")
         for name in (f"webcodex-unified-v{version}-{platform}.exe.provenance.json", f"webcodex-unified-v{version}-{platform}.source-manifest.json", f"webcodex-unified-v{version}-{platform}.candidate-SHA256SUMS")
     }
     unexpected_installers = {
@@ -279,15 +286,15 @@ def main() -> int:
     }
     if unexpected_installers:
         raise SystemExit(f"unexpected unified installers: {', '.join(sorted(unexpected_installers))}")
-    if args.require_unified_installers and present_installers != set(INSTALLER_TARGETS):
+    if args.require_unified_installers and present_installers != set(installer_targets):
         raise SystemExit("required unified installer set is missing or incomplete")
     if present_sources and not present_installers:
         raise SystemExit("source manifests are present without unified installers")
-    if present_installers and present_installers != set(INSTALLER_TARGETS):
-        missing = sorted(set(INSTALLER_TARGETS) - present_installers)
+    if present_installers and present_installers != set(installer_targets):
+        missing = sorted(set(installer_targets) - present_installers)
         raise SystemExit(f"incomplete unified installer set; missing: {', '.join(missing)}")
-    if present_installers and present_sources != set(RUNTIME_PLATFORMS):
-        missing = sorted(set(RUNTIME_PLATFORMS) - present_sources)
+    if present_installers and present_sources != set(platforms):
+        missing = sorted(set(platforms) - present_sources)
         raise SystemExit(f"incomplete source manifest set; missing: {', '.join(missing)}")
     installers: dict[str, dict[str, str]] = {}
     source_digests: dict[str, str] = {}
@@ -301,7 +308,7 @@ def main() -> int:
         for target, path in installer_paths.items():
             if not path.is_file() or path.stat().st_size <= 0:
                 raise SystemExit(f"missing or empty installer: {path}")
-            platform, package_format = INSTALLER_TARGETS[target]
+            platform, package_format = installer_targets[target]
             validate_installer(path, target)
             filename = path.name
             digest = sha256(path)
@@ -375,6 +382,7 @@ def main() -> int:
                 "source_manifest_sha256": runtime_sources[platform]}
 
     manifest = {
+        **release_scope.metadata(args.platform_scope),
         "version": version,
         "binaries": list(BINARIES),
         "artifacts": artifacts,

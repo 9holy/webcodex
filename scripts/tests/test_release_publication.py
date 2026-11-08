@@ -486,6 +486,58 @@ class BuildDispatchTests(unittest.TestCase):
         self.assertEqual(payload["ref"], TAG)
         self.assertEqual(payload["inputs"], {"tag": TAG, "request_id": REQUEST})
 
+    def test_windows_dispatch_and_state_keep_explicit_scope_without_changing_default(self):
+        with tempfile.TemporaryDirectory() as temp:
+            client = self._client(); client.opener = _Opener(_Response())
+            state_file = Path(temp) / "build.json"
+            with mock.patch.object(collector, "GitHubClient", return_value=client), \
+                    mock.patch.object(collector, "resolve_github_token", return_value="fixture-only"), \
+                    mock.patch.object(publication, "_remote_annotated_tag_source", return_value=SOURCE), \
+                    mock.patch.object(publication, "_recover_build_run", return_value=None):
+                summary, code = publication.start_build(repo=collector.DEFAULT_REPO, source_sha=SOURCE,
+                    tag=TAG, state_file=state_file, timeout=5, resolve_secs=0,
+                    include_unified_installers=True, platform_scope="windows")
+            self.assertEqual(code, 2)
+            self.assertEqual(summary["platform_scope"], "windows")
+            self.assertEqual(publication._load_state(state_file)["platform_scope"], "windows")
+            self.assertEqual(json.loads(client.opener.requests[0][0].data)["inputs"], {
+                "tag": TAG, "request_id": summary["request_id"],
+                "include_unified_installers": True, "platform_scope": "windows"})
+            for patch in ({"platform_scope": "all"}, {"platform_scope": "linux"},
+                          {"include_unified_installers": False}, {"include_runtime_installers": True}):
+                state = {**publication._load_state(state_file), **patch}
+                invalid = Path(temp) / "invalid.json"
+                publication._write_state(invalid, state)
+                with self.subTest(patch=patch), self.assertRaises(publication.PublicationError):
+                    publication._load_state(invalid)
+
+    def test_invalid_scope_selection_fails_before_credentials_or_dispatch(self):
+        for scope, full, runtime in (("other", True, False), ("windows", False, False), ("windows", True, True)):
+            with self.subTest(scope=scope, full=full, runtime=runtime), tempfile.TemporaryDirectory() as temp, \
+                    mock.patch.object(collector, "resolve_github_token") as token, \
+                    mock.patch.object(publication, "_post_build_dispatch") as dispatch:
+                with self.assertRaises(publication.PublicationError):
+                    publication.start_build(repo=collector.DEFAULT_REPO, source_sha=SOURCE, tag=TAG,
+                        state_file=Path(temp) / "build.json", timeout=5, resolve_secs=0,
+                        include_unified_installers=full, include_runtime_installers=runtime, platform_scope=scope)
+                token.assert_not_called()
+                dispatch.assert_not_called()
+
+    def test_windows_public_asset_allowlist_rejects_extra_platform_or_omitted_scope(self):
+        platforms = ("win32-x64", "win32-arm64")
+        summary = {"version": "0.5.6", "archive_stem": "webcodex-v0.5.6", "platform_scope": "windows",
+            "runtime_manifest": {},
+            "installer_artifacts": {f"{p}-exe": {"filename": f"webcodex-unified-v0.5.6-{p}.exe",
+                "source_manifest_filename": f"webcodex-source-v0.5.6-{p}.json"} for p in platforms},
+            "desktop_artifacts": {p: {"filename": f"desktop-{p}.exe"} for p in platforms}}
+        names = publication.expected_draft_asset_names(summary, platform_scope="windows")
+        self.assertEqual(len(names), 11)
+        with self.assertRaises(publication.PublicationError):
+            publication.expected_draft_asset_names(summary)
+        summary["desktop_artifacts"]["darwin-arm64"] = {"filename": "unexpected.dmg"}
+        with self.assertRaises(publication.PublicationError):
+            publication.expected_draft_asset_names(summary, platform_scope="windows")
+
     def test_selected_installer_mode_is_dispatched_and_persisted(self):
         for include in (False, True):
             with self.subTest(include=include), tempfile.TemporaryDirectory() as temp:
@@ -799,7 +851,10 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("include_unified_installers:", workflow)
         self.assertIn("default: false", workflow)
         self.assertGreaterEqual(workflow.count("if: inputs.include_unified_installers"), 6)
-        self.assertIn("!inputs.include_unified_installers || needs.unified-native.result == 'success'", workflow)
+        self.assertIn("inputs.platform_scope == 'windows' || (!inputs.include_unified_installers || needs.unified-native.result == 'success')", workflow)
+        self.assertIn("inputs.platform_scope != 'windows' && needs.linux.result == 'success' && needs.macos.result == 'success'", workflow)
+        self.assertIn("inputs.platform_scope == 'windows' && needs.linux.result == 'skipped' && needs.macos.result == 'skipped' && needs.unified-native.result == 'skipped'", workflow)
+        self.assertIn("needs.windows.result == 'success'", workflow)
         self.assertIn("export CARGO_TARGET_DIR=/work/target", workflow)
         self.assertGreaterEqual(workflow.count('desktop="$CARGO_TARGET_DIR/release/webcodex-desktop"'), 2)
         self.assertIn('export CARGO_TARGET_DIR="$GITHUB_WORKSPACE/target"', workflow)

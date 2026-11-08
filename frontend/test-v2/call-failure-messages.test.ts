@@ -1,11 +1,24 @@
 import { describe, expect, it } from "vitest";
 import { CALL_FAILURE_LANGUAGES, CALL_FAILURE_MESSAGES, translateCallFailureText } from "../src/ui/callFailureMessages.js";
-import { elapsedCallTime } from "../src/ui/callFailure.js";
+import { elapsedCallTime, failureNextStepText, failureReasonText } from "../src/ui/callFailure.js";
 import { translate } from "../src/runtime_i18n.js";
 
 const placeholders = (text: string) => [...text.matchAll(/\{[A-Za-z_]+\}/g)].map(match => match[0]).sort();
 
 describe("shared activity failure translations", () => {
+  it.each(["unsupported_resource", "capability_unavailable", "runtime_error"])("explains %s in every locale without overriding uncertain execution", reason => {
+    const failure = { outcome: "rejected" as const, reason };
+    const explanation = failureReasonText(failure);
+    const next = failureNextStepText(failure);
+    expect(explanation).not.toBe(failureReasonText({ outcome: "rejected", reason: "unknown_reason" }));
+    for (const language of CALL_FAILURE_LANGUAGES) {
+      expect(translateCallFailureText(explanation, language)).toBeTruthy();
+      expect(translateCallFailureText(next, language)).toBeTruthy();
+    }
+    expect(failureNextStepText({ ...failure, outcome: "outcome_unknown" })).toContain("may already have taken effect");
+    expect(failureNextStepText({ ...failure, outcome: "call_failed" })).toContain("does not show whether the operation already took effect");
+  });
+
   it("provides complete translations and preserves time placeholders in every supported language", () => {
     expect(CALL_FAILURE_LANGUAGES).toEqual(["zh-CN", "zh-TW", "ja-JP", "ko-KR", "de-DE", "fr-FR"]);
     for (const [source, messages] of Object.entries(CALL_FAILURE_MESSAGES)) {

@@ -73,19 +73,21 @@ def synthetic_elf(machine: int, glibc: str = "2.17", needed: tuple[str, ...] = (
 
 
 class GitHubOnlyReleaseTests(unittest.TestCase):
-    def verify_fork(self, *, foreign_source=False, corrupt_installer=False, prerelease=False, expected_prerelease=False):
-        from scripts.tests.test_collect_release_bundle import _write_bundle, VERSION
+    def verify_fork(self, *, foreign_source=False, corrupt_installer=False, prerelease=False, expected_prerelease=False, platform_scope="all"):
+        from scripts.tests.test_collect_release_bundle import _write_bundle, VERSION, WINDOWS_PLATFORMS
         repo = "9holy/webcodex"
+        platforms = WINDOWS_PLATFORMS if platform_scope == "windows" else verifier.PLATFORMS
+        corrupt_suffix = "win32-x64.exe" if platform_scope == "windows" else "linux-x64.deb"
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            _write_bundle(root, f"v{VERSION}", "release", unified=True)
+            _write_bundle(root, f"v{VERSION}", "release", unified=True, platform_scope=platform_scope)
             manifest_path = root / "manifest.json"
             manifest = json.loads(manifest_path.read_text().replace(verifier.REPO, repo))
-            for platform in verifier.PLATFORMS:
+            for platform in platforms:
                 source_name = verifier.canonical_source_manifest_name(VERSION, platform)
                 source = json.loads((root / source_name).read_text())
                 source["source_workflow_ref"] = f"{repo}/.github/workflows/release-build.yml@refs/tags/v{VERSION}"
-                if foreign_source and platform == "linux-x64":
+                if foreign_source and platform == ("win32-x64" if platform_scope == "windows" else "linux-x64"):
                     source["source_workflow_ref"] = source["source_workflow_ref"].replace(repo, "foreign/webcodex")
                 (root / source_name).write_text(json.dumps(source))
                 source_digest = hashlib.sha256((root / source_name).read_bytes()).hexdigest()
@@ -106,7 +108,7 @@ class GitHubOnlyReleaseTests(unittest.TestCase):
                         archive.addfile(member, io.BytesIO(payload))
                 manifest["artifacts"][platform]["sha256"] = hashlib.sha256((root / name).read_bytes()).hexdigest()
             manifest_path.write_text(json.dumps(manifest))
-            names = list(verifier.parse_sha256sums((root / "SHA256SUMS").read_text(), VERSION, unified_installers=True))
+            names = list(verifier.parse_sha256sums((root / "SHA256SUMS").read_text(), VERSION, unified_installers=True, runtime_manifest=platform_scope == "windows", platform_scope=platform_scope))
             (root / "SHA256SUMS").write_text("".join(f"{hashlib.sha256((root / name).read_bytes()).hexdigest()}  {name}\n" for name in names))
             assets = [{"name": name, "state": "uploaded", "size": (root / name).stat().st_size,
                        "digest": "sha256:" + hashlib.sha256((root / name).read_bytes()).hexdigest(),
@@ -118,7 +120,7 @@ class GitHubOnlyReleaseTests(unittest.TestCase):
                 return (root / url.rsplit("/", 1)[1]).read_bytes()
             def download(url, path, *args):
                 data = read(url)
-                if corrupt_installer and url.endswith("linux-x64.deb"):
+                if corrupt_installer and url.endswith(corrupt_suffix):
                     data += b"corrupt"
                 path.write_bytes(data)
                 return len(data), hashlib.sha256(data).hexdigest()
@@ -126,11 +128,31 @@ class GitHubOnlyReleaseTests(unittest.TestCase):
                 verifier, "fetch_bytes", side_effect=read
             ), mock.patch.object(verifier, "download_file", side_effect=download), contextlib.redirect_stdout(io.StringIO()):
                 verifier.verify_public_release(VERSION, 5, repo=repo, github_only=True, require_unified_installers=True,
-                                               expected_prerelease=expected_prerelease)
+                                               expected_prerelease=expected_prerelease, platform_scope=platform_scope)
             metadata.assert_called_once_with(f"https://api.github.com/repos/{repo}/releases/tags/v{VERSION}", 5)
 
     def test_full_fork_release_verifies_all_platforms_without_npm(self):
         self.verify_fork()
+
+    def test_windows_release_verifies_both_native_architectures_without_npm(self):
+        self.verify_fork(platform_scope="windows")
+        self.verify_fork(platform_scope="windows", prerelease=True, expected_prerelease=True)
+
+    def test_windows_release_still_rejects_rehashed_foreign_publisher(self):
+        with self.assertRaisesRegex(verifier.VerificationError, "publisher or build identity"):
+            self.verify_fork(platform_scope="windows", foreign_source=True)
+
+    def test_windows_release_still_verifies_downloaded_installer_bytes(self):
+        with self.assertRaisesRegex(verifier.VerificationError, "installer SHA-256"):
+            self.verify_fork(platform_scope="windows", corrupt_installer=True)
+
+    def test_windows_public_verification_requires_explicit_github_full_contract_before_network(self):
+        with mock.patch.object(verifier, "fetch_json") as fetch:
+            for options in ({}, {"github_only": True},
+                            {"github_only": True, "require_unified_installers": True, "require_runtime_installers": True}):
+                with self.subTest(options=options), self.assertRaises(verifier.VerificationError):
+                    verifier.verify_public_release("0.5.6", 5, platform_scope="windows", **options)
+            fetch.assert_not_called()
 
     def test_foreign_publisher_is_rejected_even_with_matching_checksums(self):
         with self.assertRaisesRegex(verifier.VerificationError, "publisher or build identity"):
@@ -150,6 +172,101 @@ class GitHubOnlyReleaseTests(unittest.TestCase):
     def test_preview_opt_in_keeps_full_downloaded_byte_verification(self):
         with self.assertRaisesRegex(verifier.VerificationError, "installer SHA-256"):
             self.verify_fork(prerelease=True, expected_prerelease=True, corrupt_installer=True)
+
+
+class WindowsPublicContractTests(unittest.TestCase):
+    def setUp(self):
+        from scripts.tests.test_collect_release_bundle import _write_bundle, VERSION
+        self.version = VERSION
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        _write_bundle(self.root, f"v{VERSION}", "release", unified=True, platform_scope="windows")
+        self.manifest = json.loads((self.root / "manifest.json").read_text())
+        self.sums = (self.root / "SHA256SUMS").read_text()
+        self.names = {line.split("  ", 1)[1] for line in self.sums.splitlines()} | {"SHA256SUMS"}
+        self.release = {"tag_name": f"v{VERSION}", "draft": False, "prerelease": False,
+            "assets": [{"name": name, "state": "uploaded", "browser_download_url":
+                f"https://github.com/{verifier.REPO}/releases/download/v{VERSION}/{name}"} for name in sorted(self.names)]}
+
+    def test_windows_manifest_and_public_assets_are_exact_and_explicit(self):
+        self.assertEqual(set(verifier.validate_public_manifest(self.manifest, self.version, platform_scope="windows")), {"win32-x64", "win32-arm64"})
+        self.assertEqual(set(verifier.validate_public_installers(self.manifest, self.version, platform_scope="windows")), {"win32-x64-exe", "win32-arm64-exe"})
+        self.assertEqual(set(verifier.validate_github_assets(self.release, self.version, platform_scope="windows")), self.names)
+        self.assertEqual(len(self.names), 11)
+        for validate in (verifier.validate_public_manifest, verifier.validate_public_installers):
+            with self.assertRaises(verifier.VerificationError):
+                validate(self.manifest, self.version)
+            for scope in ("linux", "Windows", "", None):
+                with self.subTest(scope=scope), self.assertRaises(verifier.VerificationError):
+                    validate(self.manifest, self.version, platform_scope=scope)
+
+    def test_windows_marker_cannot_be_missing_or_relabelled(self):
+        for marker in (None, "all", "linux", "Windows", False):
+            changed = json.loads(json.dumps(self.manifest))
+            if marker is None:
+                changed.pop("platform_scope")
+            else:
+                changed["platform_scope"] = marker
+            for validate in (verifier.validate_public_manifest, verifier.validate_public_installers):
+                with self.subTest(marker=marker, function=validate.__name__), self.assertRaisesRegex(verifier.VerificationError, "scope"):
+                    validate(changed, self.version, platform_scope="windows")
+
+    def test_windows_manifest_rejects_partial_or_additional_platform_sets(self):
+        for field, missing, extra, validate in (
+            ("artifacts", "win32-arm64", "linux-x64", verifier.validate_public_manifest),
+            ("installers", "win32-arm64-exe", "linux-x64-deb", verifier.validate_public_installers),
+        ):
+            for remove in (True, False):
+                changed = json.loads(json.dumps(self.manifest))
+                if remove:
+                    del changed[field][missing]
+                else:
+                    changed[field][extra] = dict(changed[field][missing])
+                with self.subTest(field=field, remove=remove), self.assertRaises(verifier.VerificationError):
+                    validate(changed, self.version, platform_scope="windows")
+
+    def test_windows_assets_reject_each_missing_asset_and_unselected_non_windows_assets(self):
+        for name in self.names:
+            changed = {**self.release, "assets": [item for item in self.release["assets"] if item["name"] != name]}
+            with self.subTest(missing=name), self.assertRaises(verifier.VerificationError):
+                verifier.validate_github_assets(changed, self.version, unified_installers=True, platform_scope="windows")
+        for name in (verifier.canonical_archive_name(self.version, "linux-x64"),
+                     verifier.canonical_desktop_name(self.version, "darwin-arm64"),
+                     verifier.canonical_installer_name(self.version, "linux-x64-deb"),
+                     verifier.runtime_contract.installer_filename(self.version, "linux-x64-runtime-deb"),
+                     "manifest-v2.json", "webcodex-npm.tgz", verifier.SERVER_IMAGE_METADATA):
+            changed = {**self.release, "assets": [*self.release["assets"], {"name": name, "state": "uploaded", "browser_download_url": "https://example.invalid/extra"}]}
+            with self.subTest(extra=name), self.assertRaises(verifier.VerificationError):
+                verifier.validate_github_assets(changed, self.version, unified_installers=True, platform_scope="windows")
+
+    def test_windows_checksums_require_every_selected_file_and_reject_other_scopes(self):
+        kwargs = {"unified_installers": True, "runtime_manifest": True, "platform_scope": "windows"}
+        self.assertEqual(set(verifier.parse_sha256sums(self.sums, self.version, **kwargs)), self.names - {"SHA256SUMS"})
+        for line in self.sums.splitlines():
+            changed = self.sums.replace(line + "\n", "")
+            with self.subTest(missing=line.split("  ")[1]), self.assertRaises(verifier.VerificationError):
+                verifier.parse_sha256sums(changed, self.version, **kwargs)
+        for changed in (self.sums + f"{'a' * 64}  webcodex-v{self.version}-linux-x64.tar.gz\n",
+                        "g" * 64 + self.sums[64:], self.sums + self.sums.splitlines()[0] + "\n"):
+            with self.subTest(changed=changed[:80]), self.assertRaises(verifier.VerificationError):
+                verifier.parse_sha256sums(changed, self.version, **kwargs)
+        for options in ({"unified_installers": False}, {"runtime_installers": True}, {"runtime_manifest": False}, {"platform_scope": "all"}, {"platform_scope": "linux"}):
+            with self.subTest(options=options), self.assertRaises(verifier.VerificationError):
+                verifier.parse_sha256sums(self.sums, self.version, **(kwargs | options))
+
+    def test_windows_manifest_retains_canonical_url_and_digest_checks(self):
+        for field, name, bad_key, bad in (
+            ("artifacts", "win32-x64", "url", "https://example.invalid/runtime.tar.gz"),
+            ("artifacts", "win32-arm64", "sha256", "g" * 64),
+            ("installers", "win32-x64-exe", "sha256", "bad"),
+            ("installers", "win32-arm64-exe", "source_manifest_url", "https://example.invalid/source.json"),
+            ("installers", "win32-arm64-exe", "source_manifest_sha256", "bad"),
+        ):
+            changed = json.loads(json.dumps(self.manifest)); changed[field][name][bad_key] = bad
+            validate = verifier.validate_public_manifest if field == "artifacts" else verifier.validate_public_installers
+            with self.subTest(field=field, key=bad_key), self.assertRaises(verifier.VerificationError):
+                validate(changed, self.version, platform_scope="windows")
 
 
 class ManifestTests(unittest.TestCase):

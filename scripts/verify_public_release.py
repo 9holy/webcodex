@@ -61,9 +61,11 @@ SERVER_IMAGE_BASE_METADATA_KEYS = frozenset(
 try:
     from . import runtime_installer_manifest as runtime_contract
     from . import prepare_release_metadata as release_metadata
+    from . import release_platform_scope as release_scope
 except ImportError:
     import runtime_installer_manifest as runtime_contract
     import prepare_release_metadata as release_metadata
+    import release_platform_scope as release_scope
 
 MAX_JSON_BYTES = 2 * 1024 * 1024
 MAX_NPM_TARBALL_BYTES = 16 * 1024 * 1024
@@ -330,16 +332,32 @@ def read_npm_package_jsons(path: Path) -> tuple[dict, dict]:
     return package, manifest
 
 
-def validate_public_manifest(manifest: dict, version: str, *, repo: str = REPO) -> dict[str, dict[str, str]]:
+def _scope(platform_scope: str) -> str:
+    try:
+        return release_scope.validate(platform_scope)
+    except ValueError as exc:
+        raise VerificationError(str(exc)) from exc
+
+
+def _manifest_scope(manifest: dict, platform_scope: str) -> None:
+    try:
+        release_scope.require_metadata(manifest, platform_scope)
+    except ValueError as exc:
+        raise VerificationError(str(exc)) from exc
+
+
+def validate_public_manifest(manifest: dict, version: str, *, repo: str = REPO, platform_scope: str = "all") -> dict[str, dict[str, str]]:
+    _manifest_scope(manifest, platform_scope)
+    platforms = release_scope.platforms(platform_scope, PLATFORMS)
     if manifest.get("version") != version:
         raise VerificationError("npm release manifest version mismatch")
     if manifest.get("binaries") != list(BINARIES):
         raise VerificationError("npm release manifest binaries are not canonical")
     artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, dict) or set(artifacts) != set(PLATFORMS):
-        raise VerificationError("npm release manifest must contain exactly the six release platforms")
+    if not isinstance(artifacts, dict) or set(artifacts) != set(platforms):
+        raise VerificationError("npm release manifest must contain exactly the reviewed release platforms")
     result: dict[str, dict[str, str]] = {}
-    for platform in PLATFORMS:
+    for platform in platforms:
         artifact = artifacts.get(platform)
         if not isinstance(artifact, dict):
             raise VerificationError(f"invalid manifest entry for {platform}")
@@ -353,15 +371,19 @@ def validate_public_manifest(manifest: dict, version: str, *, repo: str = REPO) 
     return result
 
 
-def validate_public_installers(manifest: dict, version: str, *, repo: str = REPO) -> dict[str, dict[str, str]]:
+def validate_public_installers(manifest: dict, version: str, *, repo: str = REPO, platform_scope: str = "all") -> dict[str, dict[str, str]]:
+    _manifest_scope(manifest, platform_scope)
+    installer_targets = release_scope.installers(platform_scope, INSTALLER_TARGETS)
     installers = manifest.get("installers")
     if "installers" not in manifest:
+        if platform_scope == "windows":
+            raise VerificationError("Windows release manifest is missing its complete installers")
         return {}
-    if not isinstance(installers, dict) or set(installers) != set(INSTALLER_TARGETS):
-        raise VerificationError("release manifest installers must contain exactly the eight installer targets")
+    if not isinstance(installers, dict) or set(installers) != set(installer_targets):
+        raise VerificationError("release manifest installers must contain exactly the reviewed installer targets")
     result: dict[str, dict[str, str]] = {}
     source_by_platform: dict[str, tuple[str, str]] = {}
-    for target, (platform, package_format) in INSTALLER_TARGETS.items():
+    for target, (platform, package_format) in installer_targets.items():
         item = installers[target]
         expected_fields = {
             "platform", "format", "filename", "url", "sha256",
@@ -398,17 +420,22 @@ def validate_public_installers(manifest: dict, version: str, *, repo: str = REPO
         }
     return result
 
-def parse_sha256sums(text: str, version: str, *, runtime_manifest: bool = False, unified_installers: bool = False, runtime_installers: bool = False) -> dict[str, str]:
-    expected_names = {canonical_archive_name(version, platform) for platform in PLATFORMS}
+def parse_sha256sums(text: str, version: str, *, runtime_manifest: bool = False, unified_installers: bool = False, runtime_installers: bool = False, platform_scope: str = "all") -> dict[str, str]:
+    _scope(platform_scope)
+    platforms = release_scope.platforms(platform_scope, PLATFORMS)
+    installer_targets = release_scope.installers(platform_scope, INSTALLER_TARGETS)
+    if platform_scope == "windows" and (not unified_installers or runtime_installers or not runtime_manifest):
+        raise VerificationError("Windows checksum contract requires complete Windows installers only")
+    expected_names = {canonical_archive_name(version, platform) for platform in platforms}
     expected_names.update(
-        canonical_desktop_name(version, platform) for platform in desktop_platforms_for_version(version)
+        canonical_desktop_name(version, platform) for platform in release_scope.platforms(platform_scope, desktop_platforms_for_version(version))
     )
     if runtime_manifest:
         expected_names.add("webcodex-release-manifest.json")
     if unified_installers:
-        expected_names.update(canonical_installer_name(version, target) for target in INSTALLER_TARGETS)
+        expected_names.update(canonical_installer_name(version, target) for target in installer_targets)
         expected_names.add("manifest.json")
-        expected_names.update(canonical_source_manifest_name(version, platform) for platform in PLATFORMS)
+        expected_names.update(canonical_source_manifest_name(version, platform) for platform in platforms)
     if runtime_installers:
         if not unified_installers:
             raise VerificationError("Runtime checksum contract requires Full installers")
@@ -446,7 +473,7 @@ def _unique_json_object(pairs: list[tuple[str, object]]) -> dict:
 
 def verify_public_installer_manifest(
     assets: dict[str, dict], sums: dict[str, str], npm_manifest: dict | None,
-    version: str, timeout: float, *, repo: str = REPO,
+    version: str, timeout: float, *, repo: str = REPO, platform_scope: str = "all",
 ) -> dict:
     """Verify the exact public updater source, not only its npm copy."""
     asset = assets.get("manifest.json")
@@ -465,9 +492,9 @@ def verify_public_installer_manifest(
         raise VerificationError("unified installer manifest is malformed") from exc
     if not isinstance(manifest, dict) or (npm_manifest is not None and manifest != npm_manifest):
         raise VerificationError("public unified installer manifest differs from retained npm manifest")
-    validate_public_manifest(manifest, version, repo=repo)
-    if not validate_public_installers(manifest, version, repo=repo):
-        raise VerificationError("public updater manifest is missing the eight unified installer targets")
+    validate_public_manifest(manifest, version, repo=repo, platform_scope=platform_scope)
+    if not validate_public_installers(manifest, version, repo=repo, platform_scope=platform_scope):
+        raise VerificationError("public updater manifest is missing the reviewed unified installer targets")
 
     return manifest
 
@@ -559,7 +586,12 @@ def validate_server_image_release_record(
     return identity
 
 
-def validate_github_assets(release: dict, version: str, *, unified_installers: bool | None = None, require_runtime_installers: bool = False, expected_prerelease: bool = False) -> dict[str, dict]:
+def validate_github_assets(release: dict, version: str, *, unified_installers: bool | None = None, require_runtime_installers: bool = False, expected_prerelease: bool = False, platform_scope: str = "all") -> dict[str, dict]:
+    _scope(platform_scope)
+    platforms = release_scope.platforms(platform_scope, PLATFORMS)
+    installer_targets = release_scope.installers(platform_scope, INSTALLER_TARGETS)
+    if platform_scope == "windows" and (unified_installers is False or require_runtime_installers):
+        raise VerificationError("Windows release requires complete Windows installers only")
     if type(expected_prerelease) is not bool:
         raise VerificationError("expected prerelease state must be an explicit boolean")
     if (
@@ -568,15 +600,17 @@ def validate_github_assets(release: dict, version: str, *, unified_installers: b
         or release.get("prerelease") is not expected_prerelease
     ):
         raise VerificationError("GitHub Release is missing, draft, in the wrong prerelease state, or attached to the wrong tag")
-    required = {canonical_archive_name(version, platform) for platform in PLATFORMS}
+    required = {canonical_archive_name(version, platform) for platform in platforms}
     required.add("SHA256SUMS")
+    if platform_scope == "windows":
+        required.add("webcodex-release-manifest.json")
     required.update(
-        canonical_desktop_name(version, platform) for platform in desktop_platforms_for_version(version)
+        canonical_desktop_name(version, platform) for platform in release_scope.platforms(platform_scope, desktop_platforms_for_version(version))
     )
-    server_assets = {SERVER_IMAGE_METADATA, *SERVER_DEPLOYMENT_ASSETS}
+    server_assets = {SERVER_IMAGE_METADATA, *SERVER_DEPLOYMENT_ASSETS} if platform_scope == "all" else set()
     supplemental_assets = {
         name
-        for platform in supplemental_desktop_platforms_for_version(version)
+        for platform in (supplemental_desktop_platforms_for_version(version) if platform_scope == "all" else ())
         for name in (
             canonical_desktop_name(version, platform),
             canonical_desktop_checksum_name(version, platform),
@@ -594,11 +628,13 @@ def validate_github_assets(release: dict, version: str, *, unified_installers: b
             raise VerificationError(f"GitHub Release contains duplicate asset: {name}")
         result[name] = asset
     names = set(result)
-    installer_names = {canonical_installer_name(version, target) for target in INSTALLER_TARGETS}
-    source_names = {canonical_source_manifest_name(version, platform) for platform in PLATFORMS}
+    installer_names = {canonical_installer_name(version, target) for target in installer_targets}
+    source_names = {canonical_source_manifest_name(version, platform) for platform in platforms}
     has_installer = bool(names & installer_names)
     if unified_installers is None:
         unified_installers = has_installer
+    if platform_scope == "windows" and not unified_installers:
+        raise VerificationError("Windows release is missing its complete installers")
     if unified_installers:
         required.update(installer_names)
         required.add("manifest.json")
@@ -608,6 +644,8 @@ def validate_github_assets(release: dict, version: str, *, unified_installers: b
     runtime_names = {runtime_contract.installer_filename(version, target) for target in runtime_contract.RUNTIME_TARGETS}
     runtime_names.update(runtime_contract.source_filename(version, platform) for platform in ("linux-x64", "linux-arm64"))
     runtime_names.add("manifest-v2.json")
+    if platform_scope == "windows" and names & runtime_names:
+        raise VerificationError("Windows release cannot contain Linux Runtime installers")
     if require_runtime_installers or names & runtime_names:
         if not unified_installers or not runtime_names <= names:
             raise VerificationError("Runtime assets require complete Full and manifest-v2 contracts")
@@ -936,7 +974,11 @@ def verify_supplemental_desktop_asset(
     )
 
 
-def verify_public_release(version: str, timeout: float, *, repo: str = REPO, github_only: bool = False, require_unified_installers: bool = False, require_runtime_installers: bool = False, expected_prerelease: bool = False) -> None:
+def verify_public_release(version: str, timeout: float, *, repo: str = REPO, github_only: bool = False, require_unified_installers: bool = False, require_runtime_installers: bool = False, expected_prerelease: bool = False, platform_scope: str = "all") -> None:
+    _scope(platform_scope)
+    if platform_scope == "windows" and (not github_only or not require_unified_installers or require_runtime_installers):
+        raise VerificationError("Windows delivery is GitHub-only and requires complete Windows installers")
+    platforms = release_scope.platforms(platform_scope, PLATFORMS)
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
         raise VerificationError("invalid GitHub repository")
     if not github_only:
@@ -953,7 +995,7 @@ def verify_public_release(version: str, timeout: float, *, repo: str = REPO, git
     release = fetch_json(release_url, timeout)
     if require_runtime_installers and not require_unified_installers:
         raise VerificationError("Runtime requirement needs explicit Full requirement")
-    assets = validate_github_assets(release, version, unified_installers=True if require_unified_installers else None, require_runtime_installers=require_runtime_installers, expected_prerelease=expected_prerelease)
+    assets = validate_github_assets(release, version, unified_installers=True if require_unified_installers else None, require_runtime_installers=require_runtime_installers, expected_prerelease=expected_prerelease, platform_scope=platform_scope)
     runtime_selected = "manifest-v2.json" in assets
 
     with tempfile.TemporaryDirectory(prefix=f"webcodex-v{version}-verify-") as temp:
@@ -969,15 +1011,15 @@ def verify_public_release(version: str, timeout: float, *, repo: str = REPO, git
         except UnicodeDecodeError as exc:
             raise VerificationError("SHA256SUMS is not ASCII") from exc
         runtime_asset = assets.get("webcodex-release-manifest.json")
-        sums = parse_sha256sums(sums_text, version, runtime_manifest=runtime_asset is not None, unified_installers="manifest.json" in assets, runtime_installers=runtime_selected)
+        sums = parse_sha256sums(sums_text, version, runtime_manifest=runtime_asset is not None, unified_installers="manifest.json" in assets, runtime_installers=runtime_selected, platform_scope=platform_scope)
         if github_only:
             if "manifest.json" in assets:
-                manifest = verify_public_installer_manifest(assets, sums, None, version, timeout, repo=repo)
+                manifest = verify_public_installer_manifest(assets, sums, None, version, timeout, repo=repo, platform_scope=platform_scope)
             else:
                 manifest = {"version": version, "binaries": list(BINARIES), "artifacts": {
                     platform: {"url": expected_artifact_url(version, platform, repo=repo),
                                "sha256": sums[canonical_archive_name(version, platform)]}
-                    for platform in PLATFORMS
+                    for platform in platforms
                 }}
         else:
             npm_tgz = root / "package.tgz"
@@ -986,8 +1028,8 @@ def verify_public_release(version: str, timeout: float, *, repo: str = REPO, git
             package, manifest = read_npm_package_jsons(npm_tgz)
             if package.get("name") != PACKAGE or package.get("version") != version:
                 raise VerificationError("published npm tarball has the wrong package/version")
-        manifest_artifacts = validate_public_manifest(manifest, version, repo=repo)
-        manifest_installers = validate_public_installers(manifest, version, repo=repo)
+        manifest_artifacts = validate_public_manifest(manifest, version, repo=repo, platform_scope=platform_scope)
+        manifest_installers = validate_public_installers(manifest, version, repo=repo, platform_scope=platform_scope)
         if require_unified_installers and not manifest_installers:
             raise VerificationError("required unified installer contract is missing")
         if bool(manifest_installers) != any(name.startswith(f"webcodex-unified-v{version}-") for name in assets):
@@ -1012,7 +1054,7 @@ def verify_public_release(version: str, timeout: float, *, repo: str = REPO, git
                 raise VerificationError("public legacy manifest is not deterministic manifest-v2 projection")
             manifest_installers.update(runtime_entries)
         if manifest_installers and not github_only:
-            verify_public_installer_manifest(assets, sums, manifest, version, timeout, repo=repo)
+            verify_public_installer_manifest(assets, sums, manifest, version, timeout, repo=repo, platform_scope=platform_scope)
         if runtime_asset is not None:
             try:
                 from .desktop_runtime_manifest import validate, ManifestError
@@ -1027,7 +1069,7 @@ def verify_public_release(version: str, timeout: float, *, repo: str = REPO, git
             except (ValueError, UnicodeError, ManifestError) as exc:
                 raise VerificationError("Runtime release manifest contract is invalid") from exc
 
-        for platform in desktop_platforms_for_version(version):
+        for platform in release_scope.platforms(platform_scope, desktop_platforms_for_version(version)):
             desktop_name = canonical_desktop_name(version, platform)
             desktop_size, desktop_digest = verify_desktop_asset(
                 version,
@@ -1040,7 +1082,7 @@ def verify_public_release(version: str, timeout: float, *, repo: str = REPO, git
             )
             print(f"desktop_{platform.replace('-', '_')} sha256={desktop_digest} bytes={desktop_size}")
 
-        for platform in supplemental_desktop_platforms_for_version(version):
+        for platform in (supplemental_desktop_platforms_for_version(version) if platform_scope == "all" else ()):
             desktop_name = canonical_desktop_name(version, platform)
             checksum_name = canonical_desktop_checksum_name(version, platform)
             present = {name for name in (desktop_name, checksum_name) if name in assets}
@@ -1093,8 +1135,8 @@ def verify_public_release(version: str, timeout: float, *, repo: str = REPO, git
                 f"source={image_identity['source_sha']} platforms={','.join(SERVER_IMAGE_PLATFORMS)}"
             )
         else:
-            print("server_image=not_recorded_historical_release")
-        for platform in PLATFORMS:
+            print("server_image=not_applicable_windows_release" if platform_scope == "windows" else "server_image=not_recorded_historical_release")
+        for platform in platforms:
             name = canonical_archive_name(version, platform)
             asset = assets[name]
             url = asset["browser_download_url"]
@@ -1186,6 +1228,7 @@ def main() -> int:
         description="Verify published WebCodex npm/GitHub release bytes on one network host."
     )
     parser.add_argument("--repo", default=REPO)
+    parser.add_argument("--platform-scope", choices=release_scope.SCOPES, default="all")
     parser.add_argument("--github-only", action="store_true", help="verify GitHub assets without accessing npm")
     parser.add_argument("--require-unified-installers", action="store_true")
     parser.add_argument("--require-runtime-installers", action="store_true")
@@ -1195,7 +1238,7 @@ def main() -> int:
     version = normalize_version(args.version)
     if args.timeout <= 0 or args.timeout > 300:
         raise VerificationError("--timeout must be in (0, 300]")
-    verify_public_release(version, args.timeout, repo=args.repo, github_only=args.github_only, require_unified_installers=args.require_unified_installers, require_runtime_installers=args.require_runtime_installers)
+    verify_public_release(version, args.timeout, repo=args.repo, github_only=args.github_only, require_unified_installers=args.require_unified_installers, require_runtime_installers=args.require_runtime_installers, platform_scope=args.platform_scope)
     return 0
 
 
