@@ -27,6 +27,12 @@ else:
 WORKFLOW = "release-windows-acceptance.yml"
 PLATFORMS = ("win32-x64", "win32-arm64")
 SCENARIOS = ("fresh", "unconfigured", "configured")
+V056_SCENARIOS = (*SCENARIOS, "v054_unconfigured", "v054_configured")
+V054_SOURCE = "1af9bb5321edcdc16a4f1a5be65d0611ef19964a"
+V054_INSTALLERS = {
+    "win32-x64": ("6dbaa9075541d44a2c4f22075409abdb43f25a0a41f50aa26fc73cc137f9cc8e", 34433088),
+    "win32-arm64": ("b233872dc776d2a706235ac5fcc593b7949f7b38d878dd7de099ec7e513ad180", 30388573),
+}
 MAX_REQUEST_BYTES = 64 * 1024
 MAX_REPORT_BYTES = 192 * 1024
 PINNED = {
@@ -40,6 +46,13 @@ PINNED = {
         "8afad1e47fd515913030dc94a15af0bb6a8f34b7d741086d4dbd7fe6a5a4c0c9"),
 }
 require = control._require
+
+
+def scenarios_for_request(request: dict) -> tuple[str, ...]:
+    if (request.get("tag"), request.get("controller_workflow")) == (
+            "v0.5.6", ".github/workflows/release-publish-v056.yml"):
+        return V056_SCENARIOS
+    return SCENARIOS
 
 
 def request_digest(request: dict) -> str:
@@ -81,6 +94,15 @@ def validate_request(request: dict, spec: control.ReleaseSpec) -> None:
     for name, asset in assets.items():
         control._validate_asset_description(asset)
         require(name == asset["name"], "Windows 验收资产索引无效。")
+    if spec.platform_scope == "windows":
+        version = spec.pinned_request["version"]
+        expected = {"SHA256SUMS", "manifest.json", "webcodex-release-manifest.json"}
+        for platform in PLATFORMS:
+            expected.update((public.canonical_archive_name(version, platform),
+                             public.canonical_source_manifest_name(version, platform),
+                             public.canonical_installer_name(version, f"{platform}-exe"),
+                             public.canonical_desktop_name(version, platform)))
+        require(set(assets) == expected, "Windows 单独发布必须冻结两架构的完整 11 项资产。")
     require(len(control._json_bytes(request)) <= MAX_REQUEST_BYTES, "Windows 验收请求超出大小限制。")
 
 
@@ -92,6 +114,8 @@ def select_release_spec(request: dict) -> control.ReleaseSpec:
         from scripts.release_github_actions_v054 import SPEC, require_finalized
     elif identity == ("v0.5.5", ".github/workflows/release-publish-v055.yml"):
         from scripts.release_github_actions_v055 import SPEC, require_finalized
+    elif identity == ("v0.5.6", ".github/workflows/release-publish-v056.yml"):
+        from scripts.release_github_actions_v056 import SPEC, require_finalized
     else:
         raise control.ReleaseControlError("Windows 验收请求不属于已审核的固定发布入口。")
     require_finalized(SPEC)
@@ -118,7 +142,7 @@ def validate_run(run: dict, request: dict, *, run_id: int, attempt: int, owner_i
                 "Windows 验收重跑必须由仓库所有者发起。")
 
 
-def validate_public_assets(release: dict, request: dict) -> dict:
+def validate_public_assets(release: dict, request: dict, *, platform_scope: str = "all") -> dict:
     require(release.get("id") == request["release_id"] and bool(release.get("published_at"))
             and release.get("name") == f"WebCodex {request['tag']}"
             and release.get("author", {}).get("id") == control.BOT_ID
@@ -126,7 +150,8 @@ def validate_public_assets(release: dict, request: dict) -> dict:
             and hashlib.sha256(str(release.get("body", "")).encode()).hexdigest() == request["release_body_sha256"],
             "Windows 验收 Release 身份或说明已改变。")
     assets = public.validate_github_assets(release, request["tag"][1:], unified_installers=True,
-                                           expected_prerelease=True)
+                                           expected_prerelease=True,
+                                           **control.release_scope.metadata(platform_scope))
     require(set(assets) == set(request["assets"]), "预发布资产集合与冻结记录不同。")
     base = f"https://github.com/{request['repo']}/releases/download/{request['tag']}"
     for name, asset in assets.items():
@@ -144,9 +169,55 @@ def validate_report(report: dict, request: dict, platform: str, run_id: int, att
             and report["workflow_run_attempt"] == attempt and report.get("passed") is True,
             "Windows 原生验收报告身份不符或未通过。")
     scenarios = report.get("scenarios")
-    require(isinstance(scenarios, dict) and set(scenarios) == set(SCENARIOS)
-            and all(value is True for value in scenarios.values()), "Windows 三种完整安装场景未全部通过。")
-    native = report.get("configured")
+    expected_scenarios = scenarios_for_request(request)
+    require(isinstance(scenarios, dict) and set(scenarios) == set(expected_scenarios)
+            and all(value is True for value in scenarios.values()), "Windows 规定的完整安装场景未全部通过。")
+    programs = validate_configured_report(report.get("configured"), request, platform)
+    if expected_scenarios == SCENARIOS:
+        return
+    exits = report.get("scenario_exit_codes", {})
+    require(isinstance(exits, dict) and set(exits) == set(expected_scenarios)
+            and all(type(value) is int and value == 0 for value in exits.values()),
+            "Windows 五种实际安装 helper 未全部成功退出。")
+    previous_hash, previous_size = V054_INSTALLERS[platform]
+    version = request["tag"][1:]
+    # This receipt records the frozen inputs passed to the existing real PS
+    # helper. Exit 0 also requires its installed hashes, identity and cleanup.
+    expected = {
+        "previous_version": "0.5.4", "previous_source_sha": V054_SOURCE,
+        "previous_installer_sha256": previous_hash, "previous_installer_size": previous_size,
+        "candidate_installer_sha256": request["assets"][f"webcodex-unified-v{version}-{platform}.exe"]["sha256"],
+        "candidate_source_manifest_sha256": request["assets"][f"webcodex-source-v{version}-{platform}.json"]["sha256"],
+        "program_sha256": programs,
+    }
+    receipt = report.get("v054_unconfigured")
+    require(isinstance(receipt, dict) and set(receipt) == set(expected)
+            and all(type(receipt.get(key)) is type(value) and receipt.get(key) == value
+                    for key, value in expected.items()),
+            "0.5.4 未配置升级未绑定固定旧安装包及候选四程序验证输入。")
+    native = report.get("v054_configured")
+    require(validate_configured_report(native, request, platform) == programs,
+            "两次配置升级的候选四程序摘要不同。")
+    from scripts.windows_unified_upgrade_smoke import PLATFORMS as native_platforms
+    _, target, architecture = native_platforms[platform]
+    previous = native.get("upstream_runtime")
+    expected = {
+        "version": "0.5.4", "git_commit": V054_SOURCE, "git_dirty": False,
+        "target": target, "architecture": architecture,
+    }
+    require(isinstance(previous, dict) and set(previous) == set(expected)
+            and all(type(previous.get(key)) is type(value) and previous.get(key) == value
+                    for key, value in expected.items())
+            and native.get("inputs", {}).get("previous_installer_sha256") == previous_hash,
+            "实际配置升级并非固定的 0.5.4 安装及对应原生架构。")
+    outer = native.get("candidate_outer", {})
+    require(isinstance(outer, dict) and type(outer.get("exit_code")) is int and outer["exit_code"] == 0
+            and all(outer.get(key) is True for key in ("exact_native_programs", "private_state_preserved",
+                "original_directory_preserved", "unrelated_process_alive")),
+            "0.5.4 配置升级未证实实际程序替换及原状态、目录和无关进程保持。")
+
+
+def validate_configured_report(native: dict, request: dict, platform: str) -> dict:
     require(isinstance(native, dict) and native.get("platform") == platform
             and native.get("mode") == "verify_candidate" and native.get("passed") is True
             and native.get("complete_upgrade_verified") is True
@@ -174,6 +245,7 @@ def validate_report(report: dict, request: dict, platform: str, run_id: int, att
     require(isinstance(programs, dict) and set(programs) == {"webcodex", "webcodex-server", "webcodex-runner", "webcodex-desktop"}
             and all(isinstance(value, str) and re.fullmatch(r"[0-9a-f]{64}", value) for value in programs.values()),
             "Windows 原生升级报告缺少四个程序摘要。")
+    return programs
 
 
 def _download(url: str, path: Path, expected: str, size: int | None = None) -> None:
@@ -246,7 +318,8 @@ def execute(request: dict, platform: str, root: Path, report: dict, *, spec: con
             and build.get("repository", {}).get("id") == request["repo_id"]
             and build.get("head_repository", {}).get("id") == request["repo_id"]
             and build.get("status") == "completed" and build.get("conclusion") == "success", "验收原生构建身份或成功证据不符。")
-    assets = validate_public_assets(client.fetch_json(f"/releases/{request['release_id']}"), request)
+    assets = validate_public_assets(client.fetch_json(f"/releases/{request['release_id']}"), request,
+                                    **control.release_scope.metadata(spec.platform_scope))
     report["phase"] = "download"
     root.mkdir(parents=True, exist_ok=False)
     version = request["tag"][1:]
@@ -269,6 +342,12 @@ def execute(request: dict, platform: str, root: Path, report: dict, *, spec: con
     for key, (url, digest) in fixtures.items():
         paths[key] = root / url.rsplit("/", 1)[1]
         _download(url, paths[key], digest)
+    include_v054 = scenarios_for_request(request) == V056_SCENARIOS
+    if include_v054:
+        name = f"webcodex-desktop-v0.5.4-{platform}-setup.exe"
+        paths["previous_v054"] = root / name
+        _download(f"https://github.com/9holy/webcodex/releases/download/v0.5.4/{name}",
+                  paths["previous_v054"], *V054_INSTALLERS[platform])
     public.inspect_archive(paths["published_runtime"], platform, root / "published-runtime")
     manifest = smoke.verify_candidate_manifest(paths["manifest"], request["assets"][selected["manifest"]]["sha256"],
         version=version, source=request["source_sha"], platform=platform,
@@ -280,49 +359,70 @@ def execute(request: dict, platform: str, root: Path, report: dict, *, spec: con
                  {"GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_RUNTIME_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN"}}
     scripts = Path(__file__).resolve().parent
     hashes = root / "expected-program-hashes.json"
-    hashes.write_bytes(control._json_bytes({name: record["sha256"] for name, record in manifest["artifacts"].items()}))
+    program_hashes = {name: record["sha256"] for name, record in manifest["artifacts"].items()}
+    hashes.write_bytes(control._json_bytes(program_hashes))
     require(bool(env.get("APPDATA")), "原生 runner 缺少默认配置路径。")
     default_environment = Path(env["APPDATA"]) / "webcodex" / "environment"
     require(not default_environment.exists(), "全新验收 runner 已有默认 Environment；不接触已有环境。")
     # Use the actual per-user installation parent's ACL, as the configured
     # native regression does; RUNNER_TEMP is only a download workspace.
     install_root = Path(tempfile.mkdtemp(prefix="webcodex-acceptance-", dir=env["LOCALAPPDATA"]))
-    for scenario in ("fresh", "unconfigured"):
+    desktop_scenarios = [("fresh", None, None), ("unconfigured", paths["previous"], previous_hash)]
+    if include_v054:
+        desktop_scenarios.append(("v054_unconfigured", paths["previous_v054"], V054_INSTALLERS[platform][0]))
+    for scenario, previous_installer, installer_hash in desktop_scenarios:
         report["phase"] = scenario
         require(not (default_environment / "environment.json").exists(), "未配置升级场景出现了已有 Environment。")
         command = ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-File", str(scripts / "desktop_install_windows_smoke.ps1"),
                    "-Installer", str(paths["installer"]), "-Version", version, "-SourceSha", request["source_sha"],
                    "-BuiltAt", str(built_at), "-Platform", platform, "-InstallDir", str(install_root / f"{scenario} Desktop"),
                    "-ExpectedProgramHashes", str(hashes)]
-        if scenario == "unconfigured":
-            command.extend(["-PreviousInstaller", str(paths["previous"]), "-PreviousInstallerSha256", previous_hash])
+        if previous_installer is not None:
+            command.extend(["-PreviousInstaller", str(previous_installer), "-PreviousInstallerSha256", installer_hash])
         result = smoke.run_command(command, f"real {scenario} outer", timeout=600, env=child_env)
         report.setdefault("scenario_exit_codes", {})[scenario] = result.returncode
         if result.returncode:
             report.setdefault("helper_failures", {})[scenario] = helper_failure(result.stdout, result.stderr)
         require(result.returncode == 0, f"Windows {scenario} 完整安装包验收失败。")
         report["scenarios"][scenario] = True
+        if scenario == "v054_unconfigured":
+            report[scenario] = {
+                "previous_version": "0.5.4", "previous_source_sha": V054_SOURCE,
+                "previous_installer_sha256": installer_hash, "previous_installer_size": V054_INSTALLERS[platform][1],
+                "candidate_installer_sha256": request["assets"][selected["installer"]]["sha256"],
+                "candidate_source_manifest_sha256": request["assets"][selected["manifest"]]["sha256"],
+                "program_sha256": program_hashes,
+            }
     install_root.rmdir()  # Only the empty directory this worker created.
-    report["phase"] = "configured"
-    native_report = root / "configured-report.json"
-    command = [sys.executable, str(scripts / "windows_unified_upgrade_smoke.py"), "--verify-candidate", "--platform", platform,
-               "--previous-installer", str(paths["previous"]), "--previous-installer-sha256", previous_hash,
-               "--published-installer", str(paths["published"]), "--published-installer-sha256", published_hash,
-               "--published-cli", str(root / "published-runtime" / platform / "webcodex.exe"),
-               "--candidate-installer", str(paths["installer"]), "--candidate-installer-sha256", request["assets"][selected["installer"]]["sha256"],
-               "--candidate-cli", str(root / "candidate-runtime" / platform / "webcodex.exe"),
-               "--candidate-version", version, "--candidate-source-sha", request["source_sha"],
-               "--candidate-build-run-id", str(request["build_run_id"]),
-               "--candidate-source-manifest", str(paths["manifest"]),
-               "--candidate-source-manifest-sha256", request["assets"][selected["manifest"]]["sha256"],
-               "--report", str(native_report)]
-    result = smoke.run_command(command, "real configured outer", timeout=1200, env=child_env)
-    report.setdefault("scenario_exit_codes", {})["configured"] = result.returncode
-    if native_report.is_file():
-        report["configured"] = control._read_json(native_report)
-    require(result.returncode == 0, "Windows configured 完整安装包验收失败。")
-    report["scenarios"]["configured"] = True
-    validate_public_assets(client.fetch_json(f"/releases/{request['release_id']}"), request)
+    configured_scenarios = [("configured", paths["previous"], previous_hash)]
+    if include_v054:
+        configured_scenarios.append(("v054_configured", paths["previous_v054"], V054_INSTALLERS[platform][0]))
+    for scenario, previous_installer, installer_hash in configured_scenarios:
+        report["phase"] = scenario
+        native_report = root / f"{scenario}-report.json"
+        command = [sys.executable, str(scripts / "windows_unified_upgrade_smoke.py"), "--verify-candidate", "--platform", platform,
+                   "--previous-installer", str(previous_installer), "--previous-installer-sha256", installer_hash]
+        if scenario == "configured":
+            command.extend(["--published-installer", str(paths["published"]), "--published-installer-sha256", published_hash,
+                            "--published-cli", str(root / "published-runtime" / platform / "webcodex.exe")])
+        else:
+            command.extend(["--previous-version", "0.5.4"])
+        command.extend([
+            "--candidate-installer", str(paths["installer"]), "--candidate-installer-sha256", request["assets"][selected["installer"]]["sha256"],
+            "--candidate-cli", str(root / "candidate-runtime" / platform / "webcodex.exe"),
+            "--candidate-version", version, "--candidate-source-sha", request["source_sha"],
+            "--candidate-build-run-id", str(request["build_run_id"]),
+            "--candidate-source-manifest", str(paths["manifest"]),
+            "--candidate-source-manifest-sha256", request["assets"][selected["manifest"]]["sha256"],
+            "--report", str(native_report)])
+        result = smoke.run_command(command, f"real {scenario} outer", timeout=1200, env=child_env)
+        report.setdefault("scenario_exit_codes", {})[scenario] = result.returncode
+        if native_report.is_file():
+            report[scenario] = control._read_json(native_report)
+        require(result.returncode == 0, f"Windows {scenario} 完整安装包验收失败。")
+        report["scenarios"][scenario] = True
+    validate_public_assets(client.fetch_json(f"/releases/{request['release_id']}"), request,
+                           **control.release_scope.metadata(spec.platform_scope))
     report["passed"] = True
     validate_report(report, request, platform, run_id, attempt)
     report["phase"] = "complete"
@@ -344,6 +444,7 @@ def main(argv=None) -> int:
         request = control._parse_json(raw)
         spec = select_release_spec(request)
         report["request_sha256"] = request_digest(request)
+        report["scenarios"] = dict.fromkeys(scenarios_for_request(request), False)
         execute(request, args.platform, args.inputs_root.absolute(), report, spec=spec)
     except Exception as error:
         # Native CLI stdout/stderr and generated Environment credentials are not logs.

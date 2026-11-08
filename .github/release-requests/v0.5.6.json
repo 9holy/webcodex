@@ -1,0 +1,22 @@
+{
+  "ci_run_attempt": 1,
+  "ci_run_id": 42497796231,
+  "evidence_run_attempt": 1,
+  "evidence_run_id": 42497796371,
+  "github_only": true,
+  "include_runtime_installers": false,
+  "include_unified_installers": true,
+  "notes_path": ".github/release-requests/v0.5.6-notes.md",
+  "notes_sha256": "1869cce6cbe246200ed77e5e7feb6962e42f2f15734f59ac556624df1e93e5f6",
+  "owner": "9holy",
+  "owner_id": 45361924,
+  "platform_scope": "windows",
+  "repo": "9holy/webcodex",
+  "repo_id": 1404596174,
+  "schema_version": 1,
+  "source_ref": "release/v0.5.6",
+  "source_sha": "6f89d65654af65725bb98a4269d3d99716f9db6c",
+  "source_tree": "f5bee0886695a8a60772739e48877226ffe9b4d9",
+  "tag": "v0.5.6",
+  "version": "0.5.6"
+}

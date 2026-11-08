@@ -54,7 +54,7 @@ jobs:
         run: |
           python -B -m unittest scripts.tests.test_windows_desktop_hashes -v
           if ($LASTEXITCODE -ne 0) { throw "Desktop digest enforcement regression failed" }
-      - name: Verify frozen public bytes and execute three real installation scenarios
+      - name: Verify frozen public bytes and execute the required real installation scenarios
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
