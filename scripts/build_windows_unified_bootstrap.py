@@ -61,6 +61,34 @@ CLASSIFICATION_DIAGNOSTICS = {
         "Setup could not safely read or save the Environment state. Check its directory permissions and available disk space.",
         "无法安全读取或保存运行环境状态。请检查目录权限和可用磁盘空间。",
     ),
+    "state_invalid": (
+        "The saved Environment state is invalid. Keep its original files and restore a valid backup before upgrading.",
+        "已有运行环境状态文件无效。请保留原始文件，并在升级前恢复有效备份。",
+    ),
+    "state_path": (
+        "The Environment directory is not a valid absolute path. Keep the original installation and check its saved path.",
+        "运行环境目录不是有效的绝对路径。请保留原安装并检查已保存的目录。",
+    ),
+    "home_unavailable": (
+        "Setup cannot locate this Windows account's configuration directory. Use the original Windows account.",
+        "无法定位当前 Windows 账户的配置目录。请使用原安装时的 Windows 账户。",
+    ),
+    "unsafe_path": (
+        "The configuration path contains a link or unsafe directory. Do not move or delete the original Environment.",
+        "配置路径包含链接或不安全的目录。不要移动或删除原有运行环境。",
+    ),
+    "installer_targets": (
+        "The existing Runtime directory or program path cannot be verified. Keep the original installation path.",
+        "无法验证已有 Runtime 目录或程序路径。请保留原安装路径。",
+    ),
+    "installer_environment": (
+        "The saved Environment or setup operation requires its original owner and recovery path. Do not overwrite it.",
+        "已有运行环境或安装事务需要原所属账户及恢复路径，请勿覆盖。",
+    ),
+    "candidate_file": (
+        "A required installed program is missing. Preserve the original installation for repair.",
+        "已有安装缺少必要的程序。请保留原安装以便修复。",
+    ),
 }
 
 
@@ -81,14 +109,19 @@ def classification_diagnostic_lines() -> list[str]:
         '  StrCpy $WebCodexClassificationCode "installer_classify_failed"',
         '  StrCpy $WebCodexFailureReason "$(WebCodexClassifyUnknown)"',
     ])
+    # nsExec captures both stdout and stderr. With --json, the actual CLI
+    # wraps a diagnostic as {"error":"installer_owner: ...","ok":false};
+    # older native fixtures only emitted "installer_owner: ...". Recognize
+    # both fixed prefixes without disclosing any arbitrary diagnostic text.
     for code in CLASSIFICATION_DIAGNOSTICS:
-        lines.extend([
-            f'  StrCpy $R0 $1 {len(code) + 1}',
-            f'  ${{If}} $R0 == "{code}:"',
-            f'    StrCpy $WebCodexClassificationCode "{code}"',
-            f'    StrCpy $WebCodexFailureReason "$(WebCodexClassify_{code})"',
-            '  ${EndIf}',
-        ])
+        for prefix in (f"{code}:", f'{{"error":"{code}:'):
+            lines.extend([
+                f'  StrCpy $R0 $1 {len(prefix)}',
+                f"  ${{If}} $R0 == '{prefix}'",
+                f'    StrCpy $WebCodexClassificationCode "{code}"',
+                f'    StrCpy $WebCodexFailureReason "$(WebCodexClassify_{code})"',
+                '  ${EndIf}',
+            ])
     lines.extend([
         '  DetailPrint "WebCodex: $WebCodexClassificationCode"',
         '  MessageBox MB_ICONSTOP "$WebCodexFailureReason$\\r$\\n$\\r$\\n$(WebCodexClassifyStopped)" /SD IDOK',
