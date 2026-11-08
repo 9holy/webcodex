@@ -1,0 +1,141 @@
+name: Observe segmented public release bytes
+run-name: Observe segmented public release bytes ${{ github.sha }}
+
+on:
+  push:
+    branches: [diagnostic/public-release-chunks]
+
+permissions:
+  contents: read
+
+jobs:
+  observe:
+    if: >-
+      github.repository == '9holy/webcodex' &&
+      github.repository_id == '1404596174' &&
+      github.ref == 'refs/heads/diagnostic/public-release-chunks'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout the fixed diagnostic baseline
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: 7041854bd3cb4df8f5298cbd732ba251237dd590
+          persist-credentials: false
+      - name: Read fixed public files through contiguous bounded chunks
+        shell: python
+        run: |
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import signal
+          import time
+          import urllib.error
+          import urllib.request
+
+          manifest_url = "https://github.com/9holy/webcodex/releases/download/v0.5.4/webcodex-source-v0.5.4-win32-x64.json"
+          v8_url = "https://github.com/denoland/rusty_v8/releases/download/v149.2.0/librusty_v8_release_x86_64-unknown-linux-gnu.a.gz"
+          manifest_sha = "432e17cef296ca19f92fbea2b6464d16685317b93f3002545bd57c72417308fd"
+          v8_sha = "8aed98637db7e77dc8bfb8bb4759ec5bde472d0bf7943f58e0e62a350945c559"
+          report = {
+              "schema_version": 1, "kind": "public-release-chunks-observation",
+              "diagnostic_only": True, "formal_acceptance": False, "automatic_retries": False,
+              "verification_scope": "complete_file_bytes",
+              "checkout_requested_ref": "7041854bd3cb4df8f5298cbd732ba251237dd590",
+              "github_sha": os.environ["GITHUB_SHA"], "workflow_sha": os.environ["GITHUB_WORKFLOW_SHA"],
+              "workflow_ref": os.environ["GITHUB_WORKFLOW_REF"],
+              "run_id": int(os.environ["GITHUB_RUN_ID"]), "run_attempt": int(os.environ["GITHUB_RUN_ATTEMPT"]),
+              "manifest_expected_size": 4569, "manifest_expected_sha256": manifest_sha,
+              "v8_asset_id": 429513990, "v8_expected_full_size": 38519314,
+              "v8_expected_full_sha256": v8_sha, "request_limit": 39, "request_count": 0,
+              "files": [], "observation_complete": False,
+          }
+          output = Path(os.environ["RUNNER_TEMP"]) / "public-release-chunks-observation"
+          output.mkdir(exist_ok=False)
+
+          def deadline_expired(signum, frame):
+              raise TimeoutError("fixed probe deadline")
+
+          signal.signal(signal.SIGALRM, deadline_expired)
+          # At most 2 + 37 contiguous requests; the first error stops that file.
+          # urllib keeps its normal bounded redirects; no credentials, fallback or retry.
+          probes = (
+              ("manifest_segmented_get", manifest_url, 4569, manifest_sha, 4096),
+              ("v8_segmented_get", v8_url, 38519314, v8_sha, 1024 * 1024),
+          )
+          allowed_errors = {"HTTPError", "URLError", "TimeoutError", "SSLError", "ConnectionResetError", "OSError", "ValueError"}
+          for label, url, size, expected_sha, chunk_size in probes:
+              row = {"label": label, "method": "GET", "expected_size": size, "chunk_size": chunk_size,
+                     "read_chunk_limit": 1024 * 1024, "received_bytes": 0,
+                     "full_hash_verified": False, "chunks": []}
+              started = time.monotonic()
+              current = None
+              digest = hashlib.sha256()
+              signal.setitimer(signal.ITIMER_REAL, 90)
+              try:
+                  for start in range(0, size, chunk_size):
+                      end = min(start + chunk_size, size) - 1
+                      if report["request_count"] >= 39:
+                          row["failure_code"] = "request_limit"
+                          raise ValueError("fixed request limit")
+                      current = {"start": start, "end": end, "status": None,
+                                 "received_bytes": 0, "range_verified": False}
+                      row["chunks"].append(current)
+                      chunk_started = time.monotonic()
+                      try:
+                          request = urllib.request.Request(url, headers={"Range": f"bytes={start}-{end}"})
+                          report["request_count"] += 1
+                          with urllib.request.urlopen(request, timeout=90) as response:
+                              current["status"] = response.status
+                              if response.status != 206 or response.headers.get("Content-Range") != f"bytes {start}-{end}/{size}":
+                                  row["failure_code"] = "response_range_or_status"
+                                  raise ValueError("fixed chunk response contract")
+                              current["range_verified"] = True
+                              expected_count = end - start + 1
+                              while chunk := response.read(min(1024 * 1024, expected_count + 1 - current["received_bytes"])):
+                                  current["received_bytes"] += len(chunk)
+                                  row["received_bytes"] += len(chunk)
+                                  if current["received_bytes"] > expected_count:
+                                      row["failure_code"] = "chunk_size_exceeded"
+                                      raise ValueError("fixed chunk size bound")
+                                  digest.update(chunk)
+                              if current["received_bytes"] != expected_count:
+                                  row["failure_code"] = "chunk_size_incomplete"
+                                  raise ValueError("fixed chunk size contract")
+                      finally:
+                          current["elapsed_ms"] = round((time.monotonic() - chunk_started) * 1000)
+                  row["received_sha256"] = digest.hexdigest()
+                  row["full_hash_verified"] = row["received_bytes"] == size and digest.hexdigest() == expected_sha
+                  if not row["full_hash_verified"]:
+                      row["failure_code"] = "response_size_or_sha256"
+              except Exception as error:
+                  name = type(error).__name__
+                  row["error_type"] = name if name in allowed_errors else "OtherError"
+                  cause = error.reason if isinstance(error, urllib.error.URLError) else error.__cause__
+                  if cause is not None:
+                      name = type(cause).__name__
+                      row["cause_type"] = name if name in allowed_errors else "OtherError"
+                  if isinstance(error, urllib.error.HTTPError):
+                      if current is not None and type(error.code) is int and 100 <= error.code <= 599:
+                          current["status"] = error.code
+                      error.close()  # Never read or print an error response body.
+              finally:
+                  signal.setitimer(signal.ITIMER_REAL, 0)
+                  row["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+                  report["files"].append(row)
+          report["observation_complete"] = len(report["files"]) == 2
+          encoded = json.dumps(report, sort_keys=True)
+          if len(encoded.encode("utf-8")) > 16 * 1024:
+              raise SystemExit("fixed diagnostic report bound exceeded")
+          (output / "report.json").write_text(encoded + "\n", encoding="utf-8")
+          print(encoded)  # Fixed labels, integers, booleans and hashes; no bodies, URLs or exception messages.
+          raise SystemExit(0 if all(row["full_hash_verified"] for row in report["files"]) else 1)
+      - name: Retain the bounded network observation
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: public-release-chunks-observation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/public-release-chunks-observation/report.json
+          if-no-files-found: error
+          retention-days: 30
