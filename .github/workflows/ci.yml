@@ -387,15 +387,66 @@ jobs:
       - name: Run real Clippy smoke regression
         if: matrix.shard == 'runner'
         run: cargo test --locked -p webcodex-runner --features runner-real-process-tests --bin webcodex-runner runner_real_process_rust_clippy_warnings_pass_and_correctness_fails -- --ignored
+      - name: Prepare pinned V8 archive for Linux server experiments
+        if: matrix.shard == 'server'
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          import platform
+          import subprocess
+          import sys
+          import tempfile
+          import tomllib
+
+          root = Path(os.environ['GITHUB_WORKSPACE']).resolve(strict=True)
+          sys.path.insert(0, str(root))
+          from scripts.download_pinned_ci_input import download_asset
+
+          target = 'x86_64-unknown-linux-gnu'
+          if platform.system() != 'Linux' or platform.machine() != 'x86_64':
+              raise SystemExit('Pinned V8 archive requires native Linux x86_64')
+          host = subprocess.run(['rustc', '-vV'], cwd=root, check=True, text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30).stdout
+          if host.splitlines().count(f'host: {target}') != 1:
+              raise SystemExit('Pinned V8 archive requires the native GNU Rust host')
+          if os.environ.get('CARGO_BUILD_TARGET', target) != target:
+              raise SystemExit('Pinned V8 archive cannot override another Cargo target')
+          for name in os.environ:
+              if name.startswith(('V8_', 'RUSTY_V8_', 'CARGO_FEATURE_')) or name in {
+                  'GN_ARGS', 'EXTRA_GN_ARGS', 'DENO_TRYBUILD', 'DOCS_RS',
+                  'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS',
+              }:
+                  raise SystemExit('Pinned V8 archive requires unmodified release/feature inputs')
+          lock = tomllib.loads((root / 'Cargo.lock').read_text(encoding='utf-8'))
+          versions = [(p['version'], p.get('source')) for p in lock['package'] if p['name'] == 'v8']
+          if versions != [('149.2.0', 'registry+https://github.com/rust-lang/crates.io-index')]:
+              raise SystemExit('Pinned V8 archive does not match Cargo.lock')
+          # Resolve the same package/features/target used by both real tests.
+          # The fixed archive has no ptrcomp, sandbox or simdutf feature suffix.
+          features = subprocess.run([
+              'cargo', 'tree', '--locked', '--color', 'never', '-p', 'webcodex',
+              '--features', 'experimental-code-mode', '--target', target,
+              '--invert', 'v8', '--depth', '0', '--prefix', 'none', '--format', '{p}|{f}',
+          ], cwd=root, check=True, text=True, stdout=subprocess.PIPE,
+             stderr=subprocess.PIPE, timeout=120).stdout.strip().splitlines()
+          parts = features[0].split('|') if len(features) == 1 else []
+          if len(parts) != 2 or parts[0] != 'v8 v149.2.0' or set(parts[1].split(',')) != {'default', 'use_custom_libcxx'}:
+              raise SystemExit('Pinned V8 archive does not match the enabled V8 features')
+          owned = Path(tempfile.mkdtemp(prefix='webcodex-v8-ci-', dir=os.environ['RUNNER_TEMP']))
+          archive = download_asset('v8-linux-x64', owned / 'librusty_v8_release_x86_64-unknown-linux-gnu.a.gz')
+          # Export only after the fixed complete archive has passed its digest.
+          with open(os.environ['GITHUB_ENV'], 'a', encoding='utf-8') as output:
+              print(f'RUSTY_V8_ARCHIVE={archive}', file=output)
       - name: Run experimental Code Mode and receipt tests
         if: matrix.shard == 'server'
         run: |
           CI_RUST_SHARD=experimental-code-mode \
             python3 scripts/ci_rust_test.py --report target/ci-test-reports/experimental-code-mode.json -- \
-            cargo test --locked -p webcodex --features experimental-code-mode code_mode
+            cargo test --locked --target x86_64-unknown-linux-gnu -p webcodex --features experimental-code-mode code_mode
           CI_RUST_SHARD=experimental-code-mode-receipts \
             python3 scripts/ci_rust_test.py --report target/ci-test-reports/experimental-code-mode-receipts.json -- \
-            cargo test --locked -p webcodex --features experimental-code-mode receipt_tests
+            cargo test --locked --target x86_64-unknown-linux-gnu -p webcodex --features experimental-code-mode receipt_tests
       - name: Upload bounded Rust test evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -961,7 +1012,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "NSIS compiler installation failed" }
           python -c "from scripts.tests.test_windows_installer_native import nsis_compiler; assert nsis_compiler() is not None, 'Required NSIS compiler is unavailable'"
           if ($LASTEXITCODE -ne 0) { throw "Native installer gate cannot skip without NSIS" }
-          python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native scripts.tests.test_windows_desktop_hashes -v
+          python -m unittest scripts.tests.test_prepare_windows_unified_installer scripts.tests.test_windows_installer_native scripts.tests.test_windows_desktop_hashes scripts.tests.test_download_pinned_ci_input scripts.tests.test_prepare_tauri_nsis_ci_tools -v
           if ($LASTEXITCODE -ne 0) { throw "Native installer directory/upgrade contracts failed" }
       - name: Test native SSH acceptance fixture before compiling Desktop
         shell: pwsh
@@ -1041,8 +1092,11 @@ jobs:
           import os
           from pathlib import Path, PurePosixPath
           import shutil
+          import sys
           import tarfile
-          import urllib.request
+
+          sys.path.insert(0, os.environ['GITHUB_WORKSPACE'])
+          from scripts.download_pinned_ci_input import download_asset
 
           root = Path(os.environ['RUNNER_TEMP']) / 'webcodex-unified-reproduction-inputs'
           root.mkdir(exist_ok=False)
@@ -1057,11 +1111,15 @@ jobs:
                   'https://github.com/9holy/webcodex/releases/download/v0.5.3/webcodex-v0.5.3-win32-x64.tar.gz',
                   '95cb8d1d9b3756e531a48f85032d7aeb0771fe141ec09940b308f25fdc6a1be6'),
           }
+          asset_keys = {
+              'PREVIOUS_INSTALLER': 'desktop-v050-x64',
+              'PUBLISHED_INSTALLER': 'unified-v053-x64',
+              'PUBLISHED_RUNTIME': 'runtime-v053-x64',
+          }
           paths = {}
           for key, (url, expected) in assets.items():
               destination = root / url.rsplit('/', 1)[1]
-              with urllib.request.urlopen(url, timeout=120) as response, destination.open('xb') as output:
-                  shutil.copyfileobj(response, output)
+              download_asset(asset_keys[key], destination)
               with destination.open('rb') as stream:
                   actual = hashlib.file_digest(stream, 'sha256').hexdigest()
               if actual != expected:
@@ -1135,6 +1193,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
+          python "$env:GITHUB_WORKSPACE\scripts\prepare_tauri_nsis_ci_tools.py" `
+            --tools-directory (Join-Path $env:LOCALAPPDATA 'tauri')
+          if ($LASTEXITCODE -ne 0) { throw "Pinned Tauri NSIS tools preparation failed" }
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE "target\desktop-ci-tauri"
           npm exec tauri -- build --bundles nsis --config "${{ steps.desktop_bundle.outputs.config }}" --ci --no-sign
           if ($LASTEXITCODE -ne 0) { throw "Tauri NSIS build failed" }
@@ -1168,10 +1229,9 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $previous = Join-Path $env:RUNNER_TEMP "webcodex-desktop-upstream-v0.5.0-x64-setup.exe"
-          Invoke-WebRequest `
-            -Uri "https://github.com/yyjeqhc/webcodex/releases/download/v0.5.0/webcodex-desktop-v0.5.0-win32-x64-setup.exe" `
-            -OutFile $previous
+          # Reuse the fixed input already downloaded and independently hashed
+          # above; the smoke rechecks this same published SHA before installing.
+          $previous = $env:PREVIOUS_INSTALLER
           & .\scripts\desktop_install_windows_smoke.ps1 `
             -Installer $env:DESKTOP_CI_INSTALLER `
             -Version "${{ steps.runtime.outputs.version }}" `

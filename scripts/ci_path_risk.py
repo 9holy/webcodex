@@ -242,6 +242,16 @@ def _classify_path(risk: Risk, path: str) -> None:
         if path in ssh_acceptance_scripts:
             return
 
+    # The input downloader uses native Windows process deadlines and exclusive
+    # file publication before the real installer and Tauri tool fixtures run.
+    # Its Linux V8 consumer is already covered by the unconditional server lane.
+    if path in {
+        "scripts/download_pinned_ci_input.py",
+        "scripts/tests/test_download_pinned_ci_input.py",
+    }:
+        _mark_windows_desktop(risk, "pinned-ci-inputs")
+        return
+
     # The real installed-Environment classifier and installer hash checks live
     # in the Desktop lane. Keep their upgrade/authority owners reachable there
     # while retaining the existing native risks for shared Rust and helpers.

@@ -221,6 +221,24 @@ class PathRiskFixtureTests(unittest.TestCase):
                     if path == "scripts/tests/test_windows_desktop_hashes.py":
                         self.assertIn("windows-runner-script", result["categories"])
 
+    def test_pinned_ci_inputs_keep_the_native_windows_consumer_reachable(self) -> None:
+        for path in (
+            "scripts/download_pinned_ci_input.py",
+            "scripts/tests/test_download_pinned_ci_input.py",
+            "scripts/prepare_tauri_nsis_ci_tools.py",
+            "scripts/tests/test_prepare_tauri_nsis_ci_tools.py",
+        ):
+            for status in ("A", "M", "D"):
+                with self.subTest(path=path, status=status):
+                    result = classify(path, statuses=(status,))
+                    self.assertEqual(result["needs_windows_desktop"], "true")
+                    self.assertEqual(result["needs_desktop_package"], "true")
+                    self.assertEqual(result["needs_windows_package"], str("nsis" in path).lower())
+                    self.assertEqual(result["needs_full_native"], "false")
+                    self.assertEqual(result["needs_macos"], "false")
+                    if "download_pinned" in path:
+                        self.assertIn("pinned-ci-inputs", result["categories"])
+
     def test_windows_upgrade_mapping_retains_platform_context_risks(self) -> None:
         for path in (
             "crates/webcodex-environment/src/upgrade.rs",
