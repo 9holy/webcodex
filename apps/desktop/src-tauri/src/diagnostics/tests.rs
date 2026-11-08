@@ -5,10 +5,16 @@ fn continuation_failure_retains_only_closed_categories_and_not_remote_error_text
     let mut detail = json!({"activity":[{"meaningful":true, "tool_name":"finish_coding_task", "status":"failed", "started_at_ms":1, "ended_at_ms":2,
         "failure":{"outcome":"call_failed", "reason":"session_mismatch", "error_kind":"PRIVATE_CODE", "message":"PRIVATE_EXCEPTION", "password":"PRIVATE_PASSWORD"}}]});
     let summary = continuation(&detail, 10).unwrap();
-    assert_eq!(summary["failure"], json!({"outcome":"call_failed", "reason":"session_mismatch"}));
+    assert_eq!(
+        summary["failure"],
+        json!({"outcome":"call_failed", "reason":"session_mismatch"})
+    );
     assert!(!summary.to_string().contains("PRIVATE"));
     detail["activity"][0]["failure"]["reason"] = json!("PRIVATE_REASON");
-    assert_eq!(continuation(&detail, 10).unwrap()["failure"]["reason"], "details_unavailable");
+    assert_eq!(
+        continuation(&detail, 10).unwrap()["failure"]["reason"],
+        "details_unavailable"
+    );
     detail["activity"][0]["failure"]["outcome"] = json!("PRIVATE_OUTCOME");
     assert!(continuation(&detail, 10).unwrap().get("failure").is_none());
     detail["activity"][0]["failure"] = json!({"outcome":"rejected", "reason":"missing_scope"});
@@ -24,7 +30,10 @@ fn continuation_timeout_retains_uncertain_outcome_without_claiming_execution_fai
             "failure":{"outcome":"outcome_unknown", "reason":"timeout", "execution_state":"outcome_unknown"}}]});
         let summary = continuation(&detail, 10).unwrap();
         assert_eq!(summary["execution"], "failed");
-        assert_eq!(summary["failure"], json!({"outcome":"outcome_unknown", "reason":"timeout"}));
+        assert_eq!(
+            summary["failure"],
+            json!({"outcome":"outcome_unknown", "reason":"timeout"})
+        );
         assert_ne!(summary["failure"]["outcome"], "execution_failed");
     }
 }
@@ -34,10 +43,16 @@ fn public_project_resources_follow_the_compiled_publisher_and_keep_upstream_cred
     let publisher = webcodex_core::build_info::RELEASE_REPOSITORY;
     for (resource, suffix) in [
         (ResourceKind::Github, ""),
-        (ResourceKind::Documentation, "/blob/main/docs/DESKTOP_RUNTIME_COMPATIBILITY.md"),
+        (
+            ResourceKind::Documentation,
+            "/blob/main/docs/DESKTOP_RUNTIME_COMPATIBILITY.md",
+        ),
         (ResourceKind::ReportIssue, "/issues/new"),
         (ResourceKind::Contributing, "/blob/main/CONTRIBUTING.md"),
-        (ResourceKind::DesktopDevelopment, "/blob/main/docs/DESKTOP_DEVELOPMENT.md"),
+        (
+            ResourceKind::DesktopDevelopment,
+            "/blob/main/docs/DESKTOP_DEVELOPMENT.md",
+        ),
         (ResourceKind::Releases, "/releases"),
         (ResourceKind::ReleaseNotes, "/releases/latest"),
     ] {
@@ -49,7 +64,11 @@ fn public_project_resources_follow_the_compiled_publisher_and_keep_upstream_cred
         ResourceKind::UpstreamProject.external_url().as_deref(),
         Some("https://github.com/yyjeqhc/webcodex")
     );
-    for resource in [ResourceKind::AppData, ResourceKind::RuntimeDirectory, ResourceKind::RuntimeConsole] {
+    for resource in [
+        ResourceKind::AppData,
+        ResourceKind::RuntimeDirectory,
+        ResourceKind::RuntimeConsole,
+    ] {
         assert!(resource.external_url().is_none());
     }
 }
@@ -234,43 +253,65 @@ fn report_and_bundle_include_only_explicit_safe_projections() {
         crate::activity::ActivityLevel::Info,
         "private-message-canary",
     );
-    let value = report(
-        &snapshot,
-        &runtime,
-        Some(&runner),
-        None,
-        &trace,
-        &activity.snapshot(),
-        json!({"supported":false}),
-    );
     let configuration = diagnostic_configuration_fixture();
-    let bytes = support_zip(&value, &configuration).unwrap();
-    let text = String::from_utf8_lossy(&bytes);
-    for private in [
-        "private-token-canary",
-        "private-header-canary",
-        "private-env-canary",
-        "private-caps-canary",
-        "private-stdout-canary",
-        "private-source-canary",
-        "private-message-canary",
+    for (reason, expected_reason) in [
+        ("unsupported_resource", "unsupported_resource"),
+        ("capability_unavailable", "capability_unavailable"),
+        ("runtime_error", "runtime_error"),
+        ("private-reason-canary", "details_unavailable"),
     ] {
-        assert!(!text.contains(private), "leaked {private}");
+        let detail = json!({"activity":[{"meaningful":true, "tool_name":"run_shell", "status":"failed", "ended_at_ms":2,
+            "failure":{"outcome":"rejected", "reason":reason, "error_kind":"private-code-canary", "message":"private-failure-canary"},
+            "output":{"password":"private-result-canary"}}]});
+        let value = report(
+            &snapshot,
+            &runtime,
+            Some(&runner),
+            continuation(&detail, 10),
+            &trace,
+            &activity.snapshot(),
+            json!({"supported":false}),
+        );
+        assert_eq!(
+            value["last_webcodex_call"]["failure"],
+            json!({"outcome":"rejected", "reason":expected_reason})
+        );
+        let markdown = report_markdown(&value);
+        let bytes = support_zip(&value, &configuration).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        for output in [markdown.as_str(), text.as_ref()] {
+            assert!(output.contains(&format!("\"reason\": \"{expected_reason}\"")));
+            for private in [
+                "private-token-canary",
+                "private-header-canary",
+                "private-env-canary",
+                "private-caps-canary",
+                "private-stdout-canary",
+                "private-source-canary",
+                "private-message-canary",
+                "private-code-canary",
+                "private-failure-canary",
+                "private-result-canary",
+                "private-reason-canary",
+            ] {
+                assert!(!output.contains(private), "leaked {private}");
+            }
+        }
+        assert!(text.contains("diagnostic-report.json"));
+        assert!(text.contains("activity-safe.json"));
+        assert!(text.contains("diagnostic-configuration.json"));
+        assert!(text.contains("Work laptop"));
+        assert!(text.contains("environment-safe"));
+        assert_eq!(&bytes[..4], &[0x50, 0x4b, 0x03, 0x04]);
+        assert_eq!(
+            &bytes[bytes.len() - 22..bytes.len() - 18],
+            &[0x50, 0x4b, 0x05, 0x06]
+        );
+        assert_eq!(
+            value["computer_use"]["runner_advertised_capabilities"]["computer_observe"],
+            true
+        );
     }
-    assert!(text.contains("diagnostic-report.json"));
-    assert!(text.contains("activity-safe.json"));
-    assert!(text.contains("diagnostic-configuration.json"));
-    assert!(text.contains("Work laptop"));
-    assert!(text.contains("environment-safe"));
-    assert_eq!(&bytes[..4], &[0x50, 0x4b, 0x03, 0x04]);
-    assert_eq!(
-        &bytes[bytes.len() - 22..bytes.len() - 18],
-        &[0x50, 0x4b, 0x05, 0x06]
-    );
-    assert_eq!(
-        value["computer_use"]["runner_advertised_capabilities"]["computer_observe"],
-        true
-    );
 }
 
 #[test]

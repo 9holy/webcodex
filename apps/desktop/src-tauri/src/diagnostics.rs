@@ -432,16 +432,40 @@ fn bounded_code(value: Option<&Value>) -> Option<String> {
 fn continuation_failure(value: Option<&Value>) -> Option<Value> {
     let value = value?;
     let outcome = value.get("outcome")?.as_str()?;
-    if !matches!(outcome, "rejected" | "execution_failed" | "outcome_unknown" | "call_failed") {
+    if !matches!(
+        outcome,
+        "rejected" | "execution_failed" | "outcome_unknown" | "call_failed"
+    ) {
         return None;
     }
     let reason = match value.get("reason").and_then(Value::as_str) {
-        Some(reason @ ("missing_scope" | "access_denied" | "host_review_required"
-            | "session_read_only" | "session_closed" | "session_missing" | "session_expired"
-            | "session_mismatch" | "session_unavailable" | "project_unavailable"
-            | "invalid_input" | "runner_unavailable" | "approval_changed" | "ssh_authentication"
-            | "ssh_host_key" | "ssh_unavailable" | "provider_unavailable" | "execution_error"
-            | "timeout" | "result_unconfirmed" | "stale_state" | "details_unavailable")) => reason,
+        Some(
+            reason @ ("missing_scope"
+            | "access_denied"
+            | "host_review_required"
+            | "session_read_only"
+            | "session_closed"
+            | "session_missing"
+            | "session_expired"
+            | "session_mismatch"
+            | "session_unavailable"
+            | "project_unavailable"
+            | "invalid_input"
+            | "runner_unavailable"
+            | "unsupported_resource"
+            | "capability_unavailable"
+            | "runtime_error"
+            | "approval_changed"
+            | "ssh_authentication"
+            | "ssh_host_key"
+            | "ssh_unavailable"
+            | "provider_unavailable"
+            | "execution_error"
+            | "timeout"
+            | "result_unconfirmed"
+            | "stale_state"
+            | "details_unavailable"),
+        ) => reason,
         _ => "details_unavailable",
     };
     // Support exports carry only these two closed classifications. In particular,

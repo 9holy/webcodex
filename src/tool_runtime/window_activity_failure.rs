@@ -31,6 +31,9 @@ pub(crate) enum CallFailureReason {
     ProjectUnavailable,
     InvalidInput,
     RunnerUnavailable,
+    UnsupportedResource,
+    CapabilityUnavailable,
+    RuntimeError,
     ApprovalChanged,
     SshAuthentication,
     SshHostKey,
@@ -89,6 +92,10 @@ fn safe_kind(value: Option<&str>) -> Option<&'static str> {
             "runner_disconnected",
             "runner_unavailable_recovering",
             "coding_agent_runner_unavailable",
+            "unsupported_resource",
+            "capability_unavailable",
+            "agent_capability_unavailable",
+            "runtime_error",
             "stale_coding_agent_permission",
             "coding_agent_permission_not_pending",
             "coding_agent_permission_response_conflict",
@@ -151,6 +158,9 @@ fn reason(kind: Option<&str>) -> CallFailureReason {
             | "runner_unavailable_recovering"
             | "coding_agent_runner_unavailable",
         ) => RunnerUnavailable,
+        Some("unsupported_resource") => UnsupportedResource,
+        Some("capability_unavailable" | "agent_capability_unavailable") => CapabilityUnavailable,
+        Some("runtime_error") => RuntimeError,
         Some(
             "stale_coding_agent_permission"
             | "coding_agent_permission_not_pending"
@@ -315,6 +325,52 @@ mod tests {
                 .unwrap();
         assert_eq!(post_execution.outcome, CallFailureOutcome::CallFailed);
         assert!(project_call_failure("success", &metadata("permission_denied", None)).is_none());
+    }
+
+    #[test]
+    fn known_shell_rejection_codes_preserve_reason_without_changing_execution_evidence() {
+        for (kind, expected) in [
+            (
+                "unsupported_resource",
+                CallFailureReason::UnsupportedResource,
+            ),
+            (
+                "capability_unavailable",
+                CallFailureReason::CapabilityUnavailable,
+            ),
+            (
+                "agent_capability_unavailable",
+                CallFailureReason::CapabilityUnavailable,
+            ),
+            ("runtime_error", CallFailureReason::RuntimeError),
+        ] {
+            for (state, outcome) in [
+                (Some("not_started"), CallFailureOutcome::Rejected),
+                (Some("outcome_unknown"), CallFailureOutcome::OutcomeUnknown),
+                (None, CallFailureOutcome::CallFailed),
+            ] {
+                let failure = project_call_failure(
+                    "failed",
+                    &WindowActivityFailureMetadata {
+                        failure_kind: Some(kind.into()),
+                        execution_state: state.map(str::to_string),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                assert_eq!(failure.failure_kind, Some(kind));
+                assert_eq!(failure.reason, expected);
+                assert_eq!(failure.outcome, outcome);
+            }
+        }
+        let unknown = project_call_failure(
+            "failed",
+            &metadata("private_unknown_failure", Some("not_started")),
+        )
+        .unwrap();
+        assert_eq!(unknown.outcome, CallFailureOutcome::Rejected);
+        assert_eq!(unknown.reason, CallFailureReason::DetailsUnavailable);
+        assert_eq!(unknown.error_kind, None);
     }
 
     #[test]

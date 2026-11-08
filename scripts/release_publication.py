@@ -20,11 +20,13 @@ from pathlib import Path
 
 if __package__:
     from . import collect_release_bundle as collector
+    from . import release_platform_scope as release_scope
 else:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import collect_release_bundle as collector
+    import release_platform_scope as release_scope
 
 PACKAGE = "@yyjeqhc/webcodex"
 NPM_REGISTRY = "https://registry.npmjs.org/"
@@ -630,6 +632,10 @@ def _load_state(path: Path) -> dict:
             required.add("include_runtime_installers")
     elif schema_version != 1:
         raise PublicationError("unsupported release-build state schema")
+    if "platform_scope" in value:
+        if schema_version != BUILD_STATE_SCHEMA_VERSION or value["platform_scope"] != "windows":
+            raise PublicationError("release-build platform scope is invalid")
+        required.add("platform_scope")
     if set(value) != required:
         raise PublicationError("release-build state fields do not match the supported schema")
     if value.get("kind") != "release-build":
@@ -642,6 +648,10 @@ def _load_state(path: Path) -> dict:
         value["include_runtime_installers"] = False
     if type(value["include_runtime_installers"]) is not bool or (value["include_runtime_installers"] and not value["include_unified_installers"]):
         raise PublicationError("Runtime installer selection requires Full selection and must be boolean")
+    if value.get("platform_scope", "all") == "windows" and (
+        not value["include_unified_installers"] or value["include_runtime_installers"]
+    ):
+        raise PublicationError("Windows delivery requires Full installers without Linux Runtime installers")
     value["schema_version"] = BUILD_STATE_SCHEMA_VERSION
     tag = collector.validate_expected_tag(str(value.get("tag", "")))
     source = collector.normalize_source_sha(str(value.get("source_sha", "")))
@@ -687,9 +697,16 @@ def _remote_annotated_tag_source(client: collector.GitHubClient, tag: str) -> st
         raise PublicationError("annotated tag target SHA is invalid") from exc
 
 
-def _post_build_dispatch(client: collector.GitHubClient, tag: str, request_id: str, *, include_unified_installers: bool = False, include_runtime_installers: bool = False) -> None:
+def _post_build_dispatch(client: collector.GitHubClient, tag: str, request_id: str, *, include_unified_installers: bool = False, include_runtime_installers: bool = False, platform_scope: str = "all") -> None:
+    try:
+        release_scope.validate(platform_scope)
+    except ValueError as exc:
+        raise PublicationError("release-build platform scope is invalid") from exc
+    if platform_scope == "windows" and (not include_unified_installers or include_runtime_installers):
+        raise PublicationError("Windows delivery requires Full installers without Linux Runtime installers")
     url = client.api_url(f"/actions/workflows/{BUILD_WORKFLOW_FILE}/dispatches")
     inputs = {"tag": tag, "request_id": request_id}
+    inputs.update(release_scope.metadata(platform_scope))
     if include_unified_installers:
         inputs["include_unified_installers"] = True
     if include_runtime_installers:
@@ -807,11 +824,18 @@ def start_build(
     resolve_secs: int,
     include_unified_installers: bool = False,
     include_runtime_installers: bool = False,
+    platform_scope: str = "all",
 ) -> tuple[dict, int]:
+    try:
+        release_scope.validate(platform_scope)
+    except ValueError as exc:
+        raise PublicationError("release-build platform scope is invalid") from exc
     if not isinstance(include_unified_installers, bool):
         raise PublicationError("release-build unified installer selection must be boolean")
     if type(include_runtime_installers) is not bool or (include_runtime_installers and not include_unified_installers):
         raise PublicationError("Runtime installer selection requires explicit Full selection")
+    if platform_scope == "windows" and (not include_unified_installers or include_runtime_installers):
+        raise PublicationError("Windows delivery requires Full installers without Linux Runtime installers")
     source = collector.normalize_source_sha(source_sha)
     release_tag = collector.validate_expected_tag(tag)
     if resolve_secs < 0 or resolve_secs > 120:
@@ -845,9 +869,12 @@ def start_build(
         "run_conclusion": None,
         "last_observed_at": None,
     }
+    state.update(release_scope.metadata(platform_scope))
     _write_state(state_path, state)
     try:
-        _post_build_dispatch(client, release_tag, request_id, include_unified_installers=include_unified_installers, include_runtime_installers=include_runtime_installers)
+        _post_build_dispatch(client, release_tag, request_id, include_unified_installers=include_unified_installers,
+                             include_runtime_installers=include_runtime_installers,
+                             **release_scope.metadata(platform_scope))
     except DispatchRejected:
         state["dispatch_state"] = "rejected"
         _write_state(state_path, state)
@@ -912,13 +939,14 @@ def _read_release_build(bundle_dir: Path) -> dict:
     return value
 
 
-def verify_bundle(bundle_dir: Path, repo: str, *, require_unified_installers: bool = False, require_runtime_installers: bool = False) -> dict:
+def verify_bundle(bundle_dir: Path, repo: str, *, require_unified_installers: bool = False, require_runtime_installers: bool = False, platform_scope: str = "all") -> dict:
     root = bundle_dir.absolute()
     metadata = _read_release_build(root)
     try:
+        release_scope.require_metadata(metadata, platform_scope)
         tag = collector.validate_expected_tag(str(metadata.get("tag", "")))
         source = collector.normalize_source_sha(str(metadata.get("source_sha", "")))
-    except collector.CollectionError as exc:
+    except (collector.CollectionError, ValueError) as exc:
         raise PublicationError("release-build.json has invalid tag/source") from exc
     run_id = metadata.get("workflow_run_id")
     archive_stem = metadata.get("archive_stem")
@@ -934,6 +962,7 @@ def verify_bundle(bundle_dir: Path, repo: str, *, require_unified_installers: bo
             artifact_name=f"{archive_stem}-bundle",
             require_unified_installers=require_unified_installers,
             require_runtime_installers=require_runtime_installers,
+            **release_scope.metadata(platform_scope),
         )
     except collector.CollectionError as exc:
         raise PublicationError(str(exc)) from exc
@@ -1046,16 +1075,26 @@ def _github_asset_digest(asset: dict) -> str:
     return digest
 
 
-def expected_draft_asset_names(summary: dict) -> set[str]:
+def expected_draft_asset_names(summary: dict, *, platform_scope: str = "all") -> set[str]:
     """Canonical public asset allowlist shared by upload and draft verification."""
+    try:
+        release_scope.require_metadata(summary, platform_scope)
+    except ValueError as exc:
+        raise PublicationError("retained bundle platform scope is invalid") from exc
+    if platform_scope == "windows" and (summary.get("runtime_manifest") is None
+                                         or "installer_artifacts" not in summary):
+        raise PublicationError("Windows delivery requires Runtime metadata and both Full installers")
     expected_files = {"SHA256SUMS"}
     if summary.get("runtime_manifest") is not None:
         expected_files.add("webcodex-release-manifest.json")
-    expected_files.update(f"{summary['archive_stem']}-{platform}.tar.gz" for platform in collector.PLATFORMS)
+    expected_files.update(f"{summary['archive_stem']}-{platform}.tar.gz"
+                          for platform in release_scope.platforms(platform_scope, collector.PLATFORMS))
     installer_artifacts = summary.get("installer_artifacts")
     if "installer_artifacts" in summary:
-        targets = set(collector.INSTALLER_TARGETS)
+        targets = set(release_scope.installers(platform_scope, collector.INSTALLER_TARGETS))
         if "installer_manifest_v2" in summary:
+            if platform_scope == "windows":
+                raise PublicationError("Windows delivery cannot contain Linux Runtime installers")
             targets.update(collector.runtime_contract.RUNTIME_TARGETS)
             expected_files.add("manifest-v2.json")
         if not isinstance(installer_artifacts, dict) or set(installer_artifacts) != targets:
@@ -1064,7 +1103,8 @@ def expected_draft_asset_names(summary: dict) -> set[str]:
         expected_files.update(item["filename"] for item in installer_artifacts.values())
         expected_files.update(item["source_manifest_filename"] for item in installer_artifacts.values())
     desktop_artifacts = summary.get("desktop_artifacts")
-    desktop_platforms = collector.primary_desktop_platforms_for_version(str(summary["version"]))
+    desktop_platforms = release_scope.platforms(platform_scope,
+        collector.primary_desktop_platforms_for_version(str(summary["version"])))
     if not isinstance(desktop_artifacts, dict) or set(desktop_artifacts) != set(desktop_platforms):
         raise PublicationError("retained bundle Desktop artifact summary is invalid")
     for platform in desktop_platforms:
@@ -1075,9 +1115,11 @@ def expected_draft_asset_names(summary: dict) -> set[str]:
     return expected_files
 
 
-def verify_draft_assets(*, repo: str, bundle_dir: Path, timeout: float, require_unified_installers: bool = False, require_runtime_installers: bool = False) -> dict:
+def verify_draft_assets(*, repo: str, bundle_dir: Path, timeout: float, require_unified_installers: bool = False, require_runtime_installers: bool = False, platform_scope: str = "all") -> dict:
     bundle = bundle_dir.absolute()
-    summary = verify_bundle(bundle, repo, require_unified_installers=require_unified_installers, require_runtime_installers=require_runtime_installers)
+    summary = verify_bundle(bundle, repo, require_unified_installers=require_unified_installers,
+                            require_runtime_installers=require_runtime_installers,
+                            **release_scope.metadata(platform_scope))
     if summary.get("build_kind") != "release":
         raise PublicationError("draft verification requires a real release bundle")
     tag = str(summary["tag"])
@@ -1096,7 +1138,7 @@ def verify_draft_assets(*, repo: str, bundle_dir: Path, timeout: float, require_
     assets = release.get("assets")
     if not isinstance(assets, list) or len(assets) > 33:
         raise PublicationError("GitHub draft asset listing is malformed or too large")
-    expected_files = expected_draft_asset_names(summary)
+    expected_files = expected_draft_asset_names(summary, **release_scope.metadata(platform_scope))
     by_name: dict[str, dict] = {}
     for asset in assets:
         if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):

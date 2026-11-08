@@ -275,3 +275,147 @@ fn writer_policy_understands_inheritance_and_rejects_uninterpreted_allow_aces() 
     invalid.descriptor = " ".repeat(MAX_DESCRIPTOR + 1);
     assert!(validate(&invalid).is_err());
 }
+
+#[test]
+fn owner_rights_only_names_an_admitted_program_owner() {
+    let user = current_account().unwrap().identity;
+    for owner in [
+        user.as_str(),
+        ADMINISTRATORS,
+        "S-1-5-18",
+        "S-1-5-21-1-2-3-1001",
+    ] {
+        let owner_sddl = if owner == ADMINISTRATORS {
+            "BA"
+        } else if owner == "S-1-5-18" {
+            "SY"
+        } else {
+            owner
+        };
+        for (directory, flags) in [(false, ""), (true, "OICI"), (true, "OICIIO")] {
+            let snapshot = WindowsProgramSecurity {
+                owner_identity: owner.into(),
+                descriptor: format!("O:{owner_sddl}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;{flags};FA;;;OW)"),
+                dacl_protected: true,
+            };
+            validate(&snapshot).unwrap();
+            assert_eq!(
+                check_writers(&snapshot, &user, directory).is_ok(),
+                owner == user.as_str() || owner == ADMINISTRATORS
+            );
+            // An understood owner-relative entry cannot excuse another writer.
+            for extra in ["(A;;FW;;;BU)", "(A;;FA;;;S-1-5-21-1-2-3-1001)"] {
+                let mut foreign_writer = snapshot.clone();
+                foreign_writer.descriptor.push_str(extra);
+                validate(&foreign_writer).unwrap();
+                assert!(check_writers(&foreign_writer, &user, directory).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn inherited_owner_rights_survives_native_program_recovery() {
+    let directory = std::env::var_os("LOCALAPPDATA").expect("native per-user directory");
+    let temp = tempfile::Builder::new()
+        .prefix("webcodex-owner-rights-recovery-")
+        .tempdir_in(directory)
+        .unwrap();
+    let user = current_account().unwrap().identity;
+    let default_owner = token_owner().unwrap();
+    assert!(default_owner == user || default_owner == ADMINISTRATORS);
+
+    // Match the Windows 0700 directory's owner-relative, inheritable DACL.
+    // Only this test-owned parent is changed; no production ACL is repaired.
+    let text: Vec<u16> = "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;OW)"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let mut descriptor = null_mut();
+    assert_ne!(
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                text.as_ptr(),
+                1,
+                &mut descriptor,
+                null_mut(),
+            )
+        },
+        0
+    );
+    let descriptor = Local(descriptor);
+    let mut acl = null_mut();
+    let mut present = 0;
+    let mut defaulted = 0;
+    assert_ne!(
+        unsafe { GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut acl, &mut defaulted) },
+        0
+    );
+    assert_ne!(present, 0);
+    assert!(!acl.is_null());
+    let parent = open(temp.path(), true).unwrap();
+    assert_eq!(
+        unsafe {
+            SetSecurityInfo(
+                parent.as_raw_handle().cast(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                null_mut(),
+                null_mut(),
+                acl,
+                null_mut(),
+            )
+        },
+        0
+    );
+    drop(parent);
+    drop(descriptor);
+
+    let runtime = temp.path().join("webcodex-runtime");
+    std::fs::create_dir(&runtime).unwrap();
+    for path in [temp.path(), runtime.as_path()] {
+        let snapshot = capture(path).unwrap();
+        assert!(
+            snapshot.owner_identity == default_owner,
+            "directory owner changed"
+        );
+        assert!(snapshot.descriptor.contains(";;;OW)"));
+        check_writers(&snapshot, &user, true).unwrap();
+    }
+    for name in ["webcodex", "webcodex-server", "webcodex-runner", "WebCodex"] {
+        let parent = if name == "WebCodex" {
+            temp.path()
+        } else {
+            runtime.as_path()
+        };
+        let original = parent.join(format!("{name}.exe"));
+        std::fs::write(&original, b"original owner-relative program").unwrap();
+        let snapshot = capture(&original).unwrap();
+        assert!(
+            snapshot.owner_identity == default_owner,
+            "program owner changed"
+        );
+        assert!(!snapshot.dacl_protected);
+        assert!(snapshot.descriptor.contains(";;;OW)"));
+        check_writers(&snapshot, &user, false).unwrap();
+        let recovered = parent.join(format!("{name}-recovery.exe"));
+        let mut remaining = SNAPSHOT_LIMIT;
+        copy_bounded_with(&original, &mut remaining, || {
+            create_recovery_file(&recovered, &snapshot)
+        })
+        .unwrap();
+        restore(&recovered, &snapshot).unwrap();
+        assert!(
+            capture(&recovered).unwrap() == snapshot,
+            "recovered program security changed"
+        );
+        assert!(
+            capture(&original).unwrap() == snapshot,
+            "original program security changed"
+        );
+        assert_eq!(
+            std::fs::read(recovered).unwrap(),
+            b"original owner-relative program"
+        );
+    }
+}

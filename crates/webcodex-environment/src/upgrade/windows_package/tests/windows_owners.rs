@@ -189,6 +189,22 @@ async fn registered_group_owned_child() {
     let authority =
         windows_installation::verify_journal(&f.store, &journal, Purpose::Sealed, false).unwrap();
     let original_security = journal.programs[0].windows_security.as_ref().unwrap();
+    let mut owner_relative = original_security.clone();
+    owner_relative.descriptor = "O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)".into();
+    owner_relative.dacl_protected = true;
+    authority.validate_snapshot(&owner_relative).unwrap();
+    // OWNER RIGHTS does not acquire the original registration's authority.
+    let unbound = ProgramAuthority::new(
+        &journal.record.request.account.identity,
+        &f.runtime,
+        None,
+        Purpose::Sealed,
+    )
+    .unwrap();
+    assert_eq!(
+        unbound.validate_snapshot(&owner_relative).unwrap_err().code,
+        "installer_owner"
+    );
     for extra in [
         "(A;;FW;;;BU)",
         "(A;;FA;;;S-1-5-21-1-2-3-1001)",
@@ -208,7 +224,7 @@ async fn registered_group_owned_child() {
     for owner in ["S-1-5-18", "S-1-5-21-1-2-3-1001"] {
         let mut invalid = original_security.clone();
         invalid.owner_identity = owner.into();
-        invalid.descriptor = format!("O:{owner}D:P(A;;FA;;;SY)(A;;FA;;;BA)");
+        invalid.descriptor = format!("O:{owner}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;OW)");
         invalid.dacl_protected = true;
         assert_eq!(
             authority.validate_snapshot(&invalid).unwrap_err().code,

@@ -35,9 +35,11 @@ INSTALLER_TARGETS = {
 try:
     from . import runtime_installer_manifest as runtime_contract
     from . import prepare_release_metadata as release_metadata
+    from . import release_platform_scope as release_scope
 except ImportError:
     import runtime_installer_manifest as runtime_contract
     import prepare_release_metadata as release_metadata
+    import release_platform_scope as release_scope
 
 BINARIES = ("webcodex", "webcodex-server", "webcodex-runner")
 DESKTOP_PLATFORMS = ("darwin-arm64", "win32-x64", "win32-arm64")
@@ -538,8 +540,15 @@ def _validate_release_manifest(
     installer_files: dict[str, str] | None = None,
     installer_hashes: dict[str, str] | None = None,
     source_manifest_hashes: dict[str, str] | None = None,
+    *, platform_scope: str = "all",
 ) -> None:
-    expected_keys = {"version", "binaries", "artifacts"}
+    try:
+        release_scope.require_metadata(manifest, platform_scope)
+        platforms = release_scope.platforms(platform_scope, PLATFORMS)
+        installer_targets = release_scope.installers(platform_scope, INSTALLER_TARGETS)
+    except ValueError as exc:
+        raise CollectionError(str(exc)) from exc
+    expected_keys = {"version", "binaries", "artifacts", *release_scope.metadata(platform_scope)}
     if "installers" in manifest:
         expected_keys.add("installers")
     if set(manifest) != expected_keys:
@@ -547,9 +556,9 @@ def _validate_release_manifest(
     if manifest.get("version") != version or manifest.get("binaries") != list(BINARIES):
         raise CollectionError("release manifest version/binary list mismatch")
     artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, dict) or set(artifacts) != set(PLATFORMS):
-        raise CollectionError("release manifest does not contain exactly the six platforms")
-    for platform in PLATFORMS:
+    if not isinstance(artifacts, dict) or set(artifacts) != set(platforms):
+        raise CollectionError("release manifest does not contain exactly the reviewed platforms")
+    for platform in platforms:
         item = artifacts.get(platform)
         if not isinstance(item, dict) or set(item) != {"url", "sha256"}:
             raise CollectionError(f"release manifest entry is malformed: {platform}")
@@ -562,9 +571,9 @@ def _validate_release_manifest(
         if installer_files:
             raise CollectionError("release manifest is missing unified installers")
         return
-    if not isinstance(installers, dict) or set(installers) != set(INSTALLER_TARGETS) or not installer_files or not installer_hashes:
-        raise CollectionError("release manifest installer set does not match assembled eight-target installer set")
-    for target, (platform, package_format) in INSTALLER_TARGETS.items():
+    if not isinstance(installers, dict) or set(installers) != set(installer_targets) or not installer_files or not installer_hashes:
+        raise CollectionError("release manifest installer set does not match reviewed installer set")
+    for target, (platform, package_format) in installer_targets.items():
         item = installers.get(target)
         filename = installer_artifact_filename(version, target)
         expected_url = f"https://github.com/{repo}/releases/download/v{version}/{filename}"
@@ -594,7 +603,15 @@ def verify_bundle_directory(
     artifact_name: str,
     require_unified_installers: bool = False,
     require_runtime_installers: bool = False,
+    platform_scope: str = "all",
 ) -> dict:
+    try:
+        platforms = release_scope.platforms(platform_scope, PLATFORMS)
+        full_installer_targets = release_scope.installers(platform_scope, INSTALLER_TARGETS)
+    except ValueError as exc:
+        raise CollectionError(str(exc)) from exc
+    if platform_scope == "windows" and (not require_unified_installers or require_runtime_installers):
+        raise CollectionError("Windows delivery requires complete Windows installers only")
     if not root.is_dir():
         raise CollectionError("assembled bundle directory is missing")
     try:
@@ -606,7 +623,12 @@ def verify_bundle_directory(
             raise CollectionError(f"assembled bundle contains a non-regular entry: {child.name}")
 
     release_build = _read_json(root / "release-build.json", MAX_RELEASE_BUILD_BYTES)
+    try:
+        release_scope.require_metadata(release_build, platform_scope)
+    except ValueError as exc:
+        raise CollectionError(str(exc)) from exc
     required_fields = {
+        *release_scope.metadata(platform_scope),
         "tag",
         "version",
         "source_sha",
@@ -653,11 +675,11 @@ def verify_bundle_directory(
         raise CollectionError("assembled bundle artifact name/archive stem mismatch")
 
     artifacts = release_build.get("artifacts")
-    if not isinstance(artifacts, dict) or set(artifacts) != set(PLATFORMS):
-        raise CollectionError("release-build.json must contain exactly the six platforms")
+    if not isinstance(artifacts, dict) or set(artifacts) != set(platforms):
+        raise CollectionError("release-build.json must contain exactly the reviewed platforms")
     artifact_files: dict[str, str] = {}
     artifact_hashes: dict[str, str] = {}
-    for platform in PLATFORMS:
+    for platform in platforms:
         item = artifacts.get(platform)
         if not isinstance(item, dict) or set(item) != {"filename", "sha256"}:
             raise CollectionError(f"release-build.json artifact entry is malformed: {platform}")
@@ -672,7 +694,7 @@ def verify_bundle_directory(
         artifact_hashes[platform] = digest
 
     desktop_artifacts = release_build.get("desktop_artifacts")
-    desktop_platforms = primary_desktop_platforms_for_version(version)
+    desktop_platforms = release_scope.platforms(platform_scope, primary_desktop_platforms_for_version(version))
     if not isinstance(desktop_artifacts, dict) or set(desktop_artifacts) != set(desktop_platforms):
         raise CollectionError(
             f"release-build.json Desktop artifact set mismatch for {version}: "
@@ -701,17 +723,21 @@ def verify_bundle_directory(
         desktop_hashes[platform] = digest
 
     runtime_manifest = release_build.get("runtime_manifest")
+    if platform_scope == "windows" and runtime_manifest is None:
+        raise CollectionError("Windows delivery is missing its Runtime compatibility manifest")
     if "runtime_manifest" in release_build:
         if build_kind != "release" or not isinstance(runtime_manifest, dict) or set(runtime_manifest) != {"filename", "sha256"}:
             raise CollectionError("malformed Runtime release manifest identity")
         if runtime_manifest.get("filename") != "webcodex-release-manifest.json" or not isinstance(runtime_manifest.get("sha256"), str) or not SHA256_RE.fullmatch(runtime_manifest["sha256"]):
             raise CollectionError("invalid Runtime release manifest identity")
     runtime_selected = "installer_manifest_v2" in release_build
+    if platform_scope == "windows" and runtime_selected:
+        raise CollectionError("Windows delivery cannot contain Linux Runtime installers")
     if require_runtime_installers and not require_unified_installers:
         raise CollectionError("Runtime requirement needs explicit Full requirement")
     if require_runtime_installers and not runtime_selected:
         raise CollectionError("required Runtime installer contract is missing")
-    installer_targets = INSTALLER_TARGETS | (runtime_contract.RUNTIME_TARGETS if runtime_selected else {})
+    installer_targets = full_installer_targets | (runtime_contract.RUNTIME_TARGETS if runtime_selected else {})
     installer_artifacts = release_build.get("installer_artifacts")
     installer_files: dict[str, str] = {}
     installer_hashes: dict[str, str] = {}
@@ -719,7 +745,7 @@ def verify_bundle_directory(
         raise CollectionError("required unified installer contract is missing")
     if "installer_artifacts" in release_build:
         if not isinstance(installer_artifacts, dict) or set(installer_artifacts) != set(installer_targets):
-            raise CollectionError("release-build.json must contain exactly the eight unified installer targets")
+            raise CollectionError("release-build.json must contain exactly the eight unified installer targets" if platform_scope == "all" else "release-build.json must contain exactly the two Windows installer targets")
         for target, (platform, _package_format) in installer_targets.items():
             item = installer_artifacts.get(target)
             runtime = target in runtime_contract.RUNTIME_TARGETS
@@ -744,8 +770,7 @@ def verify_bundle_directory(
     expected_files = {
         "release-build.json",
         "SHA256SUMS",
-        "linux-x64-elf.txt",
-        "linux-arm64-elf.txt",
+        *({"linux-x64-elf.txt", "linux-arm64-elf.txt"} if platform_scope == "all" else set()),
         *artifact_files.values(),
         *desktop_files.values(),
     }
@@ -754,7 +779,7 @@ def verify_bundle_directory(
     if runtime_manifest is not None:
         expected_files.add(runtime_manifest["filename"])
     expected_files.update(installer_files.values())
-    source_manifest_files = {platform: f"webcodex-source-v{version}-{platform}.json" for platform in PLATFORMS if installer_files}
+    source_manifest_files = {platform: f"webcodex-source-v{version}-{platform}.json" for platform in platforms if installer_files}
     if runtime_selected:
         source_manifest_files.update({f"runtime-{platform}": runtime_contract.source_filename(version, platform) for platform in ("linux-x64", "linux-arm64")})
         expected_files.add("manifest-v2.json")
@@ -810,7 +835,7 @@ def verify_bundle_directory(
             validate(_read_json(root / filename, MAX_MANIFEST_BYTES), version)
         except ManifestError as exc:
             raise CollectionError("Runtime release manifest contract is invalid") from exc
-    for platform in PLATFORMS:
+    for platform in platforms:
         filename = artifact_files[platform]
         path = root / filename
         actual = sha256_file(path)
@@ -879,7 +904,7 @@ def verify_bundle_directory(
         if not magic.startswith(expected_magic):
             raise CollectionError(f"unified installer container signature mismatch: {target}")
 
-    for report in ("linux-x64-elf.txt", "linux-arm64-elf.txt"):
+    for report in (("linux-x64-elf.txt", "linux-arm64-elf.txt") if platform_scope == "all" else ()):
         try:
             size = (root / report).stat().st_size
         except OSError as exc:
@@ -893,6 +918,7 @@ def verify_bundle_directory(
             manifest, repo, version, artifact_files, artifact_hashes,
             {k: v for k, v in installer_files.items() if k in INSTALLER_TARGETS} or None,
             {k: v for k, v in installer_hashes.items() if k in INSTALLER_TARGETS} or None, source_manifest_hashes or None,
+            platform_scope=platform_scope,
         )
 
     if runtime_selected:
@@ -912,6 +938,7 @@ def verify_bundle_directory(
                 raise CollectionError("Runtime manifest does not bind retained installers/sources")
 
     return {
+        **release_scope.metadata(platform_scope),
         "tag": expected_tag,
         "version": version,
         "source_sha": expected_source_sha,
@@ -954,6 +981,7 @@ def collect_bundle(
     token: str | None = None,
     require_unified_installers: bool = False,
     require_runtime_installers: bool = False,
+    platform_scope: str = "all",
 ) -> dict:
     if run_id <= 0:
         raise CollectionError("run id must be positive")
@@ -990,6 +1018,7 @@ def collect_bundle(
             artifact_name=artifact["name"],
             require_unified_installers=require_unified_installers,
             require_runtime_installers=require_runtime_installers,
+            platform_scope=platform_scope,
         )
         os.replace(extracted, destination)
     finally:
@@ -1010,6 +1039,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Collect one same-run assembled WebCodex release bundle through the GitHub REST API."
     )
     parser.add_argument("--require-unified-installers", action="store_true")
+    parser.add_argument("--platform-scope", choices=release_scope.SCOPES, default="all")
     parser.add_argument("--require-runtime-installers", action="store_true")
     parser.add_argument("--run-id", type=int, required=True)
     parser.add_argument("--source-sha", required=True)
@@ -1028,6 +1058,7 @@ def main(argv: list[str] | None = None) -> int:
             run_id=args.run_id,
             require_unified_installers=args.require_unified_installers,
             require_runtime_installers=args.require_runtime_installers,
+            platform_scope=args.platform_scope,
             expected_source_sha=args.source_sha,
             expected_tag=args.tag,
             output_dir=args.output_dir,

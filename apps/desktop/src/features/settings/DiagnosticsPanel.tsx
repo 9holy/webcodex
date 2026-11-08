@@ -130,7 +130,9 @@ function DiagnosticsContents({ state, onState, onActivity, onRuntime, onConnecti
     }
   });
   const resourceNames: [DiagnosticResource, string][] = [["app_data", "Open app data directory"], ["server_configuration", "Open Server configuration location"], ["trace_directory", "Open trace directory"], ["runtime_directory", "Open Runtime folder"]];
-  const presentation = error && desktopErrorPresentation(error, t);
+  const presentation = error && (error.code === "support_bundle_dialog_unavailable"
+    ? { title: p("supportSaveDialogTitle"), action: p("supportSaveDialogAction") }
+    : desktopErrorPresentation(error, t));
   const errorCard = presentation && <div className="error-card" role="alert"><strong>{presentation.title}</strong><span>{presentation.action}</span><details><summary>{p("details")}</summary><code>{error?.code}</code></details></div>;
   return <div className="diagnostics-panel" data-webcodex-panel="diagnostics">
     <div className="shell-section-heading"><h2>{p("resolveProblems")}</h2><button type="button" className="secondary-button" disabled={disabled} onClick={() => void act(() => refresh())}>{s("Refresh")}</button></div>
@@ -149,7 +151,16 @@ function DiagnosticsContents({ state, onState, onActivity, onRuntime, onConnecti
         <p className="field-help">{s("The copied report excludes configuration contents. The support bundle adds an allowlisted nonsecret diagnostic configuration snapshot that may include private local paths; review it before sharing. Credentials, raw configuration and project code remain excluded.")}</p>
         <div className="shell-actions"><button type="button" className="secondary-button" disabled={disabled} onClick={() => void act(async valid => { await desktopApi.copyDiagnosticReport(); if (valid()) setNotice("Copied"); })}>{s("Copy diagnostic report")}</button>
           <button type="button" className="secondary-button" disabled={disabled} onClick={() => void act(async valid => {
-            const path = await save({ title: s("Export support bundle"), defaultPath: "webcodex-support.zip", filters: [{ name: "ZIP", extensions: ["zip"] }] });
+            let path: string | null;
+            try {
+              path = await save({ title: s("Export support bundle"), defaultPath: "webcodex-support.zip", filters: [{ name: "ZIP", extensions: ["zip"] }] });
+            } catch {
+              throw {
+                code: "support_bundle_dialog_unavailable",
+                message: "The save dialog could not be opened.",
+                next_action: "Copy the diagnostic report for now, then try exporting again.",
+              } satisfies DesktopError;
+            }
             if (!path || !valid()) return;
             await desktopApi.exportSupportBundle(path); if (valid()) setNotice("Support bundle exported");
           })}>{s("Export support bundle")}</button></div>

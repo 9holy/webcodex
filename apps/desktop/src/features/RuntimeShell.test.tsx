@@ -715,6 +715,84 @@ function settingsDeferred<T>() {
   return { promise, resolve, reject };
 }
 
+describe("Support bundle export", () => {
+  it("uses the selected Windows path and reports success only after the write completes", async () => {
+    const path = "C:\\Users\\Fixture\\Desktop\\诊断 报告.zip";
+    const pending = settingsDeferred<void>();
+    dialog.save.mockResolvedValueOnce(path);
+    api.exportSupportBundle.mockReturnValueOnce(pending.promise);
+    render(wrap(<DiagnosticsPanel state={state} onState={vi.fn()} />));
+    const button = await screen.findByRole("button", { name: "Export support bundle" });
+    fireEvent.click(button);
+    await waitFor(() => expect(api.exportSupportBundle).toHaveBeenCalledExactlyOnceWith(path));
+    expect(dialog.save).toHaveBeenCalledExactlyOnceWith({ title: "Export support bundle", defaultPath: "webcodex-support.zip", filters: [{ name: "ZIP", extensions: ["zip"] }] });
+    expect(button).toBeDisabled();
+    expect(screen.queryByText("Support bundle exported")).not.toBeInTheDocument();
+    await act(async () => pending.resolve());
+    expect(await screen.findByText("Support bundle exported")).toBeVisible();
+    expect(button).toBeEnabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("leaves cancellation silent without starting an export", async () => {
+    dialog.save.mockResolvedValueOnce(null);
+    render(wrap(<DiagnosticsPanel state={state} onState={vi.fn()} />));
+    const button = await screen.findByRole("button", { name: "Export support bundle" });
+    fireEvent.click(button);
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(dialog.save).toHaveBeenCalledOnce();
+    expect(api.exportSupportBundle).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByText("Support bundle exported")).not.toBeInTheDocument();
+  });
+
+  it.each([
+    { locale: "en-US", exportLabel: "Export support bundle", copyLabel: "Copy diagnostic report", title: "Could not open the save dialog", action: "Copy the diagnostic report for now, then try exporting again." },
+    { locale: "zh-CN", exportLabel: "导出诊断包", copyLabel: "复制诊断报告", title: "无法打开保存对话框", action: "可先复制诊断报告，再尝试导出。" },
+  ])("shows a safe localized dialog failure and keeps report copying available in $locale", async ({ locale, exportLabel, copyLabel, title, action }) => {
+    localStorage.setItem("webcodex.desktop.locale", locale);
+    dialog.save.mockRejectedValueOnce("permission denied: C:\\private-fixture\\SECRET_DIALOG_CANARY.zip");
+    render(wrap(<DiagnosticsPanel state={state} onState={vi.fn()} />));
+    const button = await screen.findByRole("button", { name: exportLabel });
+    fireEvent.click(button);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(title);
+    expect(alert).toHaveTextContent(action);
+    expect(alert).toHaveTextContent("support_bundle_dialog_unavailable");
+    expect(document.body).not.toHaveTextContent("private-fixture");
+    expect(document.body).not.toHaveTextContent("SECRET_DIALOG_CANARY");
+    expect(document.body).not.toHaveTextContent("permission denied");
+    expect(api.exportSupportBundle).not.toHaveBeenCalled();
+    expect(button).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: copyLabel }));
+    await waitFor(() => expect(api.copyDiagnosticReport).toHaveBeenCalledOnce());
+    expect(dialog.save).toHaveBeenCalledOnce();
+    expect(api.exportSupportBundle).not.toHaveBeenCalled();
+    fireEvent.click(button);
+    await waitFor(() => expect(dialog.save).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(button).toBeEnabled());
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(api.exportSupportBundle).not.toHaveBeenCalled();
+  });
+
+  it.each(["support_bundle_path_invalid", "support_bundle_file_exists_or_unavailable", "support_bundle_write_unconfirmed"])("preserves the backend %s result without reporting success or retrying", async code => {
+    const path = "C:\\Fixture\\support.zip";
+    dialog.save.mockResolvedValueOnce(path);
+    api.exportSupportBundle.mockRejectedValueOnce({ code, message: "The support bundle could not be written.", next_action: "Choose another destination." });
+    render(wrap(<DiagnosticsPanel state={state} onState={vi.fn()} />));
+    const button = await screen.findByRole("button", { name: "Export support bundle" });
+    fireEvent.click(button);
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(code);
+    expect(alert).not.toHaveTextContent("support_bundle_dialog_unavailable");
+    expect(screen.queryByText("Could not open the save dialog")).not.toBeInTheDocument();
+    expect(screen.queryByText("Support bundle exported")).not.toBeInTheDocument();
+    expect(dialog.save).toHaveBeenCalledOnce();
+    expect(api.exportSupportBundle).toHaveBeenCalledExactlyOnceWith(path);
+    expect(button).toBeEnabled();
+  });
+});
+
 describe("Diagnostics observation and action races", () => {
   const first = { ...state, persistent_environment: "fixture-A" };
   const second = { ...state, persistent_environment: "fixture-B" };

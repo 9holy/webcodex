@@ -24,6 +24,14 @@ on:
         required: false
         default: false
         type: boolean
+      platform_scope:
+        description: Publish all supported platforms or a complete Windows-only release
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - windows
 
 # This workflow only produces candidate bytes and one same-run assembled bundle.
 # It has no release, package, deployment, or repository-write permission. A
@@ -38,6 +46,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   WEBCODEX_RELEASE_REPOSITORY: ${{ github.repository }}
+  RELEASE_PLATFORM_SCOPE: ${{ inputs.platform_scope || 'all' }}
 
 jobs:
   preflight:
@@ -71,6 +80,15 @@ jobs:
           INCLUDE_UNIFIED_INSTALLERS: ${{ inputs.include_unified_installers }}
         run: |
           set -euo pipefail
+          case "$RELEASE_PLATFORM_SCOPE" in
+            all) ;;
+            windows)
+              test "$INCLUDE_UNIFIED_INSTALLERS" = true
+              test "$INCLUDE_RUNTIME_INSTALLERS" = false
+              [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+              ;;
+            *) echo "Unknown release platform scope" >&2; exit 1 ;;
+          esac
           if [ "${INCLUDE_RUNTIME_INSTALLERS:-false}" = true ]; then
             test "$INCLUDE_UNIFIED_INSTALLERS" = true
             [[ "$INPUT_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -222,6 +240,7 @@ jobs:
 
   linux:
     needs: prepare
+    if: inputs.platform_scope != 'windows'
     strategy:
       fail-fast: false
       matrix:
@@ -400,6 +419,7 @@ jobs:
 
   macos:
     needs: prepare
+    if: inputs.platform_scope != 'windows'
     strategy:
       fail-fast: false
       matrix:
@@ -1034,7 +1054,7 @@ jobs:
 
   runtime-native:
     needs: [prepare, linux]
-    if: inputs.include_runtime_installers
+    if: inputs.include_runtime_installers && inputs.platform_scope != 'windows'
     strategy:
       fail-fast: false
       matrix:
@@ -1118,7 +1138,7 @@ jobs:
 
   unified-native:
     needs: [prepare, linux, macos]
-    if: inputs.include_unified_installers
+    if: inputs.include_unified_installers && inputs.platform_scope != 'windows'
     strategy:
       fail-fast: false
       matrix:
@@ -1385,10 +1405,10 @@ jobs:
     if: >-
       always() &&
       needs.prepare.result == 'success' &&
-      needs.linux.result == 'success' &&
-      needs.macos.result == 'success' &&
+      ((inputs.platform_scope == 'windows' && needs.linux.result == 'skipped' && needs.macos.result == 'skipped' && needs.unified-native.result == 'skipped') ||
+       (inputs.platform_scope != 'windows' && needs.linux.result == 'success' && needs.macos.result == 'success')) &&
       needs.windows.result == 'success' &&
-      (!inputs.include_unified_installers || needs.unified-native.result == 'success') &&
+      (inputs.platform_scope == 'windows' || (!inputs.include_unified_installers || needs.unified-native.result == 'success')) &&
       (!inputs.include_runtime_installers || needs.runtime-native.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -1418,7 +1438,13 @@ jobs:
           path: candidate-input
           merge-multiple: true
 
+      - name: Assemble complete Windows-only release bundle
+        if: inputs.platform_scope == 'windows'
+        shell: bash
+        run: python3 scripts/assemble_windows_release.py
+
       - name: Verify and assemble one release bundle
+        if: inputs.platform_scope != 'windows'
         shell: bash
         run: |
           set -euo pipefail
@@ -1813,6 +1839,7 @@ jobs:
               artifact_name=os.environ["ARCHIVE_STEM"] + "-bundle",
               require_unified_installers=os.environ["INCLUDE_UNIFIED_INSTALLERS"] == "true",
               require_runtime_installers=os.environ.get("INCLUDE_RUNTIME_INSTALLERS", "false") == "true",
+              platform_scope=os.environ.get("RELEASE_PLATFORM_SCOPE", "all"),
           )
           PYTHON
 

@@ -114,6 +114,54 @@ export const CALL_FAILURE_MESSAGES: Readonly<Record<string, Translations>> = {
     "Der Runner war nicht verfügbar, als dieser Aufruf ihn benötigte.",
     "Le Runner était indisponible au moment où cet appel en avait besoin."
   ],
+  "The selected execution target does not support these tool options.": [
+    "所选执行目标不支持这些工具选项。",
+    "所選執行目標不支援這些工具選項。",
+    "選択した実行先は、これらのツールオプションをサポートしていません。",
+    "선택한 실행 대상은 이 도구 옵션을 지원하지 않습니다.",
+    "Das gewählte Ausführungsziel unterstützt diese Werkzeugoptionen nicht.",
+    "La cible d’exécution sélectionnée ne prend pas en charge ces options de l’outil."
+  ],
+  "The selected Runner or execution target does not support the requested capability.": [
+    "所选 Runner 或执行目标不支持所请求的能力。",
+    "所選 Runner 或執行目標不支援所要求的能力。",
+    "選択した Runner または実行先は、要求された機能をサポートしていません。",
+    "선택한 Runner 또는 실행 대상은 요청한 기능을 지원하지 않습니다.",
+    "Der gewählte Runner oder das Ausführungsziel unterstützt die angeforderte Funktion nicht.",
+    "Le Runner ou la cible d’exécution sélectionné ne prend pas en charge la fonctionnalité demandée."
+  ],
+  "WebCodex recorded a runtime error for this call.": [
+    "WebCodex 为此次调用记录了运行时错误。",
+    "WebCodex 為此次呼叫記錄了執行階段錯誤。",
+    "WebCodex はこの呼び出しのランタイムエラーを記録しました。",
+    "WebCodex가 이 호출의 런타임 오류를 기록했습니다.",
+    "WebCodex hat für diesen Aufruf einen Laufzeitfehler aufgezeichnet.",
+    "WebCodex a enregistré une erreur d’exécution pour cet appel."
+  ],
+  "Review the tool's requirements for the selected target and correct the unsupported options before preparing another call.": [
+    "检查所选目标对应的工具要求，更正不支持的选项后再准备新的调用。",
+    "檢查所選目標對應的工具要求，更正不支援的選項後再準備新的呼叫。",
+    "選択した実行先に対するツールの要件を確認し、サポートされていないオプションを修正してから、次の呼び出しを準備してください。",
+    "선택한 대상에 대한 도구 요구 사항을 확인하고 지원되지 않는 옵션을 수정한 뒤 새 호출을 준비하세요.",
+    "Prüfen Sie die Werkzeuganforderungen für das gewählte Ziel und korrigieren Sie nicht unterstützte Optionen, bevor Sie einen weiteren Aufruf vorbereiten.",
+    "Vérifiez les exigences de l’outil pour la cible sélectionnée et corrigez les options non prises en charge avant de préparer un nouvel appel."
+  ],
+  "Check the capabilities of the selected Runner and execution target before preparing another call.": [
+    "检查所选 Runner 和执行目标支持的能力，再准备新的调用。",
+    "檢查所選 Runner 與執行目標支援的能力，再準備新的呼叫。",
+    "選択した Runner と実行先がサポートする機能を確認してから、次の呼び出しを準備してください。",
+    "선택한 Runner와 실행 대상이 지원하는 기능을 확인한 뒤 새 호출을 준비하세요.",
+    "Prüfen Sie die unterstützten Funktionen des gewählten Runners und Ausführungsziels, bevor Sie einen weiteren Aufruf vorbereiten.",
+    "Vérifiez les fonctionnalités du Runner et de la cible d’exécution sélectionnés avant de préparer un nouvel appel."
+  ],
+  "Open call diagnostics and review the tool inputs and selected execution target before preparing another call.": [
+    "打开调用诊断，检查工具输入和所选执行目标后再准备新的调用。",
+    "開啟呼叫診斷，檢查工具輸入與所選執行目標後再準備新的呼叫。",
+    "呼び出しの診断を開き、ツールの入力と選択した実行先を確認してから、次の呼び出しを準備してください。",
+    "호출 진단을 열어 도구 입력값과 선택한 실행 대상을 확인한 뒤 새 호출을 준비하세요.",
+    "Öffnen Sie die Aufrufdiagnose und prüfen Sie die Werkzeugeingaben sowie das gewählte Ausführungsziel, bevor Sie einen weiteren Aufruf vorbereiten.",
+    "Ouvrez le diagnostic de l’appel et vérifiez les paramètres de l’outil ainsi que la cible d’exécution sélectionnée avant de préparer un nouvel appel."
+  ],
   "The approval request changed, expired, or was already handled.": [
     "审批请求已变化、过期或已被处理。",
     "核准請求已變更、到期或已處理。",

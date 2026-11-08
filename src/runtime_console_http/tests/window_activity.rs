@@ -1,6 +1,134 @@
 use super::*;
 
 #[tokio::test]
+async fn window_activity_preserves_shell_rejection_codes_from_canonical_telemetry() {
+    use crate::tool_runtime::model_ergonomics_telemetry::ModelErgonomicsTimer;
+
+    let (_tmp, db, runtime) = test_runtime_with_window_db();
+    let auth = test_bootstrap_auth();
+    let client_window = crate::client_window::ClientWindow::for_test("shell-rejection-details");
+    record_window_event_with_activity(
+        &db,
+        &auth,
+        client_window.key(),
+        None,
+        None,
+        1000,
+        "run_shell",
+        true,
+    );
+    // These are actual run_shell admission failures before Project lookup or
+    // Runner dispatch. The test neither starts a command nor changes the gate.
+    let unsupported = runtime
+        .run_shell_with_contract_for_resource(
+            "unselected".into(),
+            "true".into(),
+            Some(60),
+            Some(1),
+            None,
+            None,
+            None,
+            false,
+            Some("remote"),
+            None,
+            None,
+        )
+        .await;
+    let unavailable = runtime
+        .run_shell_with_contract_for_resource(
+            "unselected".into(),
+            "true".into(),
+            Some(121),
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some("remote"),
+            None,
+            None,
+        )
+        .await;
+    let runtime_error = runtime
+        .run_shell_with_contract_for_resource(
+            "unselected".into(),
+            "x".repeat(65_537),
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .await;
+    // The existing Runner capability identity predates the current spelling.
+    let legacy_capability = ToolResult::err_with_output(
+        "PRIVATE_RUNNER_DIAGNOSTIC",
+        json!({"error_kind":"agent_capability_unavailable", "failure_kind":"capability_unavailable", "execution_state":"not_started"}),
+    );
+    for (result, reason, code) in [
+        (unsupported, "unsupported_resource", "unsupported_resource"),
+        (
+            unavailable,
+            "capability_unavailable",
+            "capability_unavailable",
+        ),
+        (runtime_error, "runtime_error", "runtime_error"),
+        (
+            legacy_capability,
+            "capability_unavailable",
+            "agent_capability_unavailable",
+        ),
+    ] {
+        assert!(!result.success);
+        assert_eq!(result.output["execution_state"], "not_started");
+        let mut timer = ModelErgonomicsTimer::start("run_shell").unwrap();
+        timer.capture_canonical_result(&result);
+        let telemetry = timer.finish().record_for_tool_result(&result).unwrap();
+        let summary = json!({"model_ergonomics":telemetry,
+            "output":{"stderr":"PRIVATE_STDERR", "password":"PRIVATE_PASSWORD"}})
+        .to_string();
+        db.conn_for_tests().execute(
+            "UPDATE action_events SET status='failed', duration_ms=1, http_status=200, error_summary='PRIVATE_EXCEPTION', summary_json=?1 WHERE server_trace_id='trace-1000'",
+            [&summary],
+        ).unwrap();
+        let detail = window_for_auth(
+            &runtime,
+            &auth,
+            WindowInput {
+                client_window_key: client_window.key().to_string(),
+                activity_limit: None,
+                session_limit: None,
+                detail_level: WindowDetailLevel::Full,
+            },
+        )
+        .await
+        .unwrap();
+        let value = serde_json::to_value(&detail.activity[0]).unwrap();
+        let failure = &value["failure"];
+        assert_eq!(failure["outcome"], "rejected");
+        assert_eq!(failure["reason"], reason);
+        assert_eq!(failure["execution_state"], "not_started");
+        assert_eq!(
+            failure["error_kind"]
+                .as_str()
+                .or_else(|| failure["failure_kind"].as_str()),
+            Some(code)
+        );
+        assert!(!value.to_string().contains("PRIVATE"));
+        assert!(value.get("error_summary").is_none());
+        let schema =
+            crate::tool_runtime::registry::output_schema_for_tool("read_current_window_activity");
+        let item = &schema["properties"]["output"]["properties"]["events"]["items"];
+        crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&value, item)
+            .unwrap();
+    }
+}
+
+#[tokio::test]
 async fn window_failure_details_project_recorded_codes_without_private_error_payloads() {
     let (_tmp, db, runtime) = test_runtime_with_window_db();
     let auth = test_bootstrap_auth();

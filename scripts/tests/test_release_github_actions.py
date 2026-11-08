@@ -975,6 +975,44 @@ class ReleaseSpecTests(unittest.TestCase):
             actions.validate_request(self.request)
         self.assertEqual(actions.validate_request(self.request, spec=self.spec), self.request)
 
+    def test_windows_scope_is_code_owned_and_build_state_cannot_fall_back_to_all(self):
+        self.request["platform_scope"] = "windows"
+        self.spec = actions.ReleaseSpec(self.request, self.spec.request_path, self.spec.workflow_path)
+        (self.control / self.spec.request_path).write_bytes(actions._json_bytes(self.request))
+        self.assertEqual(self.spec.platform_scope, "windows")
+        self.assertEqual(dict(self.spec.post_workflows), {})
+        self.assertEqual(actions.DEFAULT_RELEASE_SPEC.platform_scope, "all")
+        self.assertEqual(actions.ReleaseSpec(dict(self.request, platform_scope="all"),
+            self.spec.request_path, self.spec.workflow_path).platform_scope, "all")
+        for value in ("linux", None, ["win32-x64"], True):
+            with self.subTest(value=value), self.assertRaises(actions.ReleaseControlError):
+                actions.ReleaseSpec(dict(self.request, platform_scope=value), self.spec.request_path, self.spec.workflow_path)
+        missing = dict(self.request); missing.pop("platform_scope")
+        with self.assertRaises(actions.ReleaseControlError):
+            actions.validate_request(missing, spec=self.spec)
+        controller = self._with_journal()
+        controller.state["checks"]["preflight"] = {"github_only": True}
+        with mock.patch.object(controller, "status_readiness", return_value=0), mock.patch.object(controller, "_verify_tag"):
+            controller.prepare_build()
+        child = controller._child_state("build")
+        self.assertEqual(child["platform_scope"], "windows")
+        child.pop("platform_scope")
+        actions.publication._write_state(controller.state_dir / "build.json", child)
+        with self.assertRaises(actions.ReleaseControlError):
+            controller._child_state("build")
+
+    def test_windows_bundle_summary_cannot_adopt_all_platform_metadata(self):
+        self.spec = actions.ReleaseSpec(dict(self.request, platform_scope="windows"), self.spec.request_path, self.spec.workflow_path)
+        (self.control / self.spec.request_path).write_bytes(actions._json_bytes(dict(self.spec.pinned_request)))
+        controller = self._with_journal()
+        summary = {"platform_scope": "windows", "build_kind": "release", "version": self.request["version"],
+                   "source_sha": self.request["source_sha"], "tag": self.request["tag"], "workflow_run_id": 123}
+        with mock.patch.object(controller, "_child_state", return_value={"run_id": 123}):
+            controller._check_bundle_summary(summary)
+            summary.pop("platform_scope")
+            with self.assertRaises(actions.ReleaseControlError):
+                controller._check_bundle_summary(summary)
+
     def test_spec_snapshots_authority_and_request_json_cannot_change_it(self) -> None:
         self.request["source_sha"] = "e" * 40
         self.assertEqual(self.spec.pinned_request["source_sha"], "c" * 40)

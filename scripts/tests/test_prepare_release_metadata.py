@@ -66,6 +66,92 @@ class PrepareReleaseMetadataInstallerTests(unittest.TestCase):
             *extra,
         ], capture_output=True, text=True)
 
+    def select_windows_inputs(self):
+        self.write_installers()
+        names = set()
+        for platform in ("win32-x64", "win32-arm64"):
+            desktop = metadata.desktop_filename("0.3.0", platform)
+            (self.artifacts / desktop).write_bytes(b"desktop fixture")
+            names.update((metadata.archive_filename("0.3.0", platform), desktop,
+                metadata.installer_filename("0.3.0", f"{platform}-exe"),
+                metadata.source_manifest_filename("0.3.0", platform)))
+        for path in self.artifacts.iterdir():
+            if path.name not in names:
+                path.unlink()
+
+    def test_windows_metadata_is_explicit_and_contains_both_complete_native_sets(self):
+        self.select_windows_inputs()
+        result = self.prepare("--platform-scope", "windows", "--require-unified-installers")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        manifest = json.loads((self.output / "manifest.json").read_text())
+        self.assertEqual(set(manifest), {"platform_scope", "version", "binaries", "artifacts", "installers"})
+        self.assertEqual(manifest["platform_scope"], "windows")
+        self.assertEqual(set(manifest["artifacts"]), {"win32-x64", "win32-arm64"})
+        self.assertEqual(set(manifest["installers"]), {"win32-x64-exe", "win32-arm64-exe"})
+        sums = dict(line.split("  ", 1)[::-1] for line in (self.output / "SHA256SUMS").read_text().splitlines())
+        self.assertEqual(set(sums), {path.name for path in self.artifacts.iterdir()} | {"manifest.json"})
+        for name, digest in sums.items():
+            path = self.output / name if name == "manifest.json" else self.artifacts / name
+            self.assertEqual(digest, metadata.sha256(path))
+
+    def test_windows_metadata_rejects_each_missing_native_input(self):
+        self.select_windows_inputs()
+        for path in list(self.artifacts.iterdir()):
+            with self.subTest(name=path.name):
+                original = path.read_bytes(); path.unlink()
+                result = self.prepare("--platform-scope", "windows", "--require-unified-installers")
+                self.assertNotEqual(result.returncode, 0, path.name)
+                path.write_bytes(original)
+
+    def test_windows_metadata_rejects_non_windows_and_runtime_installer_inputs(self):
+        self.select_windows_inputs()
+        for name in (metadata.installer_filename("0.3.0", "linux-x64-deb"),
+                     metadata.installer_filename("0.3.0", "darwin-arm64-pkg"),
+                     "webcodex-runtime-v0.3.0-linux-x64.deb"):
+            with self.subTest(name=name):
+                path = self.artifacts / name; path.write_bytes(b"!<arch>\nextra")
+                result = self.prepare("--platform-scope", "windows", "--require-unified-installers")
+                self.assertNotEqual(result.returncode, 0)
+                path.unlink()
+
+    def test_windows_metadata_rejects_invalid_scope_or_weakened_requirements(self):
+        self.select_windows_inputs()
+        for options in (("--platform-scope", "windows"),
+                        ("--platform-scope", "windows", "--require-unified-installers", "--require-runtime-installers"),
+                        ("--platform-scope", "linux"), ("--platform-scope", "Windows"), ("--platform-scope", "")):
+            with self.subTest(options=options):
+                self.assertNotEqual(self.prepare(*options).returncode, 0)
+                self.assertFalse((self.output / "manifest.json").exists())
+
+    def test_windows_metadata_keeps_source_and_component_provenance_checks(self):
+        self.select_windows_inputs()
+        path = self.artifacts / metadata.source_manifest_filename("0.3.0", "win32-arm64")
+        original = json.loads(path.read_text())
+        for key, value in (("source_sha", "b" * 40), ("source_workflow_run_id", 124),
+                           ("source_workflow_ref", "foreign/repo/.github/workflows/release-build.yml@refs/tags/v0.3.0")):
+            with self.subTest(key=key):
+                changed = json.loads(json.dumps(original)); changed[key] = value
+                path.write_text(json.dumps(changed))
+                result = self.prepare("--platform-scope", "windows", "--require-unified-installers")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("CI provenance mismatch", result.stderr)
+        for key, value in (("git_commit", "b" * 40), ("git_dirty", True)):
+            with self.subTest(component_key=key):
+                changed = json.loads(json.dumps(original)); changed["artifacts"]["webcodex-runner"]["build_info"][key] = value
+                path.write_text(json.dumps(changed))
+                result = self.prepare("--platform-scope", "windows", "--require-unified-installers")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("component provenance/data format mismatch", result.stderr)
+
+    def test_explicit_all_preserves_default_metadata_bytes(self):
+        self.write_installers()
+        result = self.prepare(); self.assertEqual(result.returncode, 0, result.stderr)
+        original = {name: (self.output / name).read_bytes() for name in ("manifest.json", "SHA256SUMS")}
+        result = self.prepare("--platform-scope", "all")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(original, {name: (self.output / name).read_bytes() for name in original})
+        self.assertNotIn("platform_scope", json.loads(original["manifest.json"]))
+
     def test_generates_canonical_installer_manifest_and_checksums(self):
         self.write_installers()
         result = self.prepare()

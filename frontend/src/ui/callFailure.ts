@@ -39,6 +39,9 @@ const reasons: Record<string, string> = {
   project_unavailable: "The project could not be identified or accessed.",
   invalid_input: "The call's inputs do not satisfy this tool's requirements.",
   runner_unavailable: "The Runner was unavailable when this call needed it.",
+  unsupported_resource: "The selected execution target does not support these tool options.",
+  capability_unavailable: "The selected Runner or execution target does not support the requested capability.",
+  runtime_error: "WebCodex recorded a runtime error for this call.",
   approval_changed: "The approval request changed, expired, or was already handled.",
   ssh_authentication: "SSH authentication or the saved login credentials were unavailable.",
   ssh_host_key: "The SSH server identity could not be confirmed with the saved trust.",
@@ -69,6 +72,9 @@ export function failureNextStepText(failure: CallFailure): string {
     case "session_mismatch": case "project_unavailable": return "Select the intended project and its task session, then ask Chat to use those current identities.";
     case "invalid_input": return "Ask Chat to correct the tool inputs using the current tool definition, then try the corrected call.";
     case "runner_unavailable": return "Check the Runner connection, then refresh the linked job or task session before deciding whether to retry.";
+    case "unsupported_resource": return "Review the tool's requirements for the selected target and correct the unsupported options before preparing another call.";
+    case "capability_unavailable": return "Check the capabilities of the selected Runner and execution target before preparing another call.";
+    case "runtime_error": return "Open call diagnostics and review the tool inputs and selected execution target before preparing another call.";
     case "approval_changed": return "Refresh Coding agents to see the current approval request. A previous decision is not replayed.";
     case "ssh_authentication": return "Open Extensions > SSH resources, check the login method, and test the connection again.";
     case "ssh_host_key": return "Open Extensions > SSH resources and verify the server fingerprint before confirming any changed identity.";

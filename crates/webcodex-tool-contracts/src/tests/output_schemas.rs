@@ -54,6 +54,27 @@ fn current_window_activity_failure_schema_is_optional_bounded_and_content_free()
             "permission_denied",
             "reconcile",
         ),
+        (
+            "rejected",
+            "unsupported_resource",
+            "not_started",
+            "unsupported_resource",
+            "fix_input",
+        ),
+        (
+            "rejected",
+            "capability_unavailable",
+            "not_started",
+            "agent_capability_unavailable",
+            "none",
+        ),
+        (
+            "rejected",
+            "runtime_error",
+            "not_started",
+            "runtime_error",
+            "reobserve",
+        ),
     ] {
         let mut result = legacy.clone();
         result["output"]["events"][0]["failure"] = json!({
