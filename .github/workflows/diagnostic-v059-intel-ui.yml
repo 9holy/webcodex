@@ -1,0 +1,99 @@
+name: Diagnose v0.5.9 Intel Desktop UI
+on:
+  push:
+    branches: [diagnostic/v059-intel-ui]
+permissions:
+  contents: read
+jobs:
+  compare-node:
+    runs-on: macos-15-intel
+    timeout-minutes: 35
+    steps:
+      - name: Checkout immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: fd5ce4e7243837670f808b05d31acf7cd8b26043
+          persist-credentials: false
+      - name: Record host and source
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/intel-ui-diagnostic"
+          { git rev-parse HEAD; uname -a; sw_vers; sysctl hw.ncpu hw.memsize; } | tee "$RUNNER_TEMP/intel-ui-diagnostic/host.txt"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.23.2
+      - name: Install original dependencies
+        run: npm ci --prefix frontend && npm ci --prefix apps/desktop
+      - name: Original Node 22 full-suite baseline
+        id: baseline
+        continue-on-error: true
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          test "$(node --version)" = v22.23.2
+          node --version > "$RUNNER_TEMP/intel-ui-diagnostic/node22-version.txt"
+          npm --version >> "$RUNNER_TEMP/intel-ui-diagnostic/node22-version.txt"
+          set +e
+          node node_modules/vitest/vitest.mjs run --reporter=verbose --reporter=json --outputFile.json="$RUNNER_TEMP/intel-ui-diagnostic/node22.json" 2>&1 | tee "$RUNNER_TEMP/intel-ui-diagnostic/node22.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/intel-ui-diagnostic/node22-exit.txt"
+          exit "$result"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: always() && steps.baseline.outcome != 'skipped'
+        with:
+          node-version: 24.22.1
+      - name: Remove test transform cache only
+        if: always() && steps.baseline.outcome != 'skipped'
+        shell: bash
+        run: |
+          # No dependency reinstall: identical resolved dependency bytes.
+          rm -rf apps/desktop/node_modules/.vite apps/desktop/node_modules/.vite-temp
+      - name: Node 24 full-suite comparison
+        id: comparison
+        if: always() && steps.baseline.outcome != 'skipped'
+        continue-on-error: true
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          test "$(node --version)" = v24.22.1
+          node --version > "$RUNNER_TEMP/intel-ui-diagnostic/node24-version.txt"
+          npm --version >> "$RUNNER_TEMP/intel-ui-diagnostic/node24-version.txt"
+          set +e
+          node node_modules/vitest/vitest.mjs run --reporter=verbose --reporter=json --outputFile.json="$RUNNER_TEMP/intel-ui-diagnostic/node24.json" 2>&1 | tee "$RUNNER_TEMP/intel-ui-diagnostic/node24.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/intel-ui-diagnostic/node24-exit.txt"
+          exit "$result"
+      - name: Restore Node 22 for separate CPU profile
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        if: always() && steps.baseline.outcome != 'skipped'
+        with:
+          node-version: 22.23.2
+      - name: Profile affected UI paths separately from baseline
+        if: always() && steps.baseline.outcome != 'skipped'
+        continue-on-error: true
+        working-directory: apps/desktop
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/intel-ui-diagnostic/profiles"
+          set +e
+          node node_modules/vitest/vitest.mjs run src/App.test.tsx src/features/RuntimeShell.test.tsx -t 'restores state and pending page|offers explicit persistent|joins as a viewer|does not start a duplicate Tunnel|surfaces a failed explicit|six localized' --reporter=verbose --execArgv=--cpu-prof --execArgv="--cpu-prof-dir=$RUNNER_TEMP/intel-ui-diagnostic/profiles" 2>&1 | tee "$RUNNER_TEMP/intel-ui-diagnostic/profile.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/intel-ui-diagnostic/profile-exit.txt"
+          exit "$result"
+      - name: Verify tracked source unchanged
+        if: always()
+        run: git diff --exit-code && git diff --cached --exit-code
+      - name: Upload diagnostics, including failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: intel-ui-node-comparison
+          path: ${{ runner.temp }}/intel-ui-diagnostic/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve failing test outcome
+        if: always()
+        env:
+          BASELINE: ${{ steps.baseline.outcome }}
+          COMPARISON: ${{ steps.comparison.outcome }}
+        run: test "$BASELINE" = success && test "$COMPARISON" = success
