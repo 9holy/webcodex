@@ -1,0 +1,80 @@
+--- a/frontend/src/ui/selectionMotion.ts
++++ b/frontend/src/ui/selectionMotion.ts
+@@ -167,6 +167,9 @@
+       item.toggleAttribute("data-selection-motion-selected", item.matches(selectedSelector));
+       if (variant === "underline") continue;
+       const box = localBox(item);
++      // A zero-size control has no visible label to mirror. Keep its selection
++      // markers and resize observation above so a later reveal rebuilds it.
++      if (box.width <= 0 || box.height <= 0) continue;
+       const computed = view!.getComputedStyle(item);
+       const mirror = doc.createElement("span");
+       mirror.dataset.selectionMotionLabel = "";
+--- a/frontend/test-v2/selection-motion.test.tsx
++++ b/frontend/test-v2/selection-motion.test.tsx
+@@ -45,6 +45,54 @@
+ }
+ 
+ describe("flowing selection motion", () => {
++  it.each([{ width: 0, height: 30 }, { width: 64, height: 0 }, { width: 0, height: 0 }])("defers zero-size visual copies (%o) while retaining selection and observing reveal", async (hiddenSize) => {
++    let notifyResize!: ResizeObserverCallback;
++    const observe = vi.fn(), disconnect = vi.fn();
++    const OriginalResizeObserver = window.ResizeObserver;
++    window.ResizeObserver = class {
++      constructor(callback: ResizeObserverCallback) { notifyResize = callback; }
++      observe = observe;
++      unobserve = vi.fn();
++      disconnect = disconnect;
++    };
++    try {
++      const { group, items, boxes, controller } = fixture();
++      boxes.forEach(box => { Object.assign(box, hiddenSize); });
++      controller.update({ animate: false });
++      const foreground = group.querySelector<HTMLElement>("[data-selection-motion-foreground]")!;
++      expect(foreground.hidden).toBe(true);
++      expect(foreground.querySelectorAll("[data-selection-motion-label]")).toHaveLength(0);
++      expect(items.every(item => item.hasAttribute("data-selection-motion-item"))).toBe(true);
++      expect(observe).toHaveBeenCalledWith(group);
++      items.forEach(item => expect(observe).toHaveBeenCalledWith(item));
++      await act(async () => {
++        items[0].setAttribute("aria-selected", "false");
++        items[1].setAttribute("aria-selected", "true");
++        items[1].textContent = "Revealed translation";
++      });
++      expect(items[1].hasAttribute("data-selection-motion-selected")).toBe(true);
++      expect(items[0].hasAttribute("data-selection-motion-selected")).toBe(false);
++      expect(foreground.children).toHaveLength(0);
++      boxes[1].width = 130; boxes[1].height = 30;
++      await act(async () => {
++        notifyResize([], {} as ResizeObserver);
++        await new Promise(requestAnimationFrame);
++      });
++      expect(foreground.hidden).toBe(false);
++      expect(foreground.querySelectorAll("[data-selection-motion-label]")).toHaveLength(1);
++      expect(foreground.textContent).toBe("Revealed translation");
++      expect(foreground.getAttribute("aria-hidden")).toBe("true");
++      expect(foreground.hasAttribute("inert")).toBe(true);
++      expect(foreground.querySelectorAll("button,input,[id],[role],[tabindex]")).toHaveLength(0);
++      controller.destroy();
++      expect(disconnect).toHaveBeenCalled();
++      expect(group.querySelectorAll("[data-selection-motion-overlay]")).toHaveLength(0);
++      expect(items.every(item => !item.hasAttribute("data-selection-motion-item"))).toBe(true);
++    } finally {
++      window.ResizeObserver = OriginalResizeObserver;
++    }
++  });
++
+   it("moves one rounded underline without copying or inverting labels", () => {
+     const { group, select, animate, setVisual } = fixture({ variant: "underline" });
+     const plate = group.querySelector<HTMLElement>("[data-selection-motion-plate]")!;
+@@ -268,6 +316,10 @@
+     const { group, controller } = fixture();
+     controller.destroy();
+     group.innerHTML = '<label data-active><input name="mode" type="radio" checked/><span>Radio</span></label>';
++    // This assertion concerns a visible mirror, so supply measurable geometry.
++    vi.spyOn(group.querySelector("label")!, "getBoundingClientRect").mockReturnValue(
++      rect({ x: 204, y: 103, width: 64, height: 30 }),
++    );
+     const radios = createSelectionMotion(group, { itemSelector: "label", selectedSelector: "[data-active]" });
+     expect(group.querySelectorAll("input")).toHaveLength(1);
+     expect(group.querySelector("[data-selection-motion-foreground]")!.textContent).toBe("Radio");
