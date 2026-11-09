@@ -1,0 +1,74 @@
+name: Verify candidate selection reveal in Chromium
+on:
+  push:
+    branches: [diagnostic/v059-selection-browser]
+permissions:
+  contents: read
+env:
+  CANDIDATE_SHA: c9e2899c4ee7b7f9a21d50727756b29c5eb64b3d
+jobs:
+  chromium-real-layout:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Validate immutable source selector
+        shell: bash
+        run: '[[ "$CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]'
+      - name: Checkout diagnostic control only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: control
+          persist-credentials: false
+      - name: Checkout exact UI candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.23.2
+      - name: Record source, harness and environment
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/selection-browser"
+          test "$(node --version)" = v22.23.2
+          test "$(git -C source rev-parse HEAD)" = "$CANDIDATE_SHA"
+          test ! -e source/scripts/ui-smoke/selection-hidden-reveal.mjs
+          cp control/.github/diagnostics/selection-hidden-reveal.mjs source/scripts/ui-smoke/selection-hidden-reveal.mjs
+          { git -C source rev-parse HEAD; git -C control rev-parse HEAD; node --version; npm --version; uname -a; sha256sum source/scripts/ui-smoke/selection-hidden-reveal.mjs source/frontend/src/ui/selectionMotion.ts source/frontend/src/ui/selectionMotion.css source/frontend/package-lock.json source/scripts/ui-smoke/package-lock.json; } | tee "$RUNNER_TEMP/selection-browser/identity.txt"
+      - name: Install locked dependencies
+        working-directory: source
+        shell: bash
+        run: |
+          set -o pipefail
+          { npm ci --prefix frontend && npm ci --prefix scripts/ui-smoke; } 2>&1 | tee "$RUNNER_TEMP/selection-browser/dependencies.log"
+      - name: Install official Chromium and Linux dependencies
+        working-directory: source/scripts/ui-smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          node node_modules/playwright/cli.js install --with-deps chromium 2>&1 | tee "$RUNNER_TEMP/selection-browser/browser-install.log"
+      - name: Run real-layout hidden and visible regression
+        working-directory: source
+        shell: bash
+        run: |
+          set +e
+          node scripts/ui-smoke/selection-hidden-reveal.mjs 2>&1 | tee "$RUNNER_TEMP/selection-browser/smoke.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/selection-browser/smoke-exit.txt"
+          exit "$result"
+      - name: Verify tracked candidate unchanged
+        if: always()
+        working-directory: source
+        run: git diff --exit-code && git diff --cached --exit-code
+      - name: Preserve reports and failures
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: selection-hidden-reveal-browser
+          path: |
+            ${{ runner.temp }}/selection-browser/
+            source/artifacts/selection-hidden-reveal/
+          if-no-files-found: error
+          retention-days: 14
