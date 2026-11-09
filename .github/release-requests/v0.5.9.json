@@ -1,0 +1,21 @@
+{
+  "ci_run_attempt": 1,
+  "ci_run_id": 1,
+  "evidence_run_attempt": 1,
+  "evidence_run_id": 1,
+  "github_only": true,
+  "include_runtime_installers": false,
+  "include_unified_installers": true,
+  "notes_path": ".github/release-requests/v0.5.9-notes.md",
+  "notes_sha256": "0fd7dc4fa81839c375793ab8a3380ce15fee6e6e93e98caf7a10b207fef3990a",
+  "owner": "9holy",
+  "owner_id": 45361924,
+  "repo": "9holy/webcodex",
+  "repo_id": 1404596174,
+  "schema_version": 1,
+  "source_ref": "release/v0.5.9",
+  "source_sha": "0000000000000000000000000000000000000000",
+  "source_tree": "0000000000000000000000000000000000000000",
+  "tag": "v0.5.9",
+  "version": "0.5.9"
+}
