@@ -167,6 +167,9 @@ export function createSelectionMotion(group: HTMLElement, options: SelectionMoti
       item.toggleAttribute("data-selection-motion-selected", item.matches(selectedSelector));
       if (variant === "underline") continue;
       const box = localBox(item);
+      // A zero-size control has no visible label to mirror. Keep its selection
+      // markers and resize observation above so a later reveal rebuilds it.
+      if (box.width <= 0 || box.height <= 0) continue;
       const computed = view!.getComputedStyle(item);
       const mirror = doc.createElement("span");
       mirror.dataset.selectionMotionLabel = "";
