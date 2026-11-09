@@ -7,6 +7,7 @@ from pathlib import Path
 import tarfile
 import tempfile
 import unittest
+from unittest import mock
 
 from scripts import assemble_windows_release as assembly
 from scripts.tests.test_collect_release_bundle import _archive_bytes, WINDOWS_PLATFORMS
@@ -19,7 +20,8 @@ class WindowsReleaseAssemblyTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.source = self.root / "native-inputs"
         self.source.mkdir()
-        self.version = json.loads((assembly.metadata.ROOT / "npm/webcodex/package.json").read_text())["version"]
+        self.version = getattr(self, "fixed_version", None) or json.loads(
+            (assembly.metadata.ROOT / "npm/webcodex/package.json").read_text())["version"]
         self.identity = dict(repo="9holy/webcodex", version=self.version, source_sha="a" * 40,
             run_id=123, built_at=456,
             workflow_ref=f"9holy/webcodex/.github/workflows/release-build.yml@refs/tags/v{self.version}")
@@ -185,6 +187,39 @@ class WindowsReleaseAssemblyTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             assembly.assemble(self.source, output, **self.identity)
         self.assertEqual({path.name: path.read_bytes() for path in output.iterdir()}, {"retained": b"keep"})
+
+
+class WindowsPrereleaseAssemblyTests(unittest.TestCase):
+    """Keep the real two-architecture rc assembly covered after source bumps."""
+
+    fixed_version = "0.5.9-rc.1"
+    write_public = WindowsReleaseAssemblyTests.write_public
+    assemble = WindowsReleaseAssemblyTests.assemble
+
+    def setUp(self):
+        WindowsReleaseAssemblyTests.setUp(self)
+        package = self.root / "package.json"
+        package.write_text(json.dumps({"version": self.fixed_version}))
+        run = assembly.subprocess.run
+
+        def with_fixture_package(command, **kwargs):
+            # Run the actual metadata producer against this exact versioned
+            # fixture package, without changing the production version fence.
+            return run([*command, "--package-json", str(package)], **kwargs)
+
+        patcher = mock.patch.object(assembly.subprocess, "run", side_effect=with_fixture_package)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_assembles_exact_prerelease_bundle_and_unchanged_native_inputs(self):
+        WindowsReleaseAssemblyTests.test_assembles_exact_dual_architecture_bundle_from_unchanged_native_inputs(self)
+        contract = json.loads((self.output / "webcodex-release-manifest.json").read_text())
+        self.assertEqual(contract["release_version"], self.fixed_version)
+        self.assertEqual(contract["runtime_version"], self.fixed_version)
+        for platform in WINDOWS_PLATFORMS:
+            source = json.loads((self.output / assembly.metadata.source_manifest_filename(self.fixed_version, platform)).read_text())
+            self.assertEqual(source["version"], self.fixed_version)
+            self.assertEqual(source["source_workflow_ref"], self.identity["workflow_ref"])
 
 
 if __name__ == "__main__":

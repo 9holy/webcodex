@@ -29,6 +29,27 @@ class DesktopRuntimeManifestTests(unittest.TestCase):
     def test_different_source_revisions_are_not_a_contract_failure(self):
         self.assertEqual(manifest.from_builds(self.builds(), "0.5.0")["runtime_version"], "0.5.0")
 
+    def test_prerelease_manifest_preserves_exact_version_and_runtime_contract(self):
+        version = "0.5.9-rc.1"
+        builds = [{**info, "version": version} for info in self.builds()]
+        value = manifest.from_builds(builds, version)
+        self.assertEqual(value["release_version"], version)
+        self.assertEqual(value["runtime_version"], version)
+        self.assertEqual(value["desktop_runtime_contract"], {"min_generation": 2, "max_generation": 2})
+        with self.assertRaises(manifest.ManifestError):
+            manifest.validate(value, "0.5.9")
+        builds[0]["version"] = "0.5.9-rc.2"
+        with self.assertRaises(manifest.ManifestError):
+            manifest.from_builds(builds, version)
+
+    def test_invalid_prerelease_versions_do_not_authorize_manifest(self):
+        for version in ("", "0.5.9-", "00.5.9-rc.1", "0.5.9-rc 1", "0.5.9-rc/1", "0.5.9-rc.1\n",
+                        "0.5.9-rc..1", "0.5.9-rc.01", "0.5.9-.rc", "0.5.9-rc.",
+                        "0.5.9-rc_1", "https://example.invalid/0.5.9-rc.1", "../0.5.9-rc.1"):
+            builds = [{**info, "version": version} for info in self.builds()]
+            with self.subTest(version=version), self.assertRaises(manifest.ManifestError):
+                manifest.from_builds(builds, version)
+
     def test_disjoint_or_invalid_ranges_fail_release_validation(self):
         for ranges in [((1, 1), (2, 2), (2, 2)), ((0, 1), (1, 1), (1, 1)), ((3, 1), (1, 1), (1, 1))]:
             with self.subTest(ranges=ranges), self.assertRaises(manifest.ManifestError):
