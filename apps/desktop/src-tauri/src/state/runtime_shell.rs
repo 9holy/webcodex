@@ -521,6 +521,7 @@ impl DesktopCore {
             drop(port);
             self.snapshot.readiness.server = ServerReadiness::Starting;
             self.publish_snapshot();
+            ensure_desktop_server_defaults(env, DesktopServerDefaults::Restart)?;
             let command = self.adapter.local_server_command(env)?;
             self.spawn_owned(ProcessKey::LocalServer, command, false, cancellation)
                 .await?;

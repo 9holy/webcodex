@@ -90,7 +90,10 @@ ChatGPT host-file rewrites authenticated by the explicitly allowed local tunnel
 credential can be trusted by setting
 `WEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT=true`. Starting with v0.4.2,
 WebCodex Desktop writes this value by default for the local loopback Server it owns; an
-existing explicit value is never overwritten. The exception works only when
+existing explicit value is never overwritten. Starting a saved Desktop-owned local
+Server also backfills this attachment setting if missing, including after an
+upgrade; it does not select a different MCP profile or replace explicit `false`.
+The exception works only when
 `WEBCODEX_ADDR` resolves to loopback and the authenticated credential is either a
 normal user API token or the configured Server bootstrap credential used by the
 Desktop regular Tunnel. The regular Tunnel derives that credential from the local
