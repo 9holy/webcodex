@@ -16,6 +16,92 @@ impl Drop for Fixture {
     }
 }
 
+#[tokio::test]
+async fn desktop_server_defaults_backfill_on_saved_runtime_resume_without_reconfiguring() {
+    use crate::webcodex::cli::{ResolvedBinaries, ResolvedBinarySource};
+    use sha2::{Digest, Sha256};
+
+    for explicit_false in [false, true] {
+        let fixture = Fixture::new();
+        let data = &fixture.0;
+        let env = data.join("webcodex.env");
+        let runner = data.join("runner.toml");
+        let token = data.join("token");
+        let runner_content = "client_id = 'mini'\nserver_url = 'http://127.0.0.1:1'\n";
+        let mut original =
+            "WEBCODEX_ADDR=127.0.0.1:1\nWEBCODEX_TOKEN=fixture-only\nCUSTOM_SETTING=preserved"
+                .to_string();
+        if explicit_false {
+            original.push_str("\nWEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT=false\n");
+        }
+        std::fs::write(&env, &original).unwrap();
+        std::fs::write(&runner, runner_content).unwrap();
+        std::fs::write(&token, "fixture-only").unwrap();
+        let mut core = DesktopCore::new(data.clone(), data.join("resources")).unwrap();
+        core.config.topology = Some(RuntimeTopology {
+            experience: Experience::Full,
+            server: ServerTopology::Local,
+            runner: RunnerTopology::Local,
+            exposure: Exposure::None,
+            enrollment: Enrollment::ManagedPairing,
+        });
+        core.config.runtime = Some(StoredRuntime {
+            server_url: "http://127.0.0.1:1".into(),
+            server_env_file: Some(env.clone()),
+            runner_config: Some(runner.clone()),
+            user_token_file: Some(token.clone()),
+            runner_client_id: Some("mini".into()),
+            project_id: None,
+            runtime_project_id: None,
+        });
+        core.save_config().await.unwrap();
+        let mut core = DesktopCore::new(data.clone(), data.join("resources")).unwrap();
+        let binary = |name: &str| data.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+        let mut hash = Sha256::new();
+        hash.update(data.to_string_lossy().as_bytes());
+        // Non-executable fixtures make observation and spawn fail immediately;
+        // exercise the real resume path without starting a Server or Runner.
+        for name in ["webcodex", "webcodex-server", "webcodex-runner"] {
+            let path = binary(name);
+            std::fs::write(&path, b"non-executable fixture").unwrap();
+            hash.update(
+                crate::runtime_selection::file_digest(&path)
+                    .unwrap()
+                    .as_bytes(),
+            );
+        }
+        core.adapter.activate_binaries(
+            Default::default(),
+            ResolvedBinaries {
+                directory: data.clone(),
+                webcodex: binary("webcodex"),
+                server: binary("webcodex-server"),
+                runner: binary("webcodex-runner"),
+                version: "fixture".into(),
+                git_commit: "fixture".into(),
+                source: ResolvedBinarySource::Bundled,
+                builds: vec![],
+                fingerprint: format!("{:x}", hash.finalize()),
+            },
+        );
+        let expected = if explicit_false {
+            original
+        } else {
+            format!("{original}\nWEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT=true\n")
+        };
+        for _ in 0..2 {
+            let error = core
+                .resume_saved_runtime(&CancellationContext::never())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, "process_start_failed");
+            assert_eq!(std::fs::read_to_string(&env).unwrap(), expected);
+        }
+        assert_eq!(std::fs::read_to_string(&runner).unwrap(), runner_content);
+        assert_eq!(std::fs::read_to_string(&token).unwrap(), "fixture-only");
+    }
+}
+
 // A real CLI transport with closed stdin and captured output; the fixture only
 // supports observation. Any login, activation, or process start fails the test.
 #[cfg(unix)]

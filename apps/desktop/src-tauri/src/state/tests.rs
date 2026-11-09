@@ -13,7 +13,7 @@ mod tests {
         )
         .unwrap();
 
-        ensure_desktop_server_defaults(&env_file).unwrap();
+        ensure_desktop_server_defaults(&env_file, DesktopServerDefaults::Configure).unwrap();
         let once = std::fs::read_to_string(&env_file).unwrap();
         assert!(once.contains("WEBCODEX_TOKEN=secret\n"));
         assert!(once.contains("WEBCODEX_MCP_HOST_PROFILE=direct\n"));
@@ -29,7 +29,7 @@ mod tests {
             1
         );
 
-        ensure_desktop_server_defaults(&env_file).unwrap();
+        ensure_desktop_server_defaults(&env_file, DesktopServerDefaults::Configure).unwrap();
         assert_eq!(std::fs::read_to_string(&env_file).unwrap(), once);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -45,7 +45,7 @@ mod tests {
         )
         .unwrap();
 
-        ensure_desktop_server_defaults(&env_file).unwrap();
+        ensure_desktop_server_defaults(&env_file, DesktopServerDefaults::Configure).unwrap();
         let content = std::fs::read_to_string(&env_file).unwrap();
         assert!(content.contains("WEBCODEX_MCP_HOST_PROFILE=direct\n"));
         assert!(!content.contains("WEBCODEX_MCP_HOST_BUDGET_SECS="));
@@ -61,7 +61,7 @@ mod tests {
         let env_file = dir.join("webcodex.env");
         std::fs::write(&env_file, "WEBCODEX_ADDR=127.0.0.1:12345").unwrap();
 
-        ensure_desktop_server_defaults(&env_file).unwrap();
+        ensure_desktop_server_defaults(&env_file, DesktopServerDefaults::Configure).unwrap();
         let content = std::fs::read_to_string(&env_file).unwrap();
         assert!(content.starts_with("WEBCODEX_ADDR=127.0.0.1:12345\n"));
         assert!(content.contains("WEBCODEX_MCP_HOST_PROFILE=host_code_mode\n"));

@@ -1198,6 +1198,8 @@ impl LegacyOwner for DesktopCore {
                 .server_env_file
                 .as_deref()
                 .ok_or_else(|| migration_diagnostic(migration_target_conflict()))?;
+            ensure_desktop_server_defaults(env, DesktopServerDefaults::Restart)
+                .map_err(migration_diagnostic)?;
             let command = self
                 .adapter
                 .local_server_command(env)

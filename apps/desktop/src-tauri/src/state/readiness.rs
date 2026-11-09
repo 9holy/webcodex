@@ -28,7 +28,16 @@ fn readiness_timeout_error(
 // The Server loads its env file only into keys that are absent from the process
 // environment, so the effective precedence remains built-in defaults < this
 // config file < explicit environment variables.
-fn ensure_desktop_server_defaults(path: &Path) -> DesktopResult<()> {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DesktopServerDefaults {
+    Configure,
+    Restart,
+}
+
+fn ensure_desktop_server_defaults(
+    path: &Path,
+    defaults: DesktopServerDefaults,
+) -> DesktopResult<()> {
     let metadata = std::fs::metadata(path).map_err(|error| {
         desktop_state_unavailable("Desktop could not inspect its local Server configuration")
             .with_details(serde_json::json!({ "io_kind": format!("{:?}", error.kind()) }))
@@ -51,21 +60,25 @@ fn ensure_desktop_server_defaults(path: &Path) -> DesktopResult<()> {
         })
     };
     let mut additions = Vec::new();
-    let has_host_profile = has_key("WEBCODEX_MCP_HOST_PROFILE");
-    if !has_host_profile {
-        additions.push(format!(
-            "WEBCODEX_MCP_HOST_PROFILE={DESKTOP_MCP_HOST_PROFILE}"
-        ));
-        if !has_key("WEBCODEX_MCP_HOST_BUDGET_SECS") {
+    // A saved Runtime keeps its effective profile; only explicit setup selects
+    // packaging defaults for MCP ergonomics.
+    if defaults == DesktopServerDefaults::Configure {
+        let has_host_profile = has_key("WEBCODEX_MCP_HOST_PROFILE");
+        if !has_host_profile {
             additions.push(format!(
-                "WEBCODEX_MCP_HOST_BUDGET_SECS={DESKTOP_MCP_HOST_BUDGET_SECS}"
+                "WEBCODEX_MCP_HOST_PROFILE={DESKTOP_MCP_HOST_PROFILE}"
+            ));
+            if !has_key("WEBCODEX_MCP_HOST_BUDGET_SECS") {
+                additions.push(format!(
+                    "WEBCODEX_MCP_HOST_BUDGET_SECS={DESKTOP_MCP_HOST_BUDGET_SECS}"
+                ));
+            }
+        }
+        if !has_key("WEBCODEX_MCP_COMPACT_SCHEMAS") {
+            additions.push(format!(
+                "WEBCODEX_MCP_COMPACT_SCHEMAS={DESKTOP_MCP_COMPACT_SCHEMAS}"
             ));
         }
-    }
-    if !has_key("WEBCODEX_MCP_COMPACT_SCHEMAS") {
-        additions.push(format!(
-            "WEBCODEX_MCP_COMPACT_SCHEMAS={DESKTOP_MCP_COMPACT_SCHEMAS}"
-        ));
     }
     if !has_key("WEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT") {
         additions.push(format!(

@@ -256,7 +256,9 @@ Connection: Tunnel + No authentication；临时 WebCodex Bearer 留在本机，�
 对于通过 OpenAI Secure Tunnel 访问的长期 **loopback-only** Server，可以设置
 `WEBCODEX_MCP_TRUST_LOOPBACK_API_TOKEN_FILE_IMPORT=true`，从而信任由明确允许的本地 tunnel
 credential 认证的 ChatGPT host-file rewrite。WebCodex Desktop 自 v0.4.2 起会为它自己管理的
-本机 loopback Server 默认写入该值；已有显式配置不会被覆盖。该例外仅在 `WEBCODEX_ADDR`
+本机 loopback Server 默认写入该值；已有显式配置不会被覆盖。恢复启动已保存的
+Desktop 自有本机 Server 时（包括升级后），也会补齐缺失的附件设置，但不会切换
+原有 MCP profile，也不会覆盖显式的 `false`。该例外仅在 `WEBCODEX_ADDR`
 解析为 loopback，且当前 credential 是普通 user API token，或 Desktop regular Tunnel 使用的
 已配置 Server bootstrap credential 时生效。regular Tunnel 从本机 `WEBCODEX_TOKEN` 配置派生
 该 credential，并只把它注入原生 Tunnel 的固定本地 Authorization；用户不应复制或暴露该

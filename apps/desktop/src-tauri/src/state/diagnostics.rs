@@ -452,6 +452,7 @@ impl DesktopCore {
         self.adapter.ensure_binaries(cancellation).await?;
         runtime_selection::verify_resolved_files(self.adapter.binaries()?).await?;
         let env = self.managed_server_environment()?;
+        ensure_desktop_server_defaults(&env, DesktopServerDefaults::Restart)?;
         let command = self.adapter.local_server_command(&env)?;
         self.supervisor
             .lock()

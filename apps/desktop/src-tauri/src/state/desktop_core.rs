@@ -367,6 +367,7 @@ impl DesktopCore {
                 .ok_or_else(|| {
                     desktop_state_unavailable("The saved Server configuration is unavailable")
                 })?;
+            ensure_desktop_server_defaults(env, DesktopServerDefaults::Restart)?;
             let command = self.adapter.local_server_command(env)?;
             self.spawn_owned(ProcessKey::LocalServer, command, false, cancellation)
                 .await?;
@@ -591,7 +592,7 @@ impl DesktopCore {
         cancellation.check()?;
 
         let mut server_url = if env_file.is_file() {
-            ensure_desktop_server_defaults(&env_file)?;
+            ensure_desktop_server_defaults(&env_file, DesktopServerDefaults::Configure)?;
             desktop_server_url_from_env(&env_file)?
         } else {
             let listen = reserve_loopback_address()?;
@@ -599,7 +600,7 @@ impl DesktopCore {
                 .adapter
                 .init_local_server(&listen, &data_dir, &env_file, cancellation)
                 .await?;
-            ensure_desktop_server_defaults(&env_file)?;
+            ensure_desktop_server_defaults(&env_file, DesktopServerDefaults::Configure)?;
             status.probe_url
         };
         let mut server_deadline = Deadline::after(SERVER_READY_TIMEOUT);
