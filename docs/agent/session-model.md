@@ -922,7 +922,18 @@ validation rejects the call before kernel entry or the MCP hard dispatch timeout
 prevents kernel completion. Batch items do not create generic invocation records,
 and hidden/internal helpers do not start this telemetry.
 
-The current durable generic record uses `schema_version = 12`. Older telemetry rows
+MCP surface-admission refusals are a bounded exception: the exact gate can write
+an explicit rejected-request record before runtime or sidecar execution, without
+starting a tool timer or fabricating a registry entry. Registered model-visible
+names retain their canonical identity; unregistered names use the fixed
+`unknown` / `mcp_request` labels. These records retain only closed invocation
+shape facts, `direct_route_denied` or `unknown_tool`, and the proven
+`execution_state=not_started`, never caller names, argument values or error prose.
+HTTP status, missing results and later failures cannot establish this fact;
+unknown-effect failures retain their existing uncertainty. Historical rows are
+not backfilled.
+
+The current durable generic record uses `schema_version = 13`. Older telemetry rows
 remain naturally queryable and are not migrated or backfilled. The current
 record contains:
 

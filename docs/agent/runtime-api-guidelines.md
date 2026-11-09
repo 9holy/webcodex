@@ -81,6 +81,8 @@ an alternate public import adapter.
 Test canonical parser/catalog/schema consistency, generated follow-ups, Direct
 and Gateway dispatch, App-only admission, OAuth/Project/permission boundaries,
 file-provenance rejection and authenticated operational routes. Verify retired
-routes and tool names fail closed in every build configuration. Test description
+routes and tool names fail closed in every build configuration, except for the
+[named direct MCP Host-import adapter](../compatibility-policy.md#named-cached-chatgpt-file-import-descriptor).
+Keep its canonical admission and trust parity covered. Test description
 and serialized schema budgets against the maintained MCP surface, not a retired
 300-character/30-operation importer limit.

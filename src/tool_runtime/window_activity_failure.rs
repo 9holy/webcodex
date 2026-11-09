@@ -86,6 +86,7 @@ fn safe_kind(value: Option<&str>) -> Option<&'static str> {
             "invalid_task_outputs",
             "invalid_params",
             "unknown_tool",
+            "direct_route_denied",
             "agent_offline",
             "agent_unavailable",
             "runner_unavailable",
@@ -148,6 +149,7 @@ fn reason(kind: Option<&str>) -> CallFailureReason {
             | "invalid_task_outputs"
             | "invalid_params"
             | "unknown_tool"
+            | "direct_route_denied"
             | "invalid_coding_agent_permission_option",
         ) => InvalidInput,
         Some(
@@ -312,6 +314,22 @@ mod tests {
                 project_call_failure("failed", &metadata).unwrap().outcome,
                 CallFailureOutcome::OutcomeUnknown
             );
+        }
+    }
+
+    #[test]
+    fn surface_rejection_reasons_require_independent_nonexecution_evidence() {
+        for kind in ["unknown_tool", "direct_route_denied"] {
+            for (state, outcome) in [
+                (Some("not_started"), CallFailureOutcome::Rejected),
+                (Some("outcome_unknown"), CallFailureOutcome::OutcomeUnknown),
+                (None, CallFailureOutcome::CallFailed),
+            ] {
+                let failure = project_call_failure("failed", &metadata(kind, state)).unwrap();
+                assert_eq!(failure.reason, CallFailureReason::InvalidInput);
+                assert_eq!(failure.outcome, outcome);
+                assert_eq!(failure.error_kind, Some(kind));
+            }
         }
     }
 

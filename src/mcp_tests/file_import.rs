@@ -1,5 +1,11 @@
 use super::*;
 
+#[path = "file_import/cached_descriptor.rs"]
+mod cached_descriptor;
+
+const MCP_IMPORT_CALL_NAMES: [&str; 2] =
+    ["import_host_files", "import_conversation_files_to_project"];
+
 const MCP_IMPORT_TRUSTED_REDIRECT: &str = "https://chatgpt.example/connector/oauth/webcodex-test";
 
 struct McpImportStartupEnvGuard {
@@ -353,6 +359,28 @@ async fn complete_mcp_import_save(
     assert_eq!(begin["expected_bytes"], expected_bytes.len());
     let path = begin["path"].as_str().unwrap().to_string();
     let mime_type = begin["mime_type"].as_str().unwrap().to_string();
+    let full_path = std::path::Path::new(request.cwd.as_deref().unwrap()).join(&path);
+    if full_path.exists() && begin["overwrite"] == false {
+        registry
+            .complete(RunnerResultRequest {
+                client_id: "importer".to_string(),
+                runner_instance_id: "inst-import".to_string(),
+                request_id: request.request_id,
+                exit_code: Some(0),
+                stdout: Some(
+                    json!({"path": path, "error": "file exists and overwrite is false"})
+                        .to_string(),
+                ),
+                stderr: None,
+                stdout_truncated: false,
+                stderr_truncated: false,
+                duration_ms: Some(1),
+                error: None,
+            })
+            .await
+            .unwrap();
+        return;
+    }
     let upload_id = "wc_upload_mcp_import_fixture";
     registry
         .complete(RunnerResultRequest {
@@ -436,6 +464,8 @@ async fn complete_mcp_import_save(
             }
             "file_artifact_upload_finish" => {
                 assert_eq!(bytes, expected_bytes);
+                std::fs::create_dir_all(full_path.parent().unwrap()).unwrap();
+                std::fs::write(&full_path, &bytes).unwrap();
                 let sha256 = format!("{:x}", Sha256::digest(&bytes));
                 registry
                     .complete(RunnerResultRequest {
@@ -778,12 +808,15 @@ async fn adaptive_gateway_file_import_preserves_target_aware_host_trust_impl() {
 
 #[test]
 fn oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gate() {
-    run_mcp_import_in_large_stack_test_thread(
-        oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gate_impl,
-    );
+    run_mcp_import_in_large_stack_test_thread(|| async {
+        for name in MCP_IMPORT_CALL_NAMES {
+            oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gate_impl(name)
+                .await;
+        }
+    });
 }
 
-async fn oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gate_impl() {
+async fn oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gate_impl(name: &str) {
     use crate::auth::{OAuth2Verifier, TokenVerifier};
     use sha2::{Digest, Sha256};
 
@@ -834,7 +867,7 @@ async fn oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gat
     let project_tmp = tempfile::tempdir().unwrap();
     let (runtime, registry) = mcp_import_runtime(project_tmp.path(), Some("alice")).await;
     let service = Service::new(build_test_router(config, db, runtime));
-    let agent = tokio::spawn(complete_mcp_import_save(registry, pptx.clone()));
+    let agent = tokio::spawn(complete_mcp_import_save(registry.clone(), pptx.clone()));
     let temporary_url = "https://download.example/temporary-secret-token/stateless-import.pptx";
     let forged_provenance_error = crate::tool_runtime::ToolCall::from_tool_name(
         "import_host_files",
@@ -861,7 +894,7 @@ async fn oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gat
         &token,
         "tools/call",
         mcp_2026_params(json!({
-            "name": "import_host_files",
+            "name": name,
             "arguments": {
                 "project": "agent:importer:demo",
                 "openaiFileIdRefs": [{
@@ -898,6 +931,21 @@ async fn oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gat
     assert_eq!(imported["bytes_written"], pptx.len());
     assert_eq!(imported["sha256"], expected_sha256);
     assert_eq!(
+        std::fs::read(project_tmp.path().join(imported["path"].as_str().unwrap())).unwrap(),
+        pptx
+    );
+    assert!(
+        registry
+            .poll(RunnerPollRequest {
+                client_id: "importer".to_string(),
+                runner_instance_id: "inst-import".to_string(),
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "one call must produce exactly one upload, without replay"
+    );
+    assert_eq!(
         crate::tool_runtime::conversation_import::import_test_dns_resolution_count(),
         1
     );
@@ -908,12 +956,14 @@ async fn oauth_mcp_file_import_startup_env_stateless_2026_crosses_provenance_gat
 
 #[test]
 fn loopback_api_token_mcp_file_import_saves_pptx_when_explicitly_enabled() {
-    run_mcp_import_in_large_stack_test_thread(
-        loopback_api_token_mcp_file_import_saves_pptx_when_explicitly_enabled_impl,
-    );
+    run_mcp_import_in_large_stack_test_thread(|| async {
+        for name in MCP_IMPORT_CALL_NAMES {
+            loopback_api_token_mcp_file_import_saves_pptx_when_explicitly_enabled_impl(name).await;
+        }
+    });
 }
 
-async fn loopback_api_token_mcp_file_import_saves_pptx_when_explicitly_enabled_impl() {
+async fn loopback_api_token_mcp_file_import_saves_pptx_when_explicitly_enabled_impl(name: &str) {
     use sha2::{Digest, Sha256};
 
     let _lock = lock_mcp_import_test().await;
@@ -938,7 +988,7 @@ async fn loopback_api_token_mcp_file_import_saves_pptx_when_explicitly_enabled_i
     let mut config = (*test_config(Some("secret"))).clone();
     config.oauth2.trust_loopback_api_token_mcp_file_import = true;
     let service = Service::new(build_test_router(Arc::new(config), db, runtime));
-    let agent = tokio::spawn(complete_mcp_import_save(registry, pptx.clone()));
+    let agent = tokio::spawn(complete_mcp_import_save(registry.clone(), pptx.clone()));
     let temporary_url =
         "https://files.oaiusercontent.com/temporary-secret-token/loopback-import.pptx";
 
@@ -947,7 +997,7 @@ async fn loopback_api_token_mcp_file_import_saves_pptx_when_explicitly_enabled_i
         &token,
         "tools/call",
         json!({
-            "name": "import_host_files",
+            "name": name,
             "arguments": {
                 "project": "agent:importer:demo",
                 "openaiFileIdRefs": [{
@@ -985,6 +1035,21 @@ async fn loopback_api_token_mcp_file_import_saves_pptx_when_explicitly_enabled_i
     assert_eq!(imported["path"], "paper/export/loopback-import.pptx");
     assert_eq!(imported["bytes_written"], pptx.len());
     assert_eq!(imported["sha256"], expected_sha256);
+    assert_eq!(
+        std::fs::read(project_tmp.path().join(imported["path"].as_str().unwrap())).unwrap(),
+        pptx
+    );
+    assert!(
+        registry
+            .poll(RunnerPollRequest {
+                client_id: "importer".to_string(),
+                runner_instance_id: "inst-import".to_string(),
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "one call must produce exactly one upload, without replay"
+    );
     assert_eq!(
         crate::tool_runtime::conversation_import::import_test_dns_resolution_count(),
         1
@@ -1172,10 +1237,14 @@ async fn oauth_mcp_file_import_unallowlisted_active_client_saves_openai_host_fil
 
 #[test]
 fn oauth_mcp_file_import_trusted_client_saves_pptx() {
-    run_mcp_import_in_large_stack_test_thread(oauth_mcp_file_import_trusted_client_saves_pptx_impl);
+    run_mcp_import_in_large_stack_test_thread(|| async {
+        for name in MCP_IMPORT_CALL_NAMES {
+            oauth_mcp_file_import_trusted_client_saves_pptx_impl(name).await;
+        }
+    });
 }
 
-async fn oauth_mcp_file_import_trusted_client_saves_pptx_impl() {
+async fn oauth_mcp_file_import_trusted_client_saves_pptx_impl(name: &str) {
     use sha2::{Digest, Sha256};
 
     let _lock = lock_mcp_import_test().await;
@@ -1201,14 +1270,14 @@ async fn oauth_mcp_file_import_trusted_client_saves_pptx_impl() {
         db.clone(),
         runtime,
     ));
-    let agent = tokio::spawn(complete_mcp_import_save(registry, pptx.clone()));
+    let agent = tokio::spawn(complete_mcp_import_save(registry.clone(), pptx.clone()));
     let temporary_url = "https://download.example/temporary-secret-token/import-test.pptx";
     let (status, body, _) = oauth_mcp_request(
         &service,
         &token,
         "tools/call",
         json!({
-            "name": "import_host_files",
+            "name": name,
             "arguments": {
                 "project": "agent:importer:demo",
                 "openaiFileIdRefs": [{
@@ -1236,6 +1305,21 @@ async fn oauth_mcp_file_import_trusted_client_saves_pptx_impl() {
     assert_eq!(imported["bytes_written"], pptx.len());
     assert_eq!(imported["sha256"], expected_sha256);
     assert_eq!(
+        std::fs::read(project_tmp.path().join(imported["path"].as_str().unwrap())).unwrap(),
+        pptx
+    );
+    assert!(
+        registry
+            .poll(RunnerPollRequest {
+                client_id: "importer".to_string(),
+                runner_instance_id: "inst-import".to_string(),
+            })
+            .await
+            .unwrap()
+            .is_none(),
+        "one call must produce exactly one upload, without replay"
+    );
+    assert_eq!(
         imported["mime_type"],
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     );
@@ -1260,12 +1344,14 @@ async fn oauth_mcp_file_import_trusted_client_saves_pptx_impl() {
 
 #[test]
 fn oauth_mcp_file_import_trusted_download_guards_remain_bounded() {
-    run_mcp_import_in_large_stack_test_thread(
-        oauth_mcp_file_import_trusted_download_guards_remain_bounded_impl,
-    );
+    run_mcp_import_in_large_stack_test_thread(|| async {
+        for name in MCP_IMPORT_CALL_NAMES {
+            oauth_mcp_file_import_trusted_download_guards_remain_bounded_impl(name).await;
+        }
+    });
 }
 
-async fn oauth_mcp_file_import_trusted_download_guards_remain_bounded_impl() {
+async fn oauth_mcp_file_import_trusted_download_guards_remain_bounded_impl(name: &str) {
     let _lock = lock_mcp_import_test().await;
     let (_db_tmp, db) = test_db();
     let user = seed_user(&db, "alice");
@@ -1281,7 +1367,7 @@ async fn oauth_mcp_file_import_trusted_download_guards_remain_bounded_impl() {
     ));
     let temporary_url = "https://download.example/DO-NOT-LOG/trusted-guard.pptx";
     let params = json!({
-        "name": "import_host_files",
+        "name": name,
         "arguments": {
             "project": "agent:importer:demo",
             "openaiFileIdRefs": [{
@@ -1340,12 +1426,14 @@ async fn oauth_mcp_file_import_trusted_download_guards_remain_bounded_impl() {
 
 #[test]
 fn mcp_file_import_unallowlisted_oauth_rejects_non_openai_host_before_dns() {
-    run_mcp_import_in_large_stack_test_thread(
-        mcp_file_import_unallowlisted_oauth_rejects_non_openai_host_before_dns_impl,
-    );
+    run_mcp_import_in_large_stack_test_thread(|| async {
+        for name in MCP_IMPORT_CALL_NAMES {
+            mcp_file_import_unallowlisted_oauth_rejects_non_openai_host_before_dns_impl(name).await;
+        }
+    });
 }
 
-async fn mcp_file_import_unallowlisted_oauth_rejects_non_openai_host_before_dns_impl() {
+async fn mcp_file_import_unallowlisted_oauth_rejects_non_openai_host_before_dns_impl(name: &str) {
     let _lock = lock_mcp_import_test().await;
     let _network = McpImportNetworkOverride::without_download();
     let (_db_tmp, db) = test_db();
@@ -1367,7 +1455,7 @@ async fn mcp_file_import_unallowlisted_oauth_rejects_non_openai_host_before_dns_
     ));
     let temporary_url = "https://download.example/SHOULD-NOT-BE-RESOLVED/file.pptx";
     let params = json!({
-        "name": "import_host_files",
+        "name": name,
         "arguments": {
             "project": "agent:importer:demo",
             "openaiFileIdRefs": [{

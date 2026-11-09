@@ -199,6 +199,53 @@ fn readiness_telemetry(
 }
 
 impl ModelErgonomicsRecord {
+    /// The transport rejected the requested tool surface before any runtime or
+    /// sidecar execution. This is not a timer or an admitted runtime invocation:
+    /// unknown caller names become fixed labels, never fabricated definitions.
+    /// Only the rejecting admission gate may establish this non-execution fact.
+    pub(crate) fn for_surface_rejection(
+        requested_tool: &str,
+        invocation: invocation::InvocationFacts,
+        duration_ms: u64,
+    ) -> Self {
+        let definition =
+            model_visible_tool_definitions().find(|definition| definition.name == requested_tool);
+        Self {
+            schema_version: 13,
+            invocation,
+            instruction_read: None,
+            bootstrap: None,
+            tool_name: definition.map_or("unknown", |definition| definition.name),
+            tool_category: definition.map_or("mcp_request", |definition| definition.category),
+            success: false,
+            duration_ms,
+            serialized_result_bytes: None,
+            output_transfer: None,
+            native_batch: None,
+            error_kind: Some(
+                if definition.is_some() {
+                    "direct_route_denied"
+                } else {
+                    "unknown_tool"
+                }
+                .to_string(),
+            ),
+            failure_kind: None,
+            recovery_kind: None,
+            input_normalization_code: None,
+            execution_state: Some("not_started".to_string()),
+            finish_summary_only: None,
+            edit_surface: None,
+            edit_outcome: None,
+            edit_conflict_kind: None,
+            bulk_exact_outcome: None,
+            bulk_exact_match_total: None,
+            work_on_project: None,
+            job_convergence: None,
+            readiness: None,
+        }
+    }
+
     pub(crate) fn outcome_class(&self) -> &'static str {
         if self.execution_state.as_deref() == Some("outcome_unknown")
             || self.error_kind.as_deref() == Some("dispatch_hard_timeout")
@@ -1137,6 +1184,39 @@ mod tests {
         assert_eq!(record.failure_kind, None);
         assert_eq!(record.recovery_kind, None);
         assert_eq!(record.execution_state, None);
+    }
+
+    #[test]
+    fn surface_rejection_record_does_not_invent_a_tool_or_retain_caller_content() {
+        let private_name = format!("PRIVATE_TOOL_{}", "x".repeat(2048));
+        assert!(ModelErgonomicsTimer::start(&private_name).is_none());
+        let facts = invocation::InvocationFacts::from_arguments(&json!({
+            "private": "PRIVATE_ARGUMENT",
+            "_wc": {"context": ["project.instructions", "PRIVATE_CONTEXT"], "ack": ["PRIVATE_ACK"]}
+        }));
+        let record = ModelErgonomicsRecord::for_surface_rejection(&private_name, facts, 3);
+        assert_eq!(record.tool_name, "unknown");
+        assert_eq!(record.tool_category, "mcp_request");
+        assert_eq!(record.error_kind.as_deref(), Some("unknown_tool"));
+        assert_eq!(record.execution_state.as_deref(), Some("not_started"));
+        assert_eq!(record.duration_ms, 3);
+        assert_eq!(record.serialized_result_bytes, None);
+        assert_eq!(record.invocation.context_unknown_count, 1);
+        assert_eq!(record.invocation.ack_count, 1);
+        assert!(!serde_json::to_string(&record).unwrap().contains("PRIVATE"));
+        // A later/unknown-effect failure never passes through the admission
+        // constructor, even when its error kind happens to be the same.
+        let result = ToolResult::err_with_output(
+            "PRIVATE_ERROR",
+            json!({
+                "error_kind":"direct_route_denied", "execution_state":"outcome_unknown"
+            }),
+        );
+        let mut timer = ModelErgonomicsTimer::start("get_runtime_status").unwrap();
+        timer.capture_canonical_result(&result);
+        let record = timer.finish().record_for_tool_result(&result).unwrap();
+        assert_eq!(record.execution_state.as_deref(), Some("outcome_unknown"));
+        assert_eq!(record.outcome_class(), "unknown");
     }
 
     #[test]

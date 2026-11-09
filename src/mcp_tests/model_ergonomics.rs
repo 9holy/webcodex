@@ -909,3 +909,132 @@ async fn metadata_audit_retains_envelope_context_without_full_payloads() {
         assert!(summary.get("effective_arguments").is_none());
     }
 }
+
+#[tokio::test]
+async fn http_mcp_surface_rejections_retain_bounded_failure_and_nonexecution() {
+    let (_tmp, db) = test_db();
+    let runtime = Arc::new(test_runtime_with_mcp_snapshot(true, false, true));
+    let service = Service::new(build_test_router(
+        test_config(Some("secret")),
+        db.clone(),
+        runtime.clone(),
+    ));
+    for (index, (stateless, requested, canonical, kind)) in [
+        (false, "unavailable_fixture_tool", "unknown", "unknown_tool"),
+        (true, "unavailable_fixture_tool", "unknown", "unknown_tool"),
+        (
+            false,
+            "read_current_window_activity",
+            "read_current_window_activity",
+            "direct_route_denied",
+        ),
+        (
+            true,
+            "read_current_window_activity",
+            "read_current_window_activity",
+            "direct_route_denied",
+        ),
+        (true, "get_goal", "get_goal", "direct_route_denied"),
+        (
+            true,
+            "import_host_files_to_project",
+            "unknown",
+            "unknown_tool",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let audit_id = format!("surface-rejection-{index}");
+        let window_id = format!("surface-rejection-window-{index}");
+        let params = json!({"name":requested,"arguments":{
+            "private":"PRIVATE_ARGUMENT_SENTINEL",
+            "url":"https://private.invalid/PRIVATE_URL?token=PRIVATE_TOKEN"
+        }});
+        let mut request = TestClient::post("http://localhost/mcp")
+            .bearer_auth("secret")
+            .add_header("x-action-session-id", &audit_id, true);
+        let params = if stateless {
+            request = request
+                .add_header(
+                    MCP_PROTOCOL_VERSION_HEADER,
+                    MCP_STATELESS_PROTOCOL_VERSION,
+                    true,
+                )
+                .add_header(MCP_METHOD_HEADER, "tools/call", true)
+                .add_header(MCP_NAME_HEADER, requested, true);
+            let mut params = mcp_2026_params(params);
+            // The Host supplies the stable Window. Bootstrap credentials alone
+            // do not establish a header-scoped Window identity.
+            params["_meta"]["openai/session"] = json!(window_id);
+            params
+        } else {
+            params
+        };
+        let mut response = request
+            .json(&json!({
+                "jsonrpc":"2.0","id":501,"method":"tools/call","params":params
+            }))
+            .send(&service)
+            .await;
+        let status = effective_status(&response);
+        let body: Value = response.take_json().await.unwrap();
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{requested}: {body}");
+        assert_eq!(body["error"]["code"], -32602, "{body}");
+        assert!(body.get("result").is_none(), "{body}");
+        let events = db.list_action_events(&audit_id, 10).unwrap();
+        assert_eq!(events.len(), 1);
+        let summary: Value = serde_json::from_str(&events[0].summary_json).unwrap();
+        let telemetry = &summary["model_ergonomics"];
+        assert_eq!(telemetry["tool_name"], canonical, "{requested}: {summary}");
+        assert_eq!(telemetry["error_kind"], kind, "{summary}");
+        assert_eq!(telemetry["execution_state"], "not_started", "{summary}");
+        assert_eq!(telemetry["success"], false);
+        assert!(telemetry["serialized_result_bytes"].is_null());
+        assert!(summary.to_string().len() < 2048);
+        for forbidden in ["PRIVATE", "private.invalid", "url", "arguments", "output"] {
+            assert!(!summary.to_string().contains(forbidden), "{summary}");
+        }
+        let window_key: Option<String> = db
+            .conn_for_tests()
+            .query_row(
+                "SELECT client_window_key FROM action_events WHERE event_id=?1",
+                [&events[0].event_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        if !stateless {
+            assert!(
+                window_key.is_none(),
+                "no Window was supplied by this legacy caller"
+            );
+            continue;
+        }
+        let window_key = window_key.expect("stateless Host supplied an explicit Window");
+        let rows = db
+            .list_window_activity_events(&window_key, None, 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].failure_metadata.error_kind.as_deref(), Some(kind));
+        assert_eq!(
+            rows[0].failure_metadata.execution_state.as_deref(),
+            Some("not_started")
+        );
+        assert!(!serde_json::to_string(&rows[0]).unwrap().contains("PRIVATE"));
+        let activity =
+            crate::tool_runtime::window_activity_projection::project_visible_window_activity(
+                &runtime,
+                &crate::auth::shared_key_context("secret"),
+                &mut std::collections::HashMap::new(),
+                rows.into_iter().next().unwrap(),
+                Default::default(),
+            )
+            .await;
+        let activity = serde_json::to_value(activity).unwrap();
+        assert_eq!(activity["failure"]["outcome"], "rejected");
+        assert_eq!(activity["failure"]["reason"], "invalid_input");
+        assert_eq!(activity["failure"]["error_kind"], kind);
+        assert_eq!(activity["failure"]["execution_state"], "not_started");
+        assert!(!activity.to_string().contains("PRIVATE"));
+    }
+}
