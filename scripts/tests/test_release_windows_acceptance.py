@@ -17,6 +17,7 @@ from scripts import release_github_actions_v054 as staged
 from scripts import release_github_actions_v055 as v055
 from scripts import release_github_actions_v056 as v056
 from scripts import release_github_actions_v057 as v057
+from scripts import release_github_actions_v058 as v058
 from scripts import release_windows_acceptance as worker
 from scripts import verify_public_release as public
 from scripts import windows_unified_upgrade_smoke as smoke
@@ -171,7 +172,7 @@ class FixedAuthoritySelectionTests(unittest.TestCase):
         return fixed_request(spec)
 
     def test_exact_pairs_select_only_their_code_owned_specification(self):
-        for module in (staged, v055, v056, v057):
+        for module in (staged, v055, v056, v057, v058):
             spec = self.finalized_spec(module)
             with self.subTest(tag=spec.pinned_request["tag"]), mock.patch.object(module, "SPEC", spec):
                 self.assertIs(worker.select_release_spec(self.fixed_request(spec)), spec)
@@ -194,10 +195,10 @@ class FixedAuthoritySelectionTests(unittest.TestCase):
 
     def test_unknown_crossed_or_missing_pairs_have_no_fallback(self):
         spec = self.finalized_spec(v056)
-        modules = (staged, v055, v056, v057)
+        modules = (staged, v055, v056, v057, v058)
         crossed = [(left.SPEC.pinned_request["tag"], right.SPEC.workflow_path)
                    for left in modules for right in modules if left is not right]
-        for tag, workflow in crossed + [("v0.5.8", ".github/workflows/release-publish-v058.yml"),
+        for tag, workflow in crossed + [("v0.5.9", ".github/workflows/release-publish-v059.yml"),
                                        ("v0.5.6", ".github/workflows/ci.yml"),
                                        (None, spec.workflow_path), ("v0.5.6", None)]:
             candidate = self.fixed_request(spec)
@@ -206,7 +207,7 @@ class FixedAuthoritySelectionTests(unittest.TestCase):
                 worker.select_release_spec(candidate)
 
     def test_selection_still_validates_the_complete_request(self):
-        for module in (staged, v055, v056, v057):
+        for module in (staged, v055, v056, v057, v058):
             spec = self.finalized_spec(module)
             for change in (lambda r: r.update(source_sha="f" * 40),
                            lambda r: r.update(repo_id=999),
@@ -235,7 +236,7 @@ class FixedAuthoritySelectionTests(unittest.TestCase):
             self.assertIs(json.loads(report_path.read_bytes())["passed"], False)
 
     def test_constructed_unfinalized_pins_refuse_before_worker_execution(self):
-        for module in (staged, v055, v056, v057):
+        for module in (staged, v055, v056, v057, v058):
             finalized = self.finalized_spec(module)
             for field, value in (("source_sha", "0" * 40), ("source_tree", "0" * 40),
                                  ("ci_run_id", 1), ("evidence_run_id", 1)):
@@ -254,7 +255,7 @@ class FixedAuthoritySelectionTests(unittest.TestCase):
 class V056UpgradeAcceptanceTests(unittest.TestCase):
     def test_fixed_windows_entries_require_five_scenarios_and_two_real_configured_reports(self):
         for spec, expected in ((staged.SPEC, worker.SCENARIOS), (v055.SPEC, worker.SCENARIOS),
-                               (v056.SPEC, worker.V056_SCENARIOS), (v057.SPEC, worker.V056_SCENARIOS)):
+                               (v056.SPEC, worker.V056_SCENARIOS), (v057.SPEC, worker.V056_SCENARIOS), (v058.SPEC, worker.V056_SCENARIOS)):
             req = fixed_request(spec)
             for platform in worker.PLATFORMS:
                 value = report(req, platform)
@@ -378,7 +379,7 @@ class V056UpgradeAcceptanceTests(unittest.TestCase):
         return output, commands, download.call_args_list
 
     def test_native_boundary_runs_five_windows_scenarios_and_only_original_three_for_prior_entries(self):
-        for spec in (staged.SPEC, v055.SPEC, v056.SPEC, v057.SPEC):
+        for spec in (staged.SPEC, v055.SPEC, v056.SPEC, v057.SPEC, v058.SPEC):
             for platform in worker.PLATFORMS:
                 with self.subTest(tag=spec.pinned_request["tag"], platform=platform):
                     output, commands, downloads = self.run_worker(spec, platform)

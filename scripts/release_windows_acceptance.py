@@ -51,7 +51,8 @@ require = control._require
 def scenarios_for_request(request: dict) -> tuple[str, ...]:
     if (request.get("tag"), request.get("controller_workflow")) in {
             ("v0.5.6", ".github/workflows/release-publish-v056.yml"),
-            ("v0.5.7", ".github/workflows/release-publish-v057.yml")}:
+            ("v0.5.7", ".github/workflows/release-publish-v057.yml"),
+            ("v0.5.8", ".github/workflows/release-publish-v058.yml")}:
         return V056_SCENARIOS
     return SCENARIOS
 
@@ -119,6 +120,8 @@ def select_release_spec(request: dict) -> control.ReleaseSpec:
         from scripts.release_github_actions_v056 import SPEC, require_finalized
     elif identity == ("v0.5.7", ".github/workflows/release-publish-v057.yml"):
         from scripts.release_github_actions_v057 import SPEC, require_finalized
+    elif identity == ("v0.5.8", ".github/workflows/release-publish-v058.yml"):
+        from scripts.release_github_actions_v058 import SPEC, require_finalized
     else:
         raise control.ReleaseControlError("Windows 验收请求不属于已审核的固定发布入口。")
     require_finalized(SPEC)

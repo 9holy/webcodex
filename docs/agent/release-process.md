@@ -474,3 +474,18 @@ rules in `AGENTS.md` are satisfied. It does **not** override no-force-push,
 published-tag immutability, no-secrets, no-history-rewrite, or validation gates;
 the only tag-reuse exception is the guarded failed pre-publication reclaim defined
 above.
+
+### Fixed v0.5.8 Windows-only diagnostic follow-up
+
+The [v0.5.8 request](../../.github/release-requests/v0.5.8.json),
+[notes](../../.github/release-requests/v0.5.8-notes.md),
+[code-owned controller](../../scripts/release_github_actions_v058.py), and
+[reviewed publisher](../../.github/workflows/release-publish-v058.yml)
+retain all 28 v0.5.7 staged checkpoints, strict source/CI/readiness identity,
+11 Windows-only assets, two native architectures, five install scenarios each,
+immutable tag, SHA-256 checks, and preservation of all-platform latest.
+The source is fixed at `9d9200a9da040e1c72f8f627b077285cf954d02b` (tree `dcf635afc1b7d5ad669fd756d1f6506f4d72ab17`);
+CI run 42523755555 and readiness run 42523756080 both passed on that source.
+This follow-up fixes the JSON-error classification visibility defect, not an
+unobserved underlying rejection on a particular user's historical Environment.
+It does not relax ownership, ACL, path, registration, or execution authority.

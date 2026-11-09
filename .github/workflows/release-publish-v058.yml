@@ -1,0 +1,425 @@
+name: Publish approved GitHub release v0.5.8
+
+run-name: Publish WebCodex v0.5.8
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/release-requests/v0.5.8.json
+  workflow_dispatch:
+
+# A reviewed request on main authorizes only this repository's fixed release.
+# Candidate workflows retain their existing read-only permissions. Publication
+# uses the repository-scoped Actions installation token; no personal token or npm.
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-approved-github-v0.5.8
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.repository == '9holy/webcodex' &&
+      github.repository_id == '1404596174' &&
+      github.ref == 'refs/heads/main' &&
+      github.actor == '9holy' && github.triggering_actor == '9holy'
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write
+      actions: write
+    defaults:
+      run:
+        shell: bash
+        working-directory: control
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      PYTHONDONTWRITEBYTECODE: '1'
+      CONTROL_REQUEST: ${{ github.workspace }}/control/.github/release-requests/v0.5.8.json
+      SOURCE_ROOT: ${{ github.workspace }}/release-source
+    steps:
+      - name: Checkout reviewed publication controller
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Initialize publication directories
+        run: |
+          printf 'STATE_DIR=%s/webcodex-release-control\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          printf 'BUNDLE_DIR=%s/webcodex-release-bundle\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Read the reviewed fixed source identity
+        id: release-spec
+        run: |
+          python3 - <<'PYTHON' >> "$GITHUB_OUTPUT"
+          import os
+          from pathlib import Path
+          from scripts import release_github_actions as controller
+          from scripts.release_github_actions_v058 import SPEC, require_finalized
+
+          if (SPEC.pinned_request["tag"] != "v0.5.8"
+                  or SPEC.request_path != ".github/release-requests/v0.5.8.json"
+                  or SPEC.workflow_path != ".github/workflows/release-publish-v058.yml"):
+              raise SystemExit("The reviewed publication specification does not match this fixed entry point.")
+          require_finalized(SPEC)
+          request = controller.validate_request(
+              controller._read_json(Path(os.environ["CONTROL_REQUEST"])), spec=SPEC)
+          print("source_sha=" + request["source_sha"])
+          PYTHON
+      - name: Checkout immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ steps.release-spec.outputs.source_sha }}
+          path: release-source
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Validate publication controller contracts
+        run: >-
+          python3 -m unittest scripts.tests.test_release_github_actions
+          scripts.tests.test_release_assembly_publication
+          scripts.tests.test_recover_release_assembly
+          scripts.tests.test_release_checksum_layout
+          scripts.tests.test_release_github_actions_v054
+          scripts.tests.test_release_github_actions_v055
+          scripts.tests.test_release_github_actions_v056
+          scripts.tests.test_release_github_actions_v057
+          scripts.tests.test_release_github_actions_v058
+          scripts.tests.test_release_windows_acceptance
+          scripts.tests.test_verify_public_release
+      - name: Restore this run's verified checkpoint on retry
+        run: >-
+          python3 scripts/release_github_actions_v058.py restore-state --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Verify repository, machine identity and exact source proofs
+        run: >-
+          python3 scripts/release_github_actions_v058.py preflight --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain preflight
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-01-preflight
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Prepare one correlated readiness request
+        run: >-
+          python3 scripts/release_github_actions_v058.py prepare-readiness --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain readiness-intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-02-readiness-intent
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Dispatch the prepared readiness request once
+        run: >-
+          python3 scripts/release_github_actions_v058.py dispatch-readiness --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain readiness-dispatched
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-03-readiness-dispatched
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Require successful exact-source readiness
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 1800))
+          while true; do
+            code=0
+            python3 scripts/release_github_actions_v058.py status-readiness --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR" --wait-secs 0 || code=$?
+            if [ "$code" -eq 0 ]; then break; fi
+            if [ "$code" -ne 2 ]; then exit "$code"; fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "The bound workflow is still pending; retain its identity and resume this run." >&2
+              exit 2
+            fi
+            sleep 45
+          done
+      - name: Retain readiness-verified
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-04-readiness-verified
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Prepare the immutable annotated tag
+        run: >-
+          python3 scripts/release_github_actions_v058.py prepare-tag --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain tag-intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-05-tag-intent
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Create or reconcile the exact annotated tag
+        run: >-
+          python3 scripts/release_github_actions_v058.py create-tag --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain tag-created
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-06-tag-created
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Prepare one formal build request
+        run: >-
+          python3 scripts/release_github_actions_v058.py prepare-build --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain build-intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-07-build-intent
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Dispatch the prepared tagged build once
+        run: >-
+          python3 scripts/release_github_actions_v058.py dispatch-build --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain build-dispatched
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-08-build-dispatched
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Require the exact formal build to succeed
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 14400))
+          while true; do
+            code=0
+            python3 scripts/release_github_actions_v058.py status-build --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR" --wait-secs 0 || code=$?
+            if [ "$code" -eq 0 ]; then break; fi
+            if [ "$code" -ne 2 ]; then exit "$code"; fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "The bound workflow is still pending; retain its identity and resume this run." >&2
+              exit 2
+            fi
+            sleep 45
+          done
+      - name: Retain build-verified
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-09-build-verified
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Collect and verify the same-run installer bundle
+        run: >-
+          python3 scripts/release_github_actions_v058.py collect --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain bundle-verified
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-10-bundle-verified
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Prepare the bound draft Release
+        run: >-
+          python3 scripts/release_github_actions_v058.py prepare-draft --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain draft-intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-11-draft-intent
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Create or reconcile the bound draft
+        run: >-
+          python3 scripts/release_github_actions_v058.py create-draft --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain draft-created
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-12-draft-created
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Freeze the exact public asset list and hashes
+        run: >-
+          python3 scripts/release_github_actions_v058.py prepare-upload --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain upload-intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-13-upload-intent
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Upload retained assets without replacing existing bytes
+        run: >-
+          python3 scripts/release_github_actions_v058.py upload-assets --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain assets-uploaded
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-14-assets-uploaded
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Verify every draft asset digest and size
+        run: >-
+          python3 scripts/release_github_actions_v058.py verify-draft --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain draft-verified
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-15-draft-verified
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Freeze preview publication intent
+        run: >-
+          python3 scripts/release_github_actions_v058.py prepare-preview --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain preview-intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-16-preview-intent
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Publish immutable preview once
+        run: >-
+          python3 scripts/release_github_actions_v058.py publish-preview --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain preview-published
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-17-preview-published
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Verify real public prerelease installer bytes
+        run: >-
+          python3 scripts/release_github_actions_v058.py verify-preview --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain preview-verified
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-18-preview-verified
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Freeze exact native Windows acceptance request
+        run: >-
+          python3 scripts/release_github_actions_v058.py prepare-acceptance --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain acceptance-intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-19-acceptance-intent
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Dispatch the bound read-only Windows workflow once
+        run: >-
+          python3 scripts/release_github_actions_v058.py dispatch-acceptance --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain acceptance-dispatched
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-20-acceptance-dispatched
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Require both native Windows architectures and all five install scenarios
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 5400))
+          while true; do
+            code=0
+            python3 scripts/release_github_actions_v058.py status-acceptance --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR" --wait-secs 0 || code=$?
+            if [ "$code" -eq 0 ]; then break; fi
+            if [ "$code" -ne 2 ]; then exit "$code"; fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "The bound workflow is still pending; retain its identity and resume this run." >&2
+              exit 2
+            fi
+            sleep 45
+          done
+      - name: Retain acceptance-verified
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-21-acceptance-verified
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Freeze stable promotion against successful Windows proof
+        run: >-
+          python3 scripts/release_github_actions_v058.py prepare-promotion --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain promotion-intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-22-promotion-intent
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Promote the same Windows Release while preserving all-platform latest
+        run: >-
+          python3 scripts/release_github_actions_v058.py promote --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain stable-promoted
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-23-stable-promoted
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Verify stable public installer bytes
+        run: >-
+          python3 scripts/release_github_actions_v058.py verify-public --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain public-verified
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-24-public-verified
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Freeze Windows completion with image and Intel marked not applicable
+        run: >-
+          python3 scripts/release_github_actions_v058.py prepare-post --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain post-intent
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-25-post-intent
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Confirm no cross-platform workflows are dispatched
+        run: >-
+          python3 scripts/release_github_actions_v058.py dispatch-post --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
+      - name: Retain post-dispatched
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-26-post-dispatched
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Require Windows public bytes and preserved all-platform latest
+        run: |
+          set -euo pipefail
+          deadline=$((SECONDS + 7200))
+          while true; do
+            code=0
+            python3 scripts/release_github_actions_v058.py status-post --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR" --wait-secs 0 || code=$?
+            if [ "$code" -eq 0 ]; then break; fi
+            if [ "$code" -ne 2 ]; then exit "$code"; fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "The bound workflow is still pending; retain its identity and resume this run." >&2
+              exit 2
+            fi
+            sleep 45
+          done
+      - name: Retain post-verified
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-27-post-verified
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Retain final-state
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-control-v0.5.8-${{ github.run_id }}-${{ github.run_attempt }}-99-final-state
+          path: ${{ runner.temp }}/webcodex-release-control/*.json
+          if-no-files-found: warn
+          retention-days: 90
