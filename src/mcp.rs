@@ -1,4 +1,5 @@
 mod app_registry;
+mod app_resource_diagnostics;
 mod cli;
 #[cfg(test)]
 pub(crate) use cli::parse_call_line_for_test;
@@ -254,46 +255,6 @@ enum McpOutcome {
         body: Value,
         required_scope: Option<&'static str>,
     },
-}
-
-fn log_mcp_computer_app_resource_delivery(
-    uri: &str,
-    protocol_era: &str,
-    ui_capability_present: bool,
-    http_status: u16,
-    mcp_error_code: Option<i64>,
-) {
-    tracing::info!(
-        target: "webcodex::mcp",
-        uri,
-        protocol_era,
-        ui_capability_present,
-        http_status,
-        mcp_error_code = mcp_error_code.unwrap_or(-1),
-        "mcp_computer_app_resource_delivery"
-    );
-}
-
-fn log_mcp_computer_app_resource_outcome(
-    uri: &str,
-    protocol_era: McpProtocolEra,
-    ui_capability_present: bool,
-    outcome: &McpOutcome,
-) {
-    let (http_status, mcp_error_code) = match outcome {
-        McpOutcome::Ok(_) | McpOutcome::ArtifactExportStream { .. } => (200, None),
-        McpOutcome::BadRequest(body) => (400, body["error"]["code"].as_i64()),
-        McpOutcome::NotFound(body) => (404, body["error"]["code"].as_i64()),
-        McpOutcome::Notification => (202, None),
-        McpOutcome::Forbidden { .. } => (403, None),
-    };
-    log_mcp_computer_app_resource_delivery(
-        uri,
-        protocol::era_label(protocol_era),
-        ui_capability_present,
-        http_status,
-        mcp_error_code,
-    );
 }
 
 /// Payload-free measurements of the final MCP tool result, after surface
@@ -668,67 +629,18 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
     guard.set_app_call_id(tools::agent_continuation_app_call_id_from_params(
         &request.params,
     ));
-    let computer_app_resource_uri = if request.method == "resources/read" {
-        request
-            .params
-            .get("uri")
-            .and_then(Value::as_str)
-            .filter(|uri| *uri == app_registry::MCP_COMPUTER_UI_RESOURCE_URI)
-            .map(str::to_string)
-    } else {
-        None
-    };
-    let computer_app_ui_capability_present = resources::request_supports_mcp_apps(&request.params);
-    // Computer App resource delivery is part of gray-card diagnosis, but its
-    // durable projection must remain metadata-only. Never persist App HTML,
-    // screenshot/tool-result content, tool arguments, window titles, or other
-    // request payload fields here.
-    let computer_app_resource_audit = computer_app_resource_uri.as_ref().and_then(|uri| {
-        request.id.as_ref().map(|_| {
-            (
-                ActionAudit::start(req, depot, "/mcp", "resourcesRead"),
-                uri.clone(),
-            )
-        })
-    });
-    let record_computer_app_resource_audit =
-        |protocol_era: &str, status: StatusCode, mcp_error_code: Option<i64>| {
-            if let Some((audit, uri)) = computer_app_resource_audit.as_ref() {
-                audit.record(
-                    ActionAuditRecord::new(
-                        "computer_app_resource_read",
-                        status.is_success(),
-                        status,
-                    )
-                    .summary(json!({
-                        "transport": "mcp",
-                        "resource_uri": uri,
-                        "resource_version": uri.rsplit('/').next().unwrap_or("unknown"),
-                        "protocol_era": protocol_era,
-                        "ui_capability_present": computer_app_ui_capability_present,
-                        "mcp_error_code": mcp_error_code,
-                    })),
-                );
-            }
-        };
+    let app_resource_audit =
+        app_resource_diagnostics::AppResourceAudit::start(req, depot, &request);
     let protocol_era = match validate_http_protocol(req, &request) {
         Ok(protocol_era) => protocol_era,
         Err(body) => {
             guard.parsed("protocol_error");
-            if let Some(uri) = computer_app_resource_uri.as_deref() {
-                log_mcp_computer_app_resource_delivery(
-                    uri,
-                    "validation_failed",
-                    computer_app_ui_capability_present,
-                    400,
-                    body["error"]["code"].as_i64(),
-                );
-                record_computer_app_resource_audit(
-                    "validation_failed",
-                    StatusCode::BAD_REQUEST,
-                    body["error"]["code"].as_i64(),
-                );
-            }
+            app_resource_audit.record(
+                "validation_failed",
+                StatusCode::BAD_REQUEST,
+                body["error"]["code"].as_i64(),
+                "protocol_error",
+            );
             let estimated = estimate_json_bytes(&body);
             guard.response_serialized(400, estimated, Some(false), None, "protocol_error");
             res.status_code(StatusCode::BAD_REQUEST);
@@ -749,6 +661,12 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
                 // Do not echo potentially sensitive header values into diagnostics.
                 guard.parsed("request_policy_error");
                 let body = rpc_error(request.id.clone(), -32600, message);
+                app_resource_audit.record(
+                    protocol::era_label(protocol_era),
+                    StatusCode::BAD_REQUEST,
+                    Some(-32600),
+                    "request_policy_error",
+                );
                 let estimated = estimate_json_bytes(&body);
                 guard.response_serialized(
                     400,
@@ -791,6 +709,12 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         Err(message) => {
             guard.parsed("client_window_error");
             let body = rpc_error(request.id.clone(), -32600, message);
+            app_resource_audit.record(
+                protocol::era_label(protocol_era),
+                StatusCode::BAD_REQUEST,
+                Some(-32600),
+                "client_window_error",
+            );
             let estimated = estimate_json_bytes(&body);
             guard.response_serialized(400, estimated, Some(false), None, "client_window_error");
             res.status_code(StatusCode::BAD_REQUEST);
@@ -996,20 +920,12 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
                     MCP_DISPATCH_HARD_TIMEOUT.as_secs()
                 ),
             );
-            if let Some(uri) = computer_app_resource_uri.as_deref() {
-                log_mcp_computer_app_resource_delivery(
-                    uri,
-                    protocol::era_label(protocol_era),
-                    computer_app_ui_capability_present,
-                    500,
-                    Some(-32000),
-                );
-                record_computer_app_resource_audit(
-                    protocol::era_label(protocol_era),
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Some(-32000),
-                );
-            }
+            app_resource_audit.record(
+                protocol::era_label(protocol_era),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Some(-32000),
+                "dispatch_hard_timeout",
+            );
             let timeout_model_ergonomics = hard_timeout_model_ergonomics.take().map(|timer| {
                 timer
                     .finish()
@@ -1097,28 +1013,7 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
         }
     }
 
-    if let Some(uri) = computer_app_resource_uri.as_deref() {
-        log_mcp_computer_app_resource_outcome(
-            uri,
-            protocol_era,
-            computer_app_ui_capability_present,
-            &outcome,
-        );
-        let (status, mcp_error_code) = match &outcome {
-            McpOutcome::Ok(_) | McpOutcome::ArtifactExportStream { .. } => (StatusCode::OK, None),
-            McpOutcome::BadRequest(body) => {
-                (StatusCode::BAD_REQUEST, body["error"]["code"].as_i64())
-            }
-            McpOutcome::NotFound(body) => (StatusCode::NOT_FOUND, body["error"]["code"].as_i64()),
-            McpOutcome::Notification => (StatusCode::ACCEPTED, None),
-            McpOutcome::Forbidden { .. } => (StatusCode::FORBIDDEN, None),
-        };
-        record_computer_app_resource_audit(
-            protocol::era_label(protocol_era),
-            status,
-            mcp_error_code,
-        );
-    }
+    app_resource_audit.record_outcome(protocol_era, &outcome);
 
     if matches!(
         outcome,

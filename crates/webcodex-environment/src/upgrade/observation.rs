@@ -59,7 +59,7 @@ pub(crate) fn upgrade_observation_under_lock(
         || journal.record.request.account != record.request.account
         || record.request.account.identity != crate::current_account()?.identity
         || uuid::Uuid::parse_str(&journal.operation_id).is_err()
-        || !crate::unified_update::stable_version(&journal.candidate.version)
+        || !valid_candidate_version(&journal.candidate.version)
         || !crate::unified_update::lowercase_hex(&journal.candidate.source_sha, 40)
         || !crate::unified_update::valid_sha256(&journal.candidate.manifest_sha256)
     {

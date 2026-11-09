@@ -17,11 +17,13 @@ async fn window_activity_preserves_shell_rejection_codes_from_canonical_telemetr
         "run_shell",
         true,
     );
-    // These are actual run_shell admission failures before Project lookup or
-    // Runner dispatch. The test neither starts a command nor changes the gate.
+    // SSH wait admission uses the resolved Runner policy before comparing the
+    // effective lifetime. Supply a real registered fixture Project, but never
+    // dispatch a command or weaken the failure projection under test.
+    register_project(&runtime, "ssh-admission", "project", "/fixture/ssh", None).await;
     let unsupported = runtime
         .run_shell_with_contract_for_resource(
-            "unselected".into(),
+            "agent:ssh-admission:project".into(),
             "true".into(),
             Some(60),
             Some(1),
@@ -36,7 +38,7 @@ async fn window_activity_preserves_shell_rejection_codes_from_canonical_telemetr
         .await;
     let unavailable = runtime
         .run_shell_with_contract_for_resource(
-            "unselected".into(),
+            "agent:ssh-admission:project".into(),
             "true".into(),
             Some(121),
             None,

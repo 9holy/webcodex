@@ -26,6 +26,33 @@ struct CallDiagnostics<'a> {
     lifecycle: Option<&'a mut ToolRequestLifecycle>,
     model_ergonomics_out: Option<&'a mut Option<ModelErgonomicsRecord>>,
     correlation_out: Option<&'a mut crate::tool_runtime::ToolCallCorrelation>,
+    admission_started: std::time::Instant,
+    invocation_facts: crate::tool_runtime::model_ergonomics_telemetry::invocation::InvocationFacts,
+}
+
+impl CallDiagnostics<'_> {
+    /// Only call from a surface gate before runtime and sidecar execution.
+    fn surface_rejected(&mut self, tool_name: &str) {
+        let record = ModelErgonomicsRecord::for_surface_rejection(
+            tool_name,
+            self.invocation_facts.clone(),
+            self.admission_started
+                .elapsed()
+                .as_millis()
+                .min(u64::MAX as u128) as u64,
+        );
+        if let Some(lifecycle) = self.lifecycle.as_deref() {
+            let kind = record
+                .error_kind
+                .as_deref()
+                .unwrap_or("direct_route_denied");
+            lifecycle.dispatch_failed(kind);
+            lifecycle.dispatch_finished(false, Some(false), kind);
+        }
+        if let Some(slot) = self.model_ergonomics_out.as_deref_mut() {
+            *slot = Some(record);
+        }
+    }
 }
 
 struct ParsedCall {
@@ -166,6 +193,8 @@ pub(in crate::mcp) async fn handle_call(
         lifecycle,
         model_ergonomics_out,
         correlation_out,
+        admission_started: std::time::Instant::now(),
+        invocation_facts: crate::tool_runtime::model_ergonomics_telemetry::invocation::InvocationFacts::from_arguments(&request_params["arguments"]),
     };
     let call = match ParsedCall::prepare(&context, &mut diagnostics, request_params).await {
         Ok(call) => call,
@@ -226,6 +255,10 @@ impl ParsedCall {
                 )));
             }
         };
+        // Resolve the concrete cached Host descriptor before invocation, surface,
+        // scope and provenance admission. Arguments and trust remain untouched.
+        // Gateway targets are unwrapped later and deliberately are not adapted.
+        params.name = canonical_direct_tool_name(&params.name).to_string();
         // OpenAI's search contract is a host-only adapter. It composes the ordinary
         // authorized resource service and never becomes a generic runtime gateway.
         if params.name == "search_mentions" {

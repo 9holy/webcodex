@@ -2633,3 +2633,42 @@ fn observe_jobs_explicit_log_pages_require_a_cursor_and_roundtrip() {
     let parsed = ToolCall::from_tool_name("observe_jobs", args).unwrap();
     assert!(matches!(parsed, ToolCall::ObserveJobs {items, tail_lines:200, ..} if items[0].page));
 }
+
+#[test]
+fn retired_artifact_tool_names_reject_with_current_schema_guidance() {
+    for (retired, current, action) in [
+        (
+            "import_conversation_files_to_project",
+            "import_host_files",
+            None,
+        ),
+        (
+            "export_project_artifact",
+            "inspect_project_artifact",
+            Some("action='export'"),
+        ),
+    ] {
+        assert!(lookup_tool_definition(retired).is_none());
+        assert!(lookup_tool_definition(current).is_some());
+        for arguments in [
+            Value::Null,
+            json!({"project": "missing", "secret": "not-for-errors"}),
+        ] {
+            let error = ToolCall::from_tool_name(retired, arguments).unwrap_err();
+            assert!(
+                error.contains(&format!("unknown tool '{retired}'")),
+                "{error}"
+            );
+            assert!(error.contains(current), "{error}");
+            assert!(error.contains("refresh tools/list"), "{error}");
+            assert!(error.contains("current advertised schema"), "{error}");
+            assert!(!error.contains("not-for-errors"), "{error}");
+            if let Some(action) = action {
+                assert!(error.contains(action), "{error}");
+            }
+        }
+    }
+    assert!(tool_migration::retired_artifact_tool_hint("unrelated_unknown_tool").is_none());
+    let error = ToolCall::from_tool_name("unrelated_unknown_tool", json!({})).unwrap_err();
+    assert!(error.contains("Available tools:"), "{error}");
+}

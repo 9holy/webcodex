@@ -6,7 +6,7 @@ import { translate } from "../src/runtime_i18n.js";
 const placeholders = (text: string) => [...text.matchAll(/\{[A-Za-z_]+\}/g)].map(match => match[0]).sort();
 
 describe("shared activity failure translations", () => {
-  it.each(["unsupported_resource", "capability_unavailable", "runtime_error"])("explains %s in every locale without overriding uncertain execution", reason => {
+  it.each(["unsupported_resource", "capability_unavailable", "runtime_error", "invalid_input"])("explains %s in every locale without overriding uncertain execution", reason => {
     const failure = { outcome: "rejected" as const, reason };
     const explanation = failureReasonText(failure);
     const next = failureNextStepText(failure);

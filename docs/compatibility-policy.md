@@ -20,8 +20,8 @@ coverage. State intentional surface changes in upgrade notes; MCP clients refres
 
 This rule does not preserve every old model tool name. v0.5 intentionally changes
 the model/API surface: clients refresh the advertised MCP schema and use the new
-canonical tools. Retired tool names and App resource versions fail closed.
-Persisted installation identity, credentials, saved history, Runner wire
+canonical tools. Retired tool names and App resource versions fail closed except
+for the named direct MCP Host-import consumer below. Persisted installation identity, credentials, saved history, Runner wire
 contracts, and negotiated Desktop management contracts are separate concerns.
 See [the API transition](implementation/v05-tool-surface.md) and
 [Desktop/Runtime compatibility](DESKTOP_RUNTIME_COMPATIBILITY.md).
@@ -74,6 +74,7 @@ The following code is retained for concrete consumers:
 | Workflow Session snapshots and historical context-revision decoding | Stable retained history has an actual disk consumer. Tool renames do not authorize rewriting Sessions, Jobs, replay IDs, or audit history. |
 | Update metadata absence and unsupported-format handling | A release or development build without verified installer metadata must not be treated as a safe automatic installation candidate. |
 | Retired-config rejection and sensitive-path exclusions | Reject retired authority/registry settings before use; do not silently select a different default. Old secret/config paths stay protected even when discovery is retired. |
+| Direct MCP `import_conversation_files_to_project` calls | Active ChatGPT conversations retain this Host file descriptor after refresh. Resolve its unchanged wire contract to `import_host_files` only at the MCP adapter boundary; see below. |
 | MCP dated revisions and Runner/management protocol checks | These serve external Hosts and independently upgraded components. Their lifecycle follows observed protocol consumers, not the v0.5 package number. |
 | `ActionAudit`, `ActionSession`, `ActionEvent` | Current tool audit and history infrastructure. The removed GPT Actions HTTP adapter does not make this domain obsolete. |
 
@@ -160,8 +161,29 @@ its similar name does not make it part of the retired tool.
 Earlier completed removals are recorded in
 [v0.5 pruning](implementation/v05-pruning.md): historical model aliases, App URI
 aliases, old authority-setting translation, obsolete startup discovery, and
-the GPT Actions/OpenAPI adapter. Do not recreate them to accommodate a stale
-cached Host schema. Reopen the reader or reconnect/refresh the MCP schema.
+the GPT Actions/OpenAPI adapter. Do not recreate them as generic stale-schema
+fallbacks. Reopen the reader or reconnect/refresh the MCP schema.
+
+### Named cached ChatGPT file-import descriptor
+
+An active ChatGPT conversation can still expose only
+`import_conversation_files_to_project` after refreshing `tools/list`. This concrete
+consumer needs a narrow direct MCP adapter, rather than another instruction to
+refresh the same cached descriptor. The
+[pre-rename argument contract](https://github.com/9holy/webcodex/blob/168f66a3550b271dff9418a87bba194ed102e5d0/crates/webcodex-tool-contracts/src/tool_call.rs#L4774-L4803)
+and [Host file metadata](https://github.com/9holy/webcodex/blob/168f66a3550b271dff9418a87bba194ed102e5d0/src/mcp/tools.rs#L1332-L1341)
+match the current contract. Resolve only this direct name to `import_host_files`
+before canonical admission and authenticated Host-trust selection. Keep arguments
+unchanged: the Host supplies the file-reference objects; the adapter neither
+synthesizes download URLs nor accepts caller-provided provenance.
+
+The registry, `tools/list`, schemas, manifests, generated calls and runtime/HTTP
+parser remain current-only. Nested gateway targets are not translated. CLI
+exclusions, scopes, Project/Session authority, file trust, bounded downloads,
+artifact-write guards and uncertain-effect/no-replay semantics stay unchanged.
+This is one MCP adapter route into the existing implementation, not a second
+runtime operation or a generic migration map. Retire it when this named Host
+consumer no longer retains the descriptor, keeping canonical boundary coverage.
 
 ## Future removal criteria
 

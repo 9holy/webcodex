@@ -194,7 +194,7 @@ async fn adaptive_tools_list_exposes_ranked_direct_tools_and_gateway() {
 }
 
 #[tokio::test]
-async fn stale_host_file_import_name_rejects_and_guides_client_reconnection() {
+async fn cached_host_file_import_name_uses_current_schema_without_advertising_alias() {
     let runtime = test_runtime();
     let auth = adaptive_direct_auth();
     let current = "import_host_files";
@@ -234,14 +234,17 @@ async fn stale_host_file_import_name_rejects_and_guides_client_reconnection() {
     )
     .await;
     let McpOutcome::BadRequest(response) = outcome else {
-        panic!("stale imported-file descriptor must fail closed: {outcome:?}");
+        panic!("unrewritten string file IDs must fail closed: {outcome:?}");
     };
     let message = response["error"]["message"].as_str().unwrap();
-    assert!(message.contains("refresh tools/list"), "{message}");
-    assert!(message.contains("reconnect the MCP client"), "{message}");
-    assert!(!message.contains("call_runtime_tool"), "{message}");
+    assert!(message.contains("invalid arguments"), "{message}");
+    assert!(
+        !message.contains("unavailable on the current MCP surface"),
+        "{message}"
+    );
+    assert!(crate::tool_runtime::ToolCall::from_tool_name(retired, json!({})).is_err());
 
-    // The recovery hint is specific to the retired import tool: changing the
+    // The recovery hints are specific to the named retired artifact tools: changing the
     // generic denial text would invalidate established conformance evidence.
     let generic = handle_mcp_request(
         &runtime,
@@ -1026,6 +1029,62 @@ async fn natural_language_manifest_is_identical_through_direct_and_gateway_route
                 assert_eq!(output, baseline);
             } else {
                 baseline = Some(output.clone());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn retired_artifact_tools_reject_direct_and_gateway_with_migration_guidance() {
+    let runtime = test_runtime();
+    let auth = adaptive_direct_auth();
+    for (retired, current) in [
+        ("import_conversation_files_to_project", "import_host_files"),
+        ("export_project_artifact", "inspect_project_artifact"),
+    ] {
+        for gateway in [false, true] {
+            // Only the direct cached ChatGPT Host import descriptor is adapted.
+            if retired == "import_conversation_files_to_project" && !gateway {
+                continue;
+            }
+            let arguments = json!({"project": "not-a-project", "private_input": "must-not-echo"});
+            let params = if gateway {
+                json!({"name": "call_runtime_tool", "arguments": {"tool": retired, "arguments": arguments}})
+            } else {
+                json!({"name": retired, "arguments": arguments})
+            };
+            let outcome = handle_mcp_request(
+                &runtime,
+                rpc("tools/call", Some(json!(64)), mcp_2026_params(params)),
+                Some(&auth),
+            )
+            .await;
+            let message = if gateway {
+                let McpOutcome::Ok(response) = outcome else {
+                    panic!("gateway must return a structured rejection: {outcome:?}");
+                };
+                let result = &response["result"];
+                assert_eq!(result["isError"], true);
+                let rejection = &result["structuredContent"];
+                assert_eq!(rejection["success"], false);
+                assert_eq!(rejection["output"]["error_kind"], "unknown_tool");
+                assert_eq!(rejection["output"]["execution_state"], "not_started");
+                assert_eq!(rejection["output"]["state_changed"], false);
+                rejection["error"].as_str().unwrap().to_owned()
+            } else {
+                let McpOutcome::BadRequest(response) = outcome else {
+                    panic!("direct retired tool must fail closed: {outcome:?}");
+                };
+                assert_eq!(response["error"]["code"], -32602);
+                response["error"]["message"].as_str().unwrap().to_owned()
+            };
+            assert!(message.contains(current), "{message}");
+            assert!(message.contains("refresh tools/list"), "{message}");
+            assert!(message.contains("current advertised schema"), "{message}");
+            assert!(!message.contains("must-not-echo"), "{message}");
+            assert!(!message.contains("call_runtime_tool"), "{message}");
+            if retired == "export_project_artifact" {
+                assert!(message.contains("action='export'"), "{message}");
             }
         }
     }

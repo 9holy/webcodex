@@ -523,3 +523,56 @@ fn v2_catalog_is_complete_strict_and_has_exact_legacy_full_projection() {
             .is_err()
     );
 }
+
+#[tokio::test]
+async fn manual_preview_does_not_enable_automatic_preview_selection_or_download() {
+    let preview = "0.5.9-rc.1";
+    assert!(!stable_version(preview));
+    assert!(release_asset_url(preview, "manifest.json").is_err());
+    assert!(!is_newer_stable(preview, "0.5.8"));
+    assert!(is_newer_stable("0.5.9", preview));
+    for prerelease in [false, true] {
+        let release = serde_json::from_value(json!({
+            "tag_name": format!("v{preview}"), "draft": false, "prerelease": prerelease,
+        }))
+        .unwrap();
+        assert!(discovery::project_release(&release, None).is_none());
+    }
+    let notice = ReleaseNotice {
+        version: preview.into(),
+        runtime_version: preview.into(),
+        release_url: format!("https://github.com/{OFFICIAL_REPOSITORY}/releases/tag/v{preview}"),
+        compatibility: UpdateCompatibility::RuntimeCompatible,
+    };
+    assert!(!valid_notice(&notice));
+    let bytes = serde_json::to_string(&manifest())
+        .unwrap()
+        .replace("1.2.3", preview);
+    assert!(UnifiedInstallerManifest::parse(bytes.as_bytes(), preview).is_err());
+    let platform = RuntimePlatform::Win32X64;
+    let mut source: Value = serde_json::from_str(
+        &serde_json::to_string(&source(platform))
+            .unwrap()
+            .replace("1.2.3", preview),
+    )
+    .unwrap();
+    for item in source["artifacts"].as_object_mut().unwrap().values_mut() {
+        item["build_info_sha256"] =
+            sha256(&serde_json::to_vec(&item["build_info"]).unwrap()).into();
+    }
+    let source_bytes = serde_json::to_vec(&source).unwrap();
+    assert!(verify_source_manifest(&source_bytes, preview, platform).is_err());
+    let target = InstallerTarget {
+        platform,
+        format: PackageFormat::Exe,
+        flavor: PackageFlavor::Full,
+    };
+    // Admission returns before constructing a client or making a request.
+    assert!(matches!(
+        fetch_release(preview, target).await,
+        Err(UpdateError::ManifestInvalid)
+    ));
+    let directory = crate::test_tempdir().unwrap();
+    let cache = PrivateUpdateCache::open(directory.path().join("updates")).unwrap();
+    assert!(cache.retain_version(Some(preview)).is_err());
+}

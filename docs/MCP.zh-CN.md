@@ -460,6 +460,12 @@ replacement Runner，也不会在 uncertain outcome 后自动 replay。Raw SSH t
 `webcodex connect ... --oauth-local-ssh` 显式 opt in。Static/managed 语义与 PersistentShell
 边界见 [Runner](RUNNER.zh-CN.md#ssh-会话资源)。
 
+命名 SSH 的 `run_shell` 仍只支持直接执行，应用 Runner 策略后的有效运行时间最多为 120 秒。
+可以省略 `sync_wait_secs`，也可以提供正数等待时间，但应用共享等待上限（60 秒）及
+Runner 策略后，等待时间必须覆盖整个有效运行期。较短的等待仍会在派发前被拒绝，
+因为这条路径不能把同一次执行交接为持久 Job。SSH 信任、凭据、Session、权限及
+结果不确定时的检查保持不变。
+
 ### 处理执行与部署权限不足
 
 默认 `trusted_agent` 模式支持用户任务已授权的 Shell、Git、安装依赖、服务管理和发布，
@@ -809,6 +815,12 @@ Rust/Go 构建使用当前 `project_build`；项目级验证不会执行修改�
   适用于 host 能绑定为 file parameter 的本轮新生成文件。Control 端负责下载原始
   bytes，并通过现有有界 artifact write 路径提交；调用方不应自行构造下载 URL，
   也不应手工 Base64 转运这些文件。
+  若活动 ChatGPT 会话仍缓存旧的 `import_conversation_files_to_project`
+  descriptor，可直接调用：MCP 适配器将其未改变的 Host 契约解析到
+  `import_host_files`，随后执行相同的 scope、provenance 与 Project/Session
+  检查。发现与 schema 仍只公布当前名称；不会为 runtime/HTTP API 或嵌套
+  gateway 调用添加别名，不会在 CLI 开放导入、补造缺失的 Host 文件引用，
+  也不会重试结果不确定的导入。详见[具名兼容边界](compatibility-policy.md#named-cached-chatgpt-file-import-descriptor)。
 - `inspect_project_artifact` 是首选的 Project → Model / Host 读取入口：
   `action=metadata` 用于 existence/size/MIME/digest/image/archive metadata；
   `action=inspect` 只读取一个有 snapshot fence 的有界 Base64 segment；

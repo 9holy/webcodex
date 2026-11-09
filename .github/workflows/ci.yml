@@ -939,6 +939,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Windows grep fallback tests failed" }
           cargo test --locked -p webcodex --lib search_requires_ripgrep_based_on_effective_features_not_field_presence
           if ($LASTEXITCODE -ne 0) { throw "Windows search capability test failed" }
+      - name: Test Windows Tunnel heartbeat contention and supervision
+        run: |
+          cargo test --locked -p webcodex-environment --lib tunnel::health_tests
+          if ($LASTEXITCODE -ne 0) { throw "Windows Tunnel heartbeat contention tests failed" }
+          cargo test --locked -p webcodex --lib server_tunnels
+          if ($LASTEXITCODE -ne 0) { throw "Windows Tunnel heartbeat supervision tests failed" }
 
   test-windows-runner:
     needs: changes

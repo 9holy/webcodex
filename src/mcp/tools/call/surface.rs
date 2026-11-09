@@ -141,6 +141,7 @@ impl RuntimeSurface {
         if !context.exposure.allows(&params.name)
             && !(workbench_view_call && !via_adaptive_runtime_gateway)
         {
+            diagnostics.surface_rejected(&params.name);
             return Err(McpOutcome::BadRequest(rpc_error(
                 id,
                 -32602,
@@ -160,18 +161,19 @@ impl RuntimeSurface {
             && !via_adaptive_runtime_gateway
             && !context.exposure.is_direct(context.surface, &params.name);
         if direct_denied {
-            if let Some(lc) = lifecycle.as_deref() {
-                lc.dispatch_failed("direct_route_denied");
-                lc.dispatch_finished(false, Some(false), "direct_route_denied");
-            }
+            diagnostics.surface_rejected(&params.name);
             // A recovery hint must name a real, currently admitted route. Retired
             // names and unavailable App tools cannot become valid through a gateway.
             let message = if mcp_adaptive_runtime_gateway_target_route(&params.name, stateless_2026)
                 != crate::model_surface::AdaptiveRuntimeGatewayTargetRoute::Gateway
             {
-                if params.name == "import_conversation_files_to_project" {
+                if let Some(hint) =
+                    webcodex_tool_contracts::tool_migration::retired_artifact_tool_hint(
+                        &params.name,
+                    )
+                {
                     format!(
-                        "tool '{}' is unavailable on the current MCP surface; refresh tools/list (reconnect the MCP client after a Server upgrade if its tool catalog is stale) and select a current callable",
+                        "tool '{}' is unavailable on the current MCP surface; {hint}",
                         params.name
                     )
                 } else {

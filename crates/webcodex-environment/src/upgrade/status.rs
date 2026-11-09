@@ -104,8 +104,7 @@ pub(super) fn validate_identity(
         || record.request.account.identity != crate::current_account()?.identity
         || uuid::Uuid::parse_str(&journal.operation_id).is_err()
         || journal.operation_id.len() > 36
-        || journal.candidate.version.len() > 64
-        || !crate::unified_update::stable_version(&journal.candidate.version)
+        || !valid_candidate_version(&journal.candidate.version)
         || !crate::unified_update::lowercase_hex(&journal.candidate.source_sha, 40)
         || !crate::unified_update::valid_sha256(&journal.candidate.manifest_sha256)
     {

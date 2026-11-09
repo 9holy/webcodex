@@ -3,6 +3,10 @@ use super::*;
 /// Disposable bytes exercise the actual manifest/hash/containment verifier;
 /// they are never executed and need no publisher or package-manager access.
 fn write_candidate(root: &Path) -> UpgradeCandidate {
+    write_candidate_version(root, "1.2.3")
+}
+
+pub(super) fn write_candidate_version(root: &Path, version: &str) -> UpgradeCandidate {
     ensure_private_directory(root).unwrap();
     // Secure the intermediate directory explicitly: Windows private-directory
     // validation rejects an inherited ACL on a recursively-created ancestor.
@@ -50,7 +54,7 @@ fn write_candidate(root: &Path) -> UpgradeCandidate {
         hashes.insert(name, hash.clone());
         sums.push_str(&format!("{hash}  {relative}\n"));
         let build = json!({
-            "schema_version": 1, "binary": name, "version": "1.2.3",
+            "schema_version": 1, "binary": name, "version": version,
             "git_commit": "a".repeat(40), "git_dirty": false, "built_at": "123",
             "target": platform.target(), "architecture": std::env::consts::ARCH,
             "desktop_runtime_contract": DESKTOP_RUNTIME_CONTRACT,
@@ -90,9 +94,9 @@ fn write_candidate(root: &Path) -> UpgradeCandidate {
         ]);
     }
     let manifest = json!({
-        "schema_version": 1, "version": "1.2.3", "source_sha": "a".repeat(40),
+        "schema_version": 1, "version": version, "source_sha": "a".repeat(40),
         "source_workflow_run_id": 123,
-        "source_workflow_ref": format!("{}/.github/workflows/release-build.yml@refs/tags/v1.2.3", crate::unified_update::OFFICIAL_REPOSITORY),
+        "source_workflow_ref": format!("{}/.github/workflows/release-build.yml@refs/tags/v{version}", crate::unified_update::OFFICIAL_REPOSITORY),
         "platform": platform.as_str(), "target": platform.target(),
         "architecture": std::env::consts::ARCH,
         "desktop_runtime_contract": DESKTOP_RUNTIME_CONTRACT,

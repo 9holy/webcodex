@@ -555,6 +555,14 @@ ordinary hosted OAuth baseline; opt in explicitly with
 [Runner](RUNNER.md#ssh-session-resources) for static-vs-managed and
 PersistentShell details.
 
+Named SSH `run_shell` stays direct-only with an effective lifetime of at most
+120 seconds after Runner policy is applied. Omit `sync_wait_secs`, or use a
+positive wait that covers the entire
+effective lifetime after the shared wait ceiling (60 seconds) and Runner policy
+are applied. A shorter wait still rejects before dispatch because this path
+cannot hand the same execution off as a durable Job. This does not change SSH
+trust, credential, Session, permission, or uncertain-outcome checks.
+
 ### Resolving execution and deployment permission failures
 
 The default `trusted_agent` authority mode permits task-authorized shell, Git,
@@ -994,6 +1002,13 @@ payloads through model text:
   them as file parameters. The Control downloads the referenced bytes and
   commits them through the existing bounded artifact-write path; callers should
   not construct download URLs or manually Base64-transfer those files.
+  Active ChatGPT conversations that retain the old
+  `import_conversation_files_to_project` descriptor can call it directly: the MCP
+  adapter resolves that unchanged Host contract to `import_host_files` before
+  the same scope, provenance and Project/Session checks. Only the current name
+  is advertised. This does not add an alias to the runtime/HTTP API or nested
+  gateway calls, admit import on CLI, reconstruct missing Host references, or
+  retry an uncertain import. See the [named compatibility boundary](compatibility-policy.md#named-cached-chatgpt-file-import-descriptor).
 - `inspect_project_artifact` is the preferred Project-to-model/host read surface. Use
   `action=metadata` for existence/size/MIME/digest/image/archive facts,
   `action=inspect` for one bounded snapshot-fenced Base64 segment,

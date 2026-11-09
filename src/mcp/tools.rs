@@ -250,8 +250,13 @@ fn unwrap_adaptive_runtime_gateway_arguments(arguments: Value) -> Result<(String
     Ok((target, target_arguments))
 }
 fn adaptive_runtime_gateway_unknown_target(target: &str) -> ToolResult {
+    let message = match webcodex_tool_contracts::tool_migration::retired_artifact_tool_hint(target)
+    {
+        Some(hint) => format!("unknown adaptive runtime tool '{target}'. {hint}"),
+        None => format!("unknown adaptive runtime tool '{target}'"),
+    };
     ToolResult::err_with_output(
-        format!("unknown adaptive runtime tool '{target}'"),
+        message,
         json!({
             "error_kind": "unknown_tool",
             "execution_state": "not_started",
@@ -269,6 +274,16 @@ pub(super) struct McpToolCallParams {
     pub(super) arguments: Value,
 }
 
+/// ChatGPT sessions can retain the pre-rename Host file descriptor even after
+/// tools/list refresh. Its argument and fileParams contracts are identical.
+/// Resolve only that direct MCP spelling; never registry names or gateway targets.
+fn canonical_direct_tool_name(name: &str) -> &str {
+    match name {
+        "import_conversation_files_to_project" => "import_host_files",
+        _ => name,
+    }
+}
+
 pub(super) fn tool_name_from_params(params: &Value) -> Option<String> {
     let name = params.get("name").and_then(Value::as_str)?;
     if name == ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME {
@@ -277,7 +292,7 @@ pub(super) fn tool_name_from_params(params: &Value) -> Option<String> {
             .map(str::to_string)
             .or_else(|| Some(name.to_string()));
     }
-    Some(name.to_string())
+    Some(canonical_direct_tool_name(name).to_string())
 }
 
 pub(super) fn project_from_tool_call_params(params: &Value) -> Option<String> {

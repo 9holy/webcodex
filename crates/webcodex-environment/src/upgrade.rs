@@ -19,6 +19,8 @@ mod desktop_tree;
 pub(crate) mod installed_paths;
 mod journal_codec;
 mod observation;
+#[cfg(test)]
+mod preview_tests;
 #[cfg(all(test, target_os = "linux"))]
 mod runtime_package_tests;
 mod status;
@@ -1132,6 +1134,14 @@ fn parse_desktop_payload(
         managed_files,
     })
 }
+// Manual installer candidates may be previews. This is only bounded identity
+// validation; published provenance, exact native bytes and compatibility remain
+// mandatory. Automatic discovery/download/cache keep their stable-only policy.
+fn valid_candidate_version(value: &str) -> bool {
+    value.len() <= 64
+        && semver::Version::parse(value).is_ok_and(|version| version.to_string() == value)
+}
+
 pub fn verify_upgrade_candidate(root: &Path) -> SetupResultValue<UpgradeCandidate> {
     let root = root
         .canonicalize()
@@ -1169,6 +1179,9 @@ pub fn verify_upgrade_candidate(root: &Path) -> SetupResultValue<UpgradeCandidat
         ));
     }
     let version = string(&manifest, "version")?;
+    if !valid_candidate_version(version) {
+        return Err(error("candidate_version", "Candidate version is invalid"));
+    }
     let source = string(&manifest, "source_sha")?;
     if source.len() != 40
         || !source

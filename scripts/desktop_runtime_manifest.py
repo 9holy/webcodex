@@ -21,7 +21,14 @@ from pathlib import Path
 NAME = "webcodex-release-manifest.json"
 MAX_BYTES = 128 * 1024
 BINARIES = ("webcodex", "webcodex-server", "webcodex-runner")
-VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)(?:\+[0-9A-Za-z.-]+)?")
+# Canonical SemVer artifact identity, not an automatic-update channel selector.
+# Numeric prerelease identifiers cannot have leading zeroes; identifiers cannot
+# be empty. The three core numbers retain the existing no-leading-zero rule.
+_PRERELEASE = r"(?:0|[1-9][0-9]*|[0-9A-Za-z-]*[A-Za-z-][0-9A-Za-z-]*)"
+VERSION = re.compile(
+    rf"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+    rf"(?:-{_PRERELEASE}(?:\.{_PRERELEASE})*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+)
 
 class ManifestError(ValueError):
     pass

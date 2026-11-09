@@ -301,8 +301,8 @@ impl ToolRuntime {
         // exact shell recovery have resolved whether this call can use the
         // Runner-owned durable handoff path. Named SSH run_shell is intentionally
         // direct-only: an omitted legacy sync_wait_secs must stay omitted, while
-        // an explicitly supplied legacy value is still rejected by the SSH
-        // execution contract below.
+        // an explicit wait is accepted only when it covers the entire effective
+        // runtime, as checked by the SSH execution contract below.
         if ssh_resource.is_none() {
             crate::tool_runtime::return_timing::normalize_structured_handoff(
                 &mut call,

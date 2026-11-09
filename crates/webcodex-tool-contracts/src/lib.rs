@@ -15,6 +15,7 @@ pub mod tool_call;
 pub mod tool_catalog;
 pub mod tool_definition;
 pub mod tool_inputs;
+pub mod tool_migration;
 pub mod tool_policy;
 pub mod tool_spec;
 
