@@ -1,4 +1,6 @@
 use super::*;
+#[path = "http_transport/app_resources.rs"]
+mod app_resources;
 #[path = "http_transport/client_window.rs"]
 mod client_window;
 #[path = "http_transport/metadata_trace.rs"]
@@ -2721,6 +2723,9 @@ async fn http_mcp_2026_reads_computer_app_template_with_cache_contract() {
             "transport": "mcp",
             "resource_uri": MCP_COMPUTER_UI_RESOURCE_URI,
             "resource_version": "v12",
+            "current_resource_uri": MCP_COMPUTER_UI_RESOURCE_URI,
+            "resource_registered": true,
+            "outcome_stage": "response",
             "protocol_era": "stateless_2026",
             "ui_capability_present": true,
             "mcp_error_code": Value::Null,

@@ -460,6 +460,12 @@ replacement Runner，也不会在 uncertain outcome 后自动 replay。Raw SSH t
 `webcodex connect ... --oauth-local-ssh` 显式 opt in。Static/managed 语义与 PersistentShell
 边界见 [Runner](RUNNER.zh-CN.md#ssh-会话资源)。
 
+命名 SSH 的 `run_shell` 仍只支持直接执行，应用 Runner 策略后的有效运行时间最多为 120 秒。
+可以省略 `sync_wait_secs`，也可以提供正数等待时间，但应用共享等待上限（60 秒）及
+Runner 策略后，等待时间必须覆盖整个有效运行期。较短的等待仍会在派发前被拒绝，
+因为这条路径不能把同一次执行交接为持久 Job。SSH 信任、凭据、Session、权限及
+结果不确定时的检查保持不变。
+
 ### 处理执行与部署权限不足
 
 默认 `trusted_agent` 模式支持用户任务已授权的 Shell、Git、安装依赖、服务管理和发布，

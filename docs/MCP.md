@@ -555,6 +555,14 @@ ordinary hosted OAuth baseline; opt in explicitly with
 [Runner](RUNNER.md#ssh-session-resources) for static-vs-managed and
 PersistentShell details.
 
+Named SSH `run_shell` stays direct-only with an effective lifetime of at most
+120 seconds after Runner policy is applied. Omit `sync_wait_secs`, or use a
+positive wait that covers the entire
+effective lifetime after the shared wait ceiling (60 seconds) and Runner policy
+are applied. A shorter wait still rejects before dispatch because this path
+cannot hand the same execution off as a durable Job. This does not change SSH
+trust, credential, Session, permission, or uncertain-outcome checks.
+
 ### Resolving execution and deployment permission failures
 
 The default `trusted_agent` authority mode permits task-authorized shell, Git,

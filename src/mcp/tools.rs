@@ -250,8 +250,13 @@ fn unwrap_adaptive_runtime_gateway_arguments(arguments: Value) -> Result<(String
     Ok((target, target_arguments))
 }
 fn adaptive_runtime_gateway_unknown_target(target: &str) -> ToolResult {
+    let message = match webcodex_tool_contracts::tool_migration::retired_artifact_tool_hint(target)
+    {
+        Some(hint) => format!("unknown adaptive runtime tool '{target}'. {hint}"),
+        None => format!("unknown adaptive runtime tool '{target}'"),
+    };
     ToolResult::err_with_output(
-        format!("unknown adaptive runtime tool '{target}'"),
+        message,
         json!({
             "error_kind": "unknown_tool",
             "execution_state": "not_started",

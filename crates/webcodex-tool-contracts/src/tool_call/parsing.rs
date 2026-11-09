@@ -284,6 +284,9 @@ impl ToolCall {
         // avoids leaking a raw serde "unknown variant" error and gives model/API
         // callers an actionable discovery hint.
         let definition = lookup_tool_definition(name).ok_or_else(|| {
+            if let Some(hint) = crate::tool_migration::retired_artifact_tool_hint(name) {
+                return format!("unknown tool '{name}'. {hint}");
+            }
             format!(
                 "unknown tool '{}'. Available tools: {}. Call read_tool_manifest with \
                  an exact tool_name (or use its category/intent views) to discover \

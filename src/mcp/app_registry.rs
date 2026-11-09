@@ -96,6 +96,23 @@ pub(super) fn for_uri(uri: &str) -> Option<&'static BundledMcpApp> {
     BUILTIN_MCP_APPS.iter().find(|app| app.uri == uri)
 }
 
+// Diagnostic classification only, never resource admission or an alias. Retain
+// at most four decimal version digits and only families owned by this registry;
+// arbitrary resource URIs, query strings and fragments may contain private data.
+pub(super) fn for_diagnostic_uri(uri: &str) -> Option<&'static BundledMcpApp> {
+    let (family, version) = uri.rsplit_once("/v")?;
+    if version.is_empty()
+        || version.len() > 4
+        || version.starts_with('0')
+        || !version.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    BUILTIN_MCP_APPS
+        .iter()
+        .find(|app| app.uri.rsplit_once("/v").map(|(prefix, _)| prefix) == Some(family))
+}
+
 pub(super) fn for_tool(tool: &str) -> Option<&'static BundledMcpApp> {
     BUILTIN_MCP_APPS
         .iter()

@@ -1065,7 +1065,8 @@ pub enum ToolCall {
         timeout_secs: Option<u64>,
         /// Seconds to wait before returning the same background Job. Omit for the connection default
         /// (CLI: up to 50s). Smaller values return earlier; Server limits and timeout_secs still apply.
-        /// This never changes command lifetime or re-executes it; Session SSH does not support handoff.
+        /// This never changes command lifetime or re-executes it. Session SSH is direct-only: omit this
+        /// field or cover the entire effective lifetime after the 60s wait ceiling and Runner cap.
         #[schemars(range(min = 1))]
         #[serde(default)]
         sync_wait_secs: Option<u64>,

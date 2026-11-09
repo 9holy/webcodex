@@ -401,27 +401,6 @@ impl ToolRuntime {
                 )
             }
         };
-        let timeout = budget.effective_timeout_secs;
-        if ssh_resource.is_some() && sync_wait_secs.is_some() {
-            return process_tool_failure_result(
-                command_rejected_message(
-                    "named Session SSH resources do not support sync_wait_secs because remote shell execution has no Runner-owned durable Job handoff",
-                    "omit sync_wait_secs for direct SSH execution, or use Runner-host run_shell when same-execution Job handoff is required.",
-                ),
-                "unsupported_resource",
-                ShellCommandExecutionState::NotStarted,
-            );
-        }
-        if ssh_resource.is_some() && timeout > MAX_SYNC_TIMEOUT_SECS {
-            return process_tool_failure_result(
-                command_rejected_message(
-                    format!("named Session SSH run_shell supports at most {MAX_SYNC_TIMEOUT_SECS}s total runtime because remote durable shell handoff is unavailable"),
-                    "request a direct SSH timeout within the supported ceiling; remote durable shell execution is not provided by run_shell.",
-                ),
-                "capability_unavailable",
-                ShellCommandExecutionState::NotStarted,
-            );
-        }
         let proj = match self.resolve_project(&project).await {
             Ok(p) => p,
             Err(e) => {
@@ -447,6 +426,32 @@ impl ToolRuntime {
         )
         .await;
         let timeout = budget.effective_timeout_secs;
+        // The direct SSH ceiling constrains the dispatched lifetime, not an
+        // already narrowed caller preference. The Runner cap can only reduce it.
+        if ssh_resource.is_some() && timeout > MAX_SYNC_TIMEOUT_SECS {
+            return process_tool_failure_result(
+                command_rejected_message(
+                    format!("named Session SSH run_shell supports at most {MAX_SYNC_TIMEOUT_SECS}s effective runtime because remote durable shell handoff is unavailable"),
+                    "request a direct SSH timeout within the supported ceiling; remote durable shell execution is not provided by run_shell.",
+                ),
+                "capability_unavailable",
+                ShellCommandExecutionState::NotStarted,
+            );
+        }
+        // A wait covering the complete effective lifetime needs no handoff.
+        // Compare after the Runner cap, which can only narrow that lifetime.
+        // An explicit earlier return still requires unavailable durable SSH
+        // ownership and must fail before dispatch rather than change meaning.
+        if ssh_resource.is_some() && sync_wait_secs.is_some() && budget.sync_wait_secs < timeout {
+            return process_tool_failure_result(
+                command_rejected_message(
+                    "named Session SSH resources do not support sync_wait_secs shorter than the effective runtime because remote shell execution has no Runner-owned durable Job handoff",
+                    "omit sync_wait_secs for direct SSH execution, use a wait covering the effective runtime within the supported wait ceiling, or use Runner-host run_shell when same-execution Job handoff is required.",
+                ),
+                "unsupported_resource",
+                ShellCommandExecutionState::NotStarted,
+            );
+        }
         let (effective_cwd, resolved_cwd) = if ssh_resource.is_some() {
             let remote_cwd = cwd.as_deref().map(str::trim).filter(|cwd| !cwd.is_empty());
             if remote_cwd.is_some_and(|cwd| cwd.len() > 4096 || cwd.chars().any(char::is_control)) {

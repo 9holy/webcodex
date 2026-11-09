@@ -1015,8 +1015,18 @@ async fn setup_ssh_with_capabilities(
     ssh_shell: bool,
     ssh_persistent_shell: bool,
 ) -> (ToolRuntime, String, sessions::SessionSummary) {
+    setup_ssh_with_policy(root, resource, ssh_shell, ssh_persistent_shell, None).await
+}
+
+async fn setup_ssh_with_policy(
+    root: &std::path::Path,
+    resource: &str,
+    ssh_shell: bool,
+    ssh_persistent_shell: bool,
+    policy: Option<crate::runner_protocol::RunnerPolicySummary>,
+) -> (ToolRuntime, String, sessions::SessionSummary) {
     let runtime = test_runtime();
-    register_agent_with_projects(
+    register_agent_with_projects_and_policy(
         &runtime,
         CLIENT,
         None,
@@ -1047,6 +1057,7 @@ async fn setup_ssh_with_capabilities(
             updated_at: 1,
             shell_profile: None,
         }],
+        policy,
     )
     .await;
     let project = crate::tool_runtime::runner_project_runtime_id(CLIENT, PROJECT_ID);
@@ -1080,70 +1091,162 @@ async fn setup_ssh(
 
 #[tokio::test]
 async fn named_ssh_run_shell_rejects_unsupported_long_lifetime_before_dispatch() {
-    let temp = tempfile::tempdir().unwrap();
-    let (runtime, project, session) =
-        setup_ssh_with_capabilities(temp.path(), "prod", true, true).await;
-    let auth = auth_context(None, true);
-
-    let result = runtime
-        .dispatch_with_auth(
-            ToolCall::RunShell {
-                login: false,
-                project,
-                command: "printf remote-long".to_string(),
-                session_id: Some(session.session_id.clone()),
-                timeout_secs: Some(600),
-                sync_wait_secs: None,
-                cwd: None,
-                purpose: None,
-                shell: None,
-            },
-            Some(&auth),
+    for policy_max in [None, Some(240)] {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, project, session) = setup_ssh_with_policy(
+            temp.path(),
+            "prod",
+            true,
+            true,
+            policy_max.map(
+                |max_timeout_secs| crate::runner_protocol::RunnerPolicySummary {
+                    max_timeout_secs,
+                    ..Default::default()
+                },
+            ),
         )
         .await;
+        let auth = auth_context(None, true);
 
-    assert!(!result.success, "{result:?}");
-    assert_eq!(result.output["execution_state"], "not_started");
-    assert_eq!(result.output["command_started"], false);
-    assert_eq!(result.output["failure_kind"], "capability_unavailable");
-    assert!(result.error.as_deref().unwrap_or_default().contains("120"));
-    assert!(probe_patch_agent_request(&runtime, CLIENT).await.is_none());
+        let result = runtime
+            .dispatch_with_auth(
+                ToolCall::RunShell {
+                    login: false,
+                    project,
+                    command: "printf remote-long".to_string(),
+                    session_id: Some(session.session_id.clone()),
+                    timeout_secs: Some(600),
+                    sync_wait_secs: None,
+                    cwd: None,
+                    purpose: None,
+                    shell: None,
+                },
+                Some(&auth),
+            )
+            .await;
+
+        assert!(!result.success, "{result:?}");
+        assert_eq!(result.output["execution_state"], "not_started");
+        assert_eq!(result.output["command_started"], false);
+        assert_eq!(result.output["failure_kind"], "capability_unavailable");
+        assert!(result.error.as_deref().unwrap_or_default().contains("120"));
+        assert!(probe_patch_agent_request(&runtime, CLIENT).await.is_none());
+    }
 }
 
 #[tokio::test]
-async fn named_ssh_run_shell_rejects_sync_wait_before_dispatch() {
-    let temp = tempfile::tempdir().unwrap();
-    let (runtime, project, session) =
-        setup_ssh_with_capabilities(temp.path(), "prod", true, true).await;
-    let auth = auth_context(None, true);
+async fn named_ssh_run_shell_rejects_early_handoff_and_invalid_wait_before_dispatch() {
+    for (timeout_secs, sync_wait_secs, policy_max, failure_kind) in [
+        (Some(30), Some(1), None, "unsupported_resource"),
+        (Some(60), Some(30), Some(45), "unsupported_resource"),
+        // The shared wait ceiling is 60 seconds, even when both inputs match.
+        (Some(90), Some(90), None, "unsupported_resource"),
+        (Some(30), Some(0), None, "invalid_arguments"),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, project, session) = setup_ssh_with_policy(
+            temp.path(),
+            "prod",
+            true,
+            true,
+            policy_max.map(
+                |max_timeout_secs| crate::runner_protocol::RunnerPolicySummary {
+                    max_timeout_secs,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await;
+        let auth = auth_context(None, true);
 
-    let result = runtime
-        .dispatch_with_auth(
+        let result = runtime
+            .dispatch_with_auth(
+                ToolCall::RunShell {
+                    login: false,
+                    project,
+                    command: "printf remote".to_string(),
+                    session_id: Some(session.session_id.clone()),
+                    timeout_secs,
+                    sync_wait_secs,
+                    cwd: None,
+                    purpose: None,
+                    shell: None,
+                },
+                Some(&auth),
+            )
+            .await;
+
+        assert!(!result.success, "{result:?}");
+        assert_eq!(result.output["execution_state"], "not_started");
+        assert_eq!(result.output["command_started"], false);
+        assert_eq!(result.output["failure_kind"], failure_kind);
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sync_wait_secs"));
+        assert!(probe_patch_agent_request(&runtime, CLIENT).await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn named_ssh_run_shell_accepts_wait_covering_entire_runtime() {
+    for (timeout_secs, sync_wait_secs, policy_max, effective_timeout) in [
+        (Some(30), Some(30), None, 30),
+        (None, Some(60), None, 60),
+        (Some(60), Some(60), None, 60),
+        (Some(30), Some(u64::MAX), None, 30),
+        (Some(120), None, None, 120),
+        (Some(60), Some(30), Some(30), 30),
+        (Some(600), None, Some(30), 30),
+        (Some(600), None, Some(120), 120),
+        (Some(600), Some(30), Some(30), 30),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (runtime, project, session) = setup_ssh_with_policy(
+            temp.path(),
+            "prod",
+            true,
+            true,
+            policy_max.map(
+                |max_timeout_secs| crate::runner_protocol::RunnerPolicySummary {
+                    max_timeout_secs,
+                    ..Default::default()
+                },
+            ),
+        )
+        .await;
+        let task = dispatch(
+            runtime.clone(),
             ToolCall::RunShell {
                 login: false,
                 project,
                 command: "printf remote".to_string(),
                 session_id: Some(session.session_id.clone()),
-                timeout_secs: Some(30),
-                sync_wait_secs: Some(1),
-                cwd: None,
+                timeout_secs,
+                sync_wait_secs,
+                cwd: Some("/remote/work".to_string()),
                 purpose: None,
                 shell: None,
             },
-            Some(&auth),
-        )
-        .await;
-
-    assert!(!result.success, "{result:?}");
-    assert_eq!(result.output["execution_state"], "not_started");
-    assert_eq!(result.output["command_started"], false);
-    assert_eq!(result.output["failure_kind"], "unsupported_resource");
-    assert!(result
-        .error
-        .as_deref()
-        .unwrap_or_default()
-        .contains("sync_wait_secs"));
-    assert!(probe_patch_agent_request(&runtime, CLIENT).await.is_none());
+        );
+        let request = wait_for_patch_agent_request(&runtime, CLIENT).await;
+        assert_eq!(request.command, "printf remote");
+        assert_eq!(request.cwd.as_deref(), Some("/remote/work"));
+        assert_eq!(request.timeout_secs, effective_timeout);
+        let context = request.job_context.as_ref().unwrap();
+        assert_eq!(context.ssh_resource.as_deref(), Some("prod"));
+        assert_eq!(
+            context.workflow_session_id.as_deref(),
+            Some(session.session_id.as_str())
+        );
+        complete_patch_agent_request(&runtime, CLIENT, &request.request_id, 0, "remote", "").await;
+        let result = task.await.unwrap();
+        assert!(result.success, "{result:?}");
+        assert_eq!(result.output["ssh_resource"], "prod");
+        assert!(result.output.get("job_id").is_none(), "{result:?}");
+        assert!(probe_patch_agent_request(&runtime, CLIENT).await.is_none());
+    }
 }
 
 #[tokio::test]
