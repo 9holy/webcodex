@@ -70,3 +70,37 @@ fn linked_generation_and_source_are_rejected_without_touching_target() {
     .unwrap();
     assert!(ensure_adapter_resources(another.path()).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn preparation_lock_release_is_not_delayed_by_an_inherited_descriptor() {
+    let temp = crate::test_tempdir().unwrap();
+    let entry = ensure_adapter_resources(temp.path()).unwrap();
+    let root = temp.path().join("coding-agent-adapters");
+    let lock = AdapterPreparationLock::acquire(&root).unwrap();
+    // dup shares the open-file description, just like an unrelated concurrent
+    // fork before exec. Keep it alive across guard retirement deterministically.
+    let inherited = lock.0.try_clone().unwrap();
+    assert_eq!(
+        ensure_adapter_resources(temp.path()).unwrap_err().code,
+        "codex_adapter_preparation_busy"
+    );
+    drop(lock);
+    assert_eq!(ensure_adapter_resources(temp.path()).unwrap(), entry);
+
+    let successor = AdapterPreparationLock::acquire(&root).unwrap();
+    drop(inherited);
+    assert_eq!(
+        ensure_adapter_resources(temp.path()).unwrap_err().code,
+        "codex_adapter_preparation_busy"
+    );
+    drop(successor);
+    std::fs::write(&entry, b"changed-code").unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            ensure_adapter_resources(temp.path()).unwrap_err().code,
+            "codex_adapter_resources_changed"
+        );
+    }
+    assert_eq!(std::fs::read(entry).unwrap(), b"changed-code");
+}

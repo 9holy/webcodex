@@ -63,6 +63,35 @@ fn verify_sources(directory: &Path) -> SetupResultValue<()> {
     Ok(())
 }
 
+struct AdapterPreparationLock(std::fs::File);
+
+impl AdapterPreparationLock {
+    fn acquire(root: &Path) -> SetupResultValue<Self> {
+        let lock_path = root.join("codex-app-server.lock");
+        // A concurrent first preparation may win create_new. Reopening still
+        // validates ownership, no-link and private-permission requirements.
+        let file =
+            open_private(&lock_path, true).or_else(|_| open_existing_private(&lock_path, true))?;
+        file.try_lock_exclusive().map_err(|_| {
+            SetupDiagnostic::new(
+                "codex_adapter_preparation_busy",
+                "Another Codex adapter preparation is in progress",
+                "Wait for that preparation to finish, then retry",
+            )
+        })?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for AdapterPreparationLock {
+    fn drop(&mut self) {
+        // A concurrent fork can retain this open-file description until exec.
+        // Closing only our descriptor would leave preparation locked after the
+        // operation returned. Release it explicitly on success and error paths.
+        let _ = FileExt::unlock(&self.0);
+    }
+}
+
 /// Return an absolute path to the bundled `adapter.py`. Each content generation
 /// has its own directory so an upgrade cannot replace code beneath a saved live
 /// provider. Existing modified files are never repaired by overwriting them.
@@ -76,18 +105,7 @@ pub fn ensure_adapter_resources(config_root: &Path) -> SetupResultValue<PathBuf>
     }
     let root = config_root.join("coding-agent-adapters");
     ensure_private_directory(&root)?;
-    let lock_path = root.join("codex-app-server.lock");
-    // A concurrent first preparation may win create_new. Reopening still uses
-    // the shared ownership, no-link and private-permission validation.
-    let lock =
-        open_private(&lock_path, true).or_else(|_| open_existing_private(&lock_path, true))?;
-    lock.try_lock_exclusive().map_err(|_| {
-        SetupDiagnostic::new(
-            "codex_adapter_preparation_busy",
-            "Another Codex adapter preparation is in progress",
-            "Wait for that preparation to finish, then retry",
-        )
-    })?;
+    let _lock = AdapterPreparationLock::acquire(&root)?;
     let directory = root.join(format!("codex-app-server-{}", source_digest()));
     match std::fs::symlink_metadata(&directory) {
         Ok(_) => verify_sources(&directory)?,
