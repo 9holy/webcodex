@@ -16,12 +16,78 @@ fn fixture() -> (tempfile::TempDir, AppState) {
 fn release(version: &str) -> ReleaseNotice {
     ReleaseNotice {
         version: version.into(),
-        runtime_version: DESKTOP_VERSION.into(),
+        // The advertised release owns its runtime version. The installed
+        // Desktop may itself be a preview and is not update-source metadata.
+        runtime_version: version.into(),
         release_url: format!(
             "https://github.com/{}/releases/tag/v{version}",
             webcodex_core::build_info::RELEASE_REPOSITORY
         ),
         compatibility: UpdateCompatibility::RuntimeCompatible,
+    }
+}
+
+#[test]
+fn release_fixture_describes_the_selected_stable_release_not_the_installed_build() {
+    let notice = release("99.0.0");
+    assert_eq!(notice.runtime_version, "99.0.0");
+    assert!(updates::valid_notice(&notice));
+    let cache = UpdateCache {
+        latest: Some(notice),
+        ..UpdateCache::default()
+    };
+    // Stable update notices remain valid even when this Desktop is a preview.
+    let status = cache.status("0.5.9-rc.1", 1000, true, None);
+    assert!(status.update_available);
+    assert_eq!(status.latest.unwrap().version, "99.0.0");
+}
+
+#[tokio::test]
+async fn preview_release_or_runtime_metadata_cannot_admit_a_download() {
+    let mut preview_release = release("99.0.0-rc.1");
+    preview_release.runtime_version = "99.0.0".into();
+    let mut preview_runtime = release("99.0.0");
+    preview_runtime.runtime_version = "99.0.0-rc.1".into();
+    for notice in [preview_release, preview_runtime] {
+        let (_root, app) = fixture();
+        app.core
+            .lock()
+            .await
+            .as_mut()
+            .unwrap()
+            .config
+            .update_cache
+            .latest = Some(notice.clone());
+        app.set_automatic_update_download(false).await.unwrap();
+        let error = app
+            .request_update_download_with(Some(&notice.version), |_, _, _| {
+                panic!("a preview notice must be rejected before submission");
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "update_action_unavailable");
+        let target = InstallerTarget::ALL
+            .into_iter()
+            .find(|target| Some(target.platform) == RuntimePlatform::current())
+            .expect("the native Desktop platform has a supported installer target");
+        for manual in [false, true] {
+            let status = app
+                .updates
+                .download_now(
+                    Some(notice.clone()),
+                    true,
+                    manual,
+                    InstallationKind::Managed,
+                    Some(target),
+                    &CancellationSignal::new(),
+                )
+                .await
+                .unwrap();
+            assert!(status.version.is_none());
+            assert_eq!(status.phase, DownloadPhase::Idle);
+            assert_eq!(status.downloaded_bytes, 0);
+            assert!(!status.pending_install);
+        }
     }
 }
 
