@@ -204,6 +204,7 @@ function SettingsView({
       {/* Keep visited views mounted so switching categories preserves drafts and
           in-flight operations. Plain containers keep controls reachable in WebKit. */}
       <div id="desktop-settings-general" hidden={section !== "general"}>
+      {visited.includes("general") && <>
       <section className="settings-section" aria-labelledby="settings-general-title">
         <h2 id="settings-general-title">{p("general")}</h2>
         <div className="setting-row"><label htmlFor="desktop-settings-locale">{t("locale.label")}</label><Select id="desktop-settings-locale" value={locale} onChange={value => { if (value) setLocale(value as typeof locale); }} data-webcodex-control="locale" data={LANGUAGES.map(language => ({ ...language }))} allowDeselect={false} /></div>
@@ -214,17 +215,21 @@ function SettingsView({
         {launchAtLoginError && <SettingsError error={launchAtLoginError} />}
         <div className="setting-row"><span>{p("background")}</span><span className="setting-value">{p("keepRunning")}</span></div>
       </section>
+      </>}
       </div>
       <div id="desktop-settings-access" hidden={section !== "access"}>
+      {visited.includes("access") && <>
       <RunnerFileAccess state={state} settings={runnerSettings} loading={loadingRunnerSettings} disabled={operationBusy || loadingRunnerSettings || Boolean(runnerSettingsError)} onState={onState} onSettings={acceptRunnerSettings} />
       {runnerSettingsError && <SettingsError error={runnerSettingsError} onRetry={() => void refreshRunnerSettings()} />}
-      {visited.includes("access") && <DetachedExecutionAuthorization settings={runnerSettings} disabled={operationBusy || loadingRunnerSettings || Boolean(runnerSettingsError)} />}
-      {visited.includes("access") && <ComputerPermissions />}
+      <DetachedExecutionAuthorization settings={runnerSettings} disabled={operationBusy || loadingRunnerSettings || Boolean(runnerSettingsError)} />
+      <ComputerPermissions />
+      </>}
       </div>
       <div id="desktop-settings-diagnostics" hidden={section !== "diagnostics"}>
         {visited.includes("diagnostics") && <DiagnosticsPanel state={state} onState={onState} onActivity={onActivity} onRuntime={() => selectSection("runtime")} onConnection={onConnection} />}
       </div>
       <div id="desktop-settings-network" hidden={section !== "network"} className="settings-network">
+      {visited.includes("network") && <>
         <h2>{t("settings.tunnelProxy")}</h2>
         <div className="field-group"><label htmlFor="desktop-tunnel-proxy-mode">{t("settings.tunnelProxy")}</label><Select id="desktop-tunnel-proxy-mode" value={proxyMode} onChange={value => { if (value) setProxyMode(value as TunnelProxyMode); }} disabled={savingProxy || operationBusy} data-webcodex-control="tunnel-proxy-mode" data={[{ value: "auto", label: t("settings.tunnelProxyAuto") }, { value: "direct", label: t("settings.tunnelProxyDirect") }, { value: "custom", label: t("settings.tunnelProxyCustom") }]} allowDeselect={false} /></div>
         {proxyMode === "custom" && <div className="field-group"><label htmlFor="desktop-tunnel-proxy-url">{t("settings.tunnelProxyCustomUrl")}</label><input id="desktop-tunnel-proxy-url" value={customProxy} onChange={event => setCustomProxy(event.target.value)} placeholder="http://127.0.0.1:7890" disabled={savingProxy || operationBusy} spellCheck={false} data-webcodex-control="tunnel-proxy-url" /></div>}
@@ -236,12 +241,14 @@ function SettingsView({
         </dl>
         <button type="button" className="secondary-button" onClick={() => void saveProxy()} disabled={savingProxy || operationBusy || (proxyMode === "custom" && !customProxy.trim())} data-webcodex-action="save-tunnel-proxy">{savingProxy ? p("loading") : p("saveApply")}</button>
         {proxyError && <SettingsError error={proxyError} />}
+      </>}
       </div>
       <div id="desktop-settings-runtime" hidden={section !== "runtime"}>
-        {visited.includes("runtime") && <RunnerCapacityPanel state={state} onState={onState} active={section === "runtime"} />}
+      {visited.includes("runtime") && <>
+        <RunnerCapacityPanel state={state} onState={onState} active={section === "runtime"} />
         <section className="settings-section">
         <h2>{p("serviceControls")}</h2><p className="field-help">{p("serviceControlsHelp")}</p>
-        {visited.includes("runtime") && <LocalServicesPanel state={state} onState={onState} />}
+        <LocalServicesPanel state={state} onState={onState} />
         <details className="workspace-technical"><summary>{p("advanced")}</summary>
         <div className="connection-actions">
           {onChangeSetup && <button type="button" className="secondary-button" disabled={operationBusy} onClick={onChangeSetup}>{p("changeServer")}</button>}
@@ -254,7 +261,8 @@ function SettingsView({
         </details>
         <PowerShellInstallGuidance state={state} onState={onState} />
         </section>
-        {visited.includes("runtime") && <RuntimePanel state={state} onState={onState} onActivity={onActivity} onUpdates={() => selectSection("about")} />}
+        <RuntimePanel state={state} onState={onState} onActivity={onActivity} onUpdates={() => selectSection("about")} />
+      </>}
       </div>
       <div id="desktop-settings-configuration" hidden={section !== "configuration"}>
         {visited.includes("configuration") && <ConfigurationDataPanel state={state} />}
