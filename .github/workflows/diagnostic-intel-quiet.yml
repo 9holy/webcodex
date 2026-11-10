@@ -10,13 +10,14 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 90
     env:
-      EVIDENCE: ${{ runner.temp }}/intel-quiet
       SOURCE_SHA: 3ce60fd4e65bc335744cefbff3778b3043776fd2
       SOURCE_TREE: 65f6de0ca07b50201584530e78224f979b62b868
     steps:
       - name: Initialize diagnostic evidence
         shell: bash
         run: |
+          export EVIDENCE="$RUNNER_TEMP/intel-quiet"
+          printf 'EVIDENCE=%s\n' "$EVIDENCE" >> "$GITHUB_ENV"
           mkdir -p "$EVIDENCE"
           printf 'not-run\n' > "$EVIDENCE/desktop-exit.txt"
           printf 'not-run\n' > "$EVIDENCE/gate-exit.txt"
