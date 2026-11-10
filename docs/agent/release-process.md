@@ -489,3 +489,28 @@ CI run 42523755555 and readiness run 42523756080 both passed on that source.
 This follow-up fixes the JSON-error classification visibility defect, not an
 unobserved underlying rejection on a particular user's historical Environment.
 It does not relax ownership, ACL, path, registration, or execution authority.
+
+
+### Fixed v0.5.9 all-platform continuation
+
+The [v0.5.9 controller](../../scripts/release_github_actions_v059.py),
+[request](../../.github/release-requests/v0.5.9.json),
+[bilingual notes](../../.github/release-requests/v0.5.9-notes.md), and
+[publisher](../../.github/workflows/release-publish-v059.yml) reuse the v0.5.4
+all-platform staged controller, not the Windows-only v0.5.6–v0.5.8 overrides.
+They preserve all 28 checkpoints, six native runtime archives, primary Desktop
+packages, eight unified installer targets, six source manifests, exact-source
+qualification, persistent macOS signing and immutable assets. No npm publication
+is performed.
+
+The fixed Windows worker requires five real installer scenarios on each native
+architecture, including both configured and unconfigured v0.5.4 upgrades. Both
+same-attempt reports must pass before the same public preview is promoted with
+`prerelease: false, make_latest: true`. The controller verifies that Release is
+latest, then requires image verification and the supplemental Intel DMG/checksum
+pair before completion. Earlier Windows-only releases remain unchanged.
+
+Keep source SHA/tree at 40-zero placeholders and CI/evidence run IDs at `1`
+until the release source and its successful exact attempts are known. Finalize
+code and JSON together in a separately reviewed control commit. The guard rejects
+unfinished pins before authentication or any publication operation.
