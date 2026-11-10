@@ -1,0 +1,92 @@
+name: Diagnose Intel renderer restore stages
+on:
+  push:
+    branches: [diagnostic/v059-intel-restore]
+permissions:
+  contents: read
+jobs:
+  restore-stages:
+    runs-on: macos-15-intel
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 3ce60fd4e65bc335744cefbff3778b3043776fd2
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.23.2
+      - name: Capture exact identity and host without command arguments
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/restore-profile/cpu"
+          test "$(node --version)" = v22.23.2
+          test "$(git -C source rev-parse HEAD)" = 3ce60fd4e65bc335744cefbff3778b3043776fd2
+          { git -C source rev-parse HEAD; git -C control rev-parse HEAD; node --version; npm --version; uname -a; sw_vers; sysctl hw.ncpu hw.memsize; uptime; vm_stat; } > "$RUNNER_TEMP/restore-profile/host-before.txt"
+          python3 - <<'PY'
+          import os,subprocess,json
+          lines=subprocess.check_output(['ps','-axo','pid=,ppid=,pcpu=,pmem=,comm='],text=True).splitlines()
+          rows=[]
+          for line in lines:
+              fields=line.strip().split(None,4)
+              if len(fields)==5: rows.append(dict(zip(['pid','ppid','cpu_percent','memory_percent','program'],fields[:4]+[os.path.basename(fields[4])])))
+          open(os.environ['RUNNER_TEMP']+'/restore-profile/processes-before.json','w').write(json.dumps(rows,indent=2))
+          PY
+      - name: Install locked dependency graph
+        working-directory: source
+        run: npm ci --prefix frontend && npm ci --prefix apps/desktop
+      - name: Apply instrumentation only
+        shell: bash
+        run: |
+          python3 control/.github/diagnostics/instrument-restore.py source
+          git -C source diff --check
+          git -C source diff > "$RUNNER_TEMP/restore-profile/instrumentation.patch"
+          { uptime; vm_stat; ps -axo pid=,ppid=,pcpu=,pmem=,comm= | awk '{$5=$5; sub(/^.*\//,"",$5); print $1,$2,$3,$4,$5}'; } > "$RUNNER_TEMP/restore-profile/host-before-suite.txt"
+      - name: Full suite with original deadlines and stage instrumentation
+        id: instrumented_full
+        continue-on-error: true
+        working-directory: source/apps/desktop
+        shell: bash
+        run: |
+          set +e
+          node node_modules/vitest/vitest.mjs run --silent=false --reporter=verbose --reporter=json --outputFile.json="$RUNNER_TEMP/restore-profile/full.json" 2>&1 | tee "$RUNNER_TEMP/restore-profile/full.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/restore-profile/full-exit.txt"
+          exit "$result"
+      - name: Focused CPU profile, diagnostic-only 15-second budget
+        id: profile
+        continue-on-error: true
+        working-directory: source/apps/desktop
+        shell: bash
+        run: |
+          # This larger budget applies ONLY to profiling, never release evidence.
+          echo 'DIAGNOSTIC ONLY: testTimeout=15000; cannot satisfy release gates.' > "$RUNNER_TEMP/restore-profile/profile-scope.txt"
+          set +e
+          node node_modules/vitest/vitest.mjs run src/App.test.tsx -t 'recreated UI restores state and pending page' --testTimeout=15000 --silent=false --reporter=verbose --execArgv=--cpu-prof --execArgv="--cpu-prof-dir=$RUNNER_TEMP/restore-profile/cpu" 2>&1 | tee "$RUNNER_TEMP/restore-profile/profile.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/restore-profile/profile-exit.txt"
+          exit "$result"
+      - name: Capture remaining process load
+        if: always()
+        shell: bash
+        run: |
+          { uptime; vm_stat; ps -axo pid=,ppid=,pcpu=,pmem=,comm= | awk '{$5=$5; sub(/^.*\//,"",$5); print $1,$2,$3,$4,$5}'; } > "$RUNNER_TEMP/restore-profile/host-after.txt"
+      - name: Preserve diagnostics even on test failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: intel-restore-stage-profile
+          path: ${{ runner.temp }}/restore-profile/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve original-deadline failure
+        if: always()
+        env:
+          FULL: ${{ steps.instrumented_full.outcome }}
+          PROFILE: ${{ steps.profile.outcome }}
+        run: test "$FULL" = success && test "$PROFILE" = success
