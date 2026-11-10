@@ -1,0 +1,184 @@
+name: Diagnose Intel Spotlight quiet window
+# Separate controlled observation only. Never called by release/readiness workflows.
+on:
+  push:
+    branches: [diagnostic/v059-intel-quiet]
+permissions:
+  contents: read
+jobs:
+  immutable-source-quiet-window:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    env:
+      EVIDENCE: ${{ runner.temp }}/intel-quiet
+      SOURCE_SHA: 3ce60fd4e65bc335744cefbff3778b3043776fd2
+      SOURCE_TREE: 65f6de0ca07b50201584530e78224f979b62b868
+    steps:
+      - name: Initialize diagnostic evidence
+        shell: bash
+        run: |
+          mkdir -p "$EVIDENCE"
+          printf 'not-run\n' > "$EVIDENCE/desktop-exit.txt"
+          printf 'not-run\n' > "$EVIDENCE/gate-exit.txt"
+          printf 'not-run\n' > "$EVIDENCE/watch-exit.txt"
+          printf 'not-started\n' > "$EVIDENCE/diagnostic-outcome.txt"
+          printf 'source=%s\ntree=%s\ncontrol=%s\nrun_id=%s\nattempt=%s\n' "$SOURCE_SHA" "$SOURCE_TREE" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$EVIDENCE/request-identity.txt"
+          printf '%s\n' 'Controlled diagnostic only; not formal readiness evidence and not proof of a product fix or historical causation.' > "$EVIDENCE/scope.txt"
+      - name: Checkout diagnostic observer
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: control
+          persist-credentials: false
+      - name: Checkout immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 3ce60fd4e65bc335744cefbff3778b3043776fd2
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.23.2
+      - name: Fence identity and retain observer inputs
+        shell: bash
+        run: |
+          test "$(uname -m)" = x86_64
+          test "$(sw_vers -productVersion | cut -d. -f1)" = 15
+          test "$(node --version)" = v22.23.2
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git -C source rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+          test -z "$(git -C source status --porcelain --untracked-files=all)"
+          helper="$GITHUB_WORKSPACE/control/.github/diagnostics/observe-spotlight.py"
+          workflow="$GITHUB_WORKSPACE/control/.github/workflows/diagnostic-intel-quiet.yml"
+          cp "$helper" "$workflow" "$EVIDENCE/"
+          { git -C source rev-parse HEAD HEAD^{tree}; git -C control rev-parse HEAD; shasum -a 256 "$helper" "$workflow" source/frontend/package-lock.json source/apps/desktop/package-lock.json source/apps/desktop/vite.config.ts; node --version; npm --version; python3 --version; uname -m; sw_vers; sysctl hw.ncpu hw.memsize; uptime; vm_stat; } > "$EVIDENCE/identity-host-before.txt" 2>&1
+      - name: Install locked shared frontend dependencies
+        working-directory: source
+        shell: bash
+        run: |
+          set +e
+          npm ci --prefix frontend 2>&1 | tee "$EVIDENCE/frontend-install.log"
+          result=${PIPESTATUS[0]}
+          printf '%s\n' "$result" > "$EVIDENCE/frontend-install-exit.txt"
+          exit "$result"
+      - name: Install locked Desktop dependencies
+        working-directory: source
+        shell: bash
+        run: |
+          set +e
+          npm ci --prefix apps/desktop 2>&1 | tee "$EVIDENCE/desktop-install.log"
+          result=${PIPESTATUS[0]}
+          printf '%s\n' "$result" > "$EVIDENCE/desktop-install-exit.txt"
+          exit "$result"
+      - name: Observe quiet window then run unchanged full Desktop suite
+        id: diagnostic
+        continue-on-error: true
+        working-directory: source/apps/desktop
+        shell: bash
+        run: |
+          set -uo pipefail
+          helper="$GITHUB_WORKSPACE/control/.github/diagnostics/observe-spotlight.py"
+          test "$(node --version)" = v22.23.2
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git status --porcelain --untracked-files=all > "$EVIDENCE/source-before-tests.txt"
+          test ! -s "$EVIDENCE/source-before-tests.txt"
+          # No Rust prelude, source instrumentation, cache deletion, timeout override,
+          # worker limit or retry. npm installs are complete before the gate begins.
+          set +e
+          python3 "$helper" gate --output-dir "$EVIDENCE" 2>&1 | tee "$EVIDENCE/gate.log"
+          gate_result=${PIPESTATUS[0]}
+          printf '%s\n' "$gate_result" > "$EVIDENCE/gate-exit.txt"
+          if [ "$gate_result" -ne 0 ]; then
+            printf 'no-quiet-window-tests-not-run\n' > "$EVIDENCE/diagnostic-outcome.txt"
+            exit "$gate_result"
+          fi
+          stop_file="$EVIDENCE/watch.stop"
+          python3 "$helper" watch --output-dir "$EVIDENCE" --stop-file "$stop_file" > "$EVIDENCE/watch.log" 2>&1 &
+          observer_pid=$!
+          stop_observer() {
+            touch "$stop_file"
+            wait "$observer_pid"
+            watch_result=$?
+            printf '%s\n' "$watch_result" > "$EVIDENCE/watch-exit.txt"
+          }
+          trap stop_observer EXIT
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$EVIDENCE/desktop-started-utc.txt"
+          node node_modules/vitest/vitest.mjs run --reporter=verbose --reporter=json --outputFile.json="$EVIDENCE/desktop.json" 2>&1 | tee "$EVIDENCE/desktop.log"
+          results=("${PIPESTATUS[@]}")
+          printf '%s\n' "${results[0]}" > "$EVIDENCE/desktop-exit.txt"
+          printf '%s\n' "${results[1]}" > "$EVIDENCE/desktop-log-exit.txt"
+          date -u +%Y-%m-%dT%H:%M:%SZ > "$EVIDENCE/desktop-ended-utc.txt"
+          stop_observer
+          trap - EXIT
+          printf 'quiet-window-test-executed\n' > "$EVIDENCE/diagnostic-outcome.txt"
+          # Preserve the exact test exit separately from observer/evidence validity.
+          test "${results[0]}" -eq 0 && test "${results[1]}" -eq 0 && test "$watch_result" -eq 0
+      - name: Record source cleanliness and final host snapshot
+        id: cleanliness
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          { sysctl hw.ncpu hw.memsize; uptime; vm_stat; } > "$EVIDENCE/host-after.txt" 2>&1
+          git -C source rev-parse HEAD HEAD^{tree} > "$EVIDENCE/source-after-identity.txt" 2>&1
+          git -C source status --porcelain --untracked-files=all > "$EVIDENCE/source-after-status.txt" 2>&1
+          status_result=$?
+          git -C source diff --exit-code --quiet
+          diff_result=$?
+          printf 'status=%s\ndiff=%s\n' "$status_result" "$diff_result" > "$EVIDENCE/source-cleanliness-exit.txt"
+          test "$status_result" -eq 0 && test "$diff_result" -eq 0 && test ! -s "$EVIDENCE/source-after-status.txt" && test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA" && test "$(git -C source rev-parse HEAD^{tree})" = "$SOURCE_TREE"
+      - name: Record diagnostic outcomes and report counts
+        if: always()
+        shell: bash
+        env:
+          DIAGNOSTIC_OUTCOME: ${{ steps.diagnostic.outcome }}
+          CLEANLINESS_OUTCOME: ${{ steps.cleanliness.outcome }}
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          root = Path(os.environ['EVIDENCE'])
+          result = {'classification': 'controlled diagnostic, not formal readiness evidence', 'diagnostic_step': os.environ['DIAGNOSTIC_OUTCOME'], 'cleanliness_step': os.environ['CLEANLINESS_OUTCOME']}
+          for name in ['gate', 'watch']:
+              path = root / (name + '-result.json')
+              if path.exists(): result[name] = json.loads(path.read_text())
+          for name in ['frontend-install', 'desktop-install', 'gate', 'watch', 'desktop', 'desktop-log']:
+              path = root / (name + '-exit.txt')
+              result[name + '_exit'] = path.read_text().strip() if path.exists() else 'not-run'
+          path = root / 'desktop.json'
+          if path.exists():
+              try:
+                  report = json.loads(path.read_text())
+                  result['tests'] = {key: report.get(key) for key in ['numTotalTests', 'numPassedTests', 'numFailedTests', 'numPendingTests', 'numTodoTests', 'success']}
+                  result['expected_837_tests_observed'] = report.get('numTotalTests') == 837
+              except (ValueError, OSError): result['report_error'] = 'unreadable JSON report'
+          else: result['tests'] = 'not-run-or-no-report; not a passing suite'
+          (root / 'outcomes.json').write_text(json.dumps(result, indent=2) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as stream:
+              stream.write('Controlled Intel Spotlight diagnostic only. Not formal readiness evidence.\n\n')
+              stream.write('Diagnostic step: ' + result['diagnostic_step'] + '; source cleanliness: ' + result['cleanliness_step'] + '\n\n')
+              stream.write('Gate outcome: ' + result.get('gate', {}).get('outcome', 'not-run') + '\n\n')
+              stream.write('Gate exit: ' + result['gate_exit'] + '; exact Desktop exit: ' + result['desktop_exit'] + '; observer exit: ' + result['watch_exit'] + '\n\n')
+              stream.write('Tests: ' + json.dumps(result['tests']) + '\n')
+          PY
+      - name: Upload evidence even after failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: intel-quiet-window-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/intel-quiet/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Keep busy infrastructure and every test failure visible
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ['EVIDENCE']) / 'outcomes.json').read_text())
+          assert result['diagnostic_step'] == 'success', result['diagnostic_step']
+          assert result['cleanliness_step'] == 'success', result['cleanliness_step']
+          assert result['gate_exit'] == result['desktop_exit'] == result['desktop-log_exit'] == result['watch_exit'] == '0', 'A diagnostic stage failed'
+          assert result.get('expected_837_tests_observed'), 'Missing or unexpected full-suite test count'
+          assert result['tests']['success'] is True and result['tests']['numPassedTests'] == 837 and result['tests']['numFailedTests'] == 0, 'All 837 tests must pass'
+          PY
