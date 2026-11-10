@@ -19,17 +19,17 @@ else:
     from scripts import release_github_actions_v054 as staged
 
 
-# Not finalized: bind the exact source and successful proof attempts in a
-# separate reviewed control commit. Placeholders forbid publication.
+# Final source and successful proof attempts are fixed in this reviewed
+# control commit. Unfinished or mismatched requests still forbid publication.
 SPEC = base.ReleaseSpec(
     {**base.PINNED_REQUEST,
      "version": "0.5.9", "tag": "v0.5.9", "source_ref": "release/v0.5.9",
-     "source_sha": "0000000000000000000000000000000000000000",
-     "source_tree": "0000000000000000000000000000000000000000",
-     "ci_run_id": 1, "ci_run_attempt": 1,
-     "evidence_run_id": 1, "evidence_run_attempt": 1,
+     "source_sha": "48f9b5ed9d7769f2c0d5013ac9fe5da501d626fe",
+     "source_tree": "03ceb24f7298ad0218fa88d3bbc652d8b8225c57",
+     "ci_run_id": 42731428931, "ci_run_attempt": 1,
+     "evidence_run_id": 42731428947, "evidence_run_attempt": 1,
      "notes_path": ".github/release-requests/v0.5.9-notes.md",
-     "notes_sha256": "0fd7dc4fa81839c375793ab8a3380ce15fee6e6e93e98caf7a10b207fef3990a"},
+     "notes_sha256": "0767f3bbcc09c197e03442503788d46fcdc177d39d7e42bcb24d88c4949d5ccb"},
     ".github/release-requests/v0.5.9.json",
     ".github/workflows/release-publish-v059.yml",
 )

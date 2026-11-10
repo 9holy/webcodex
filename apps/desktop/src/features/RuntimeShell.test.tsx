@@ -571,6 +571,40 @@ it("keeps the six localized navigation labels and task-based Settings categories
   expect(runtimePanel.getByRole("button", { name: "重新检查 Runtime" })).toBeInTheDocument();
 });
 
+it.each([undefined, "diagnostics"] as const)("mounts Settings editors only after first visiting their category (initial %s)", async initialSection => {
+  await act(async () => { render(wrap(<SettingsPanel state={state} onState={vi.fn()} initialSection={initialSection} />)); });
+  const selected = initialSection ?? "general";
+  for (const section of ["general", "access", "network", "runtime", "configuration", "diagnostics", "about"]) {
+    const panel = document.getElementById(`desktop-settings-${section}`)!;
+    expect(panel).toBeInTheDocument();
+    if (section !== selected) {
+      expect(panel).toBeEmptyDOMElement();
+      expect(panel).not.toBeVisible();
+    }
+  }
+  expect(api.runtimeSettings).not.toHaveBeenCalled();
+  expect(api.computerPermissions).not.toHaveBeenCalled();
+  expect(api.pathInventory).not.toHaveBeenCalled();
+  if (selected === "general") expect(api.diagnostics).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("tab", { name: "Network" }));
+  selectOption(screen.getByLabelText("Proxy mode"), "custom");
+  const proxy = screen.getByLabelText("Proxy URL");
+  fireEvent.change(proxy, { target: { value: "http://127.0.0.1:7890" } });
+  await act(async () => { fireEvent.click(screen.getByRole("tab", { name: "Troubleshooting" })); });
+  const trace = screen.getByRole("combobox", { name: "Tool request tracing" });
+  selectOption(trace, "metadata");
+  fireEvent.click(screen.getByRole("tab", { name: "Network" }));
+  expect(screen.getByLabelText("Proxy URL")).toBe(proxy);
+  expect(proxy).toHaveValue("http://127.0.0.1:7890");
+  fireEvent.click(screen.getByRole("tab", { name: "Troubleshooting" }));
+  expect(screen.getByRole("combobox", { name: "Tool request tracing" })).toBe(trace);
+  expect(trace).toHaveValue("Timing & status only");
+  expect(api.diagnostics).toHaveBeenCalledTimes(1);
+  expect(api.updateTunnelProxy).not.toHaveBeenCalled();
+  expect(api.setToolRequestTracing).not.toHaveBeenCalled();
+});
+
 it("preserves network and tracing drafts while categories change without applying effects", async () => {
   render(wrap(<SettingsPanel state={state} onState={vi.fn()} />));
   expect(api.runtimeSettings).not.toHaveBeenCalled();

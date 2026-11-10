@@ -13742,7 +13742,9 @@ function QR(t, a = {}) {
     g = ee, S.replaceChildren();
     for (const K of g) {
       if (K.dataset.selectionMotionItem = "", K.toggleAttribute("data-selection-motion-selected", K.matches(u)), f === "underline") continue;
-      const X = V(K), ne = l.getComputedStyle(K), R = i.createElement("span");
+      const X = V(K);
+      if (X.width <= 0 || X.height <= 0) continue;
+      const ne = l.getComputedStyle(K), R = i.createElement("span");
       R.dataset.selectionMotionLabel = "", Object.assign(R.style, {
         left: `${X.x}px`,
         top: `${X.y}px`,
