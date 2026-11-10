@@ -1,0 +1,179 @@
+name: Diagnose Intel Settings visited mounts
+on:
+  push:
+    branches: [diagnostic/v059-intel-settings]
+permissions:
+  contents: read
+jobs:
+  original-candidate-original:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    steps:
+      - name: Checkout diagnostic control and patch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: control
+          persist-credentials: false
+      - name: Checkout immutable release source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: 3ce60fd4e65bc335744cefbff3778b3043776fd2
+          path: source
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: extended-macos-intel-ci
+          workspaces: source -> target
+          save-if: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.23.2
+      - name: Fence source, patch scope and runtime
+        shell: bash
+        run: |
+          test "$(node --version)" = v22.23.2
+          test "$(git -C source rev-parse HEAD)" = 3ce60fd4e65bc335744cefbff3778b3043776fd2
+          mkdir -p "$RUNNER_TEMP/intel-settings"
+          patch="$GITHUB_WORKSPACE/control/.github/diagnostics/settings-visited-candidate.patch"
+          test -f "$patch"
+          test "$(shasum -a 256 "$patch" | cut -d ' ' -f 1)" = 59ad20ac57fa5b35b185dddd2a1587dd7f8ebe0ca7e883d8db7e92af45d9ce5e
+          git -C source apply --check "$patch"
+          git -C source apply --numstat "$patch" | tee "$RUNNER_TEMP/intel-settings/patch-scope.txt"
+          test "$(git -C source apply --numstat "$patch" | cut -f3 | sort)" = "$(printf '%s\n' apps/desktop/src/features/settings/SettingsPanel.tsx apps/desktop/src/features/RuntimeShell.test.tsx | sort)"
+          { git -C source rev-parse HEAD; git -C control rev-parse HEAD; shasum -a 256 "$patch"; node --version; npm --version; uname -a; sw_vers; sysctl hw.ncpu hw.memsize; } | tee "$RUNNER_TEMP/intel-settings/identity.txt"
+          cp "$patch" "$RUNNER_TEMP/intel-settings/candidate.patch"
+      - name: Prepare sanitized host snapshots
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/record-settings-host.py" <<'PYHOST'
+          import os,sys,subprocess,json
+          prefix=os.path.join(os.environ['RUNNER_TEMP'],'intel-settings',sys.argv[1])
+          with open(prefix+'-host.txt','w') as stream:
+              for command in [['sysctl','hw.ncpu','hw.memsize'],['uptime'],['vm_stat'],['rustc','-vV']]:
+                  subprocess.run(command,stdout=stream,stderr=subprocess.STDOUT,check=True)
+          rows=[]
+          for line in subprocess.check_output(['ps','-axo','pid=,ppid=,pcpu=,pmem=,comm='],text=True).splitlines():
+              fields=line.strip().split(None,4)
+              if len(fields)==5: rows.append(dict(zip(['pid','ppid','cpu_percent','memory_percent','program'],fields[:4]+[os.path.basename(fields[4])])))
+          with open(prefix+'-processes.json','w') as stream: json.dump(rows,stream,indent=2)
+          PYHOST
+          python3 "$RUNNER_TEMP/record-settings-host.py" before-rust
+      - name: Match release Intel Rust prelude
+        working-directory: source
+        shell: bash
+        env:
+          CARGO_TERM_COLOR: always
+        run: |
+          test "$(uname -m)" = x86_64
+          test "$(rustc -vV | sed -n 's/^host: //p')" = x86_64-apple-darwin
+          set -o pipefail
+          cargo check --locked --workspace 2>&1 | tee "$RUNNER_TEMP/intel-settings/rust-check.log"
+          cargo test --locked -p webcodex-runner -p webcodex-computer 2>&1 | tee "$RUNNER_TEMP/intel-settings/rust-tests.log"
+          git diff --exit-code
+          python3 "$RUNNER_TEMP/record-settings-host.py" after-rust
+      - name: Install exact source dependencies once
+        working-directory: source
+        run: npm ci --prefix frontend && npm ci --prefix apps/desktop
+      - name: Original full Desktop suite
+        id: original_before
+        continue-on-error: true
+        working-directory: source/apps/desktop
+        shell: bash
+        run: |
+          test "$(node --version)" = v22.23.2
+          python3 "$RUNNER_TEMP/record-settings-host.py" original_before-before
+          set +e
+          node node_modules/vitest/vitest.mjs run  --reporter=verbose --reporter=json --outputFile.json="$RUNNER_TEMP/intel-settings/original_before.json" 2>&1 | tee "$RUNNER_TEMP/intel-settings/original_before.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/intel-settings/original_before-exit.txt"
+          python3 "$RUNNER_TEMP/record-settings-host.py" original_before-after
+          exit "$result"
+      - name: Apply scoped candidate
+        working-directory: source
+        shell: bash
+        run: |
+          git diff --exit-code
+          git apply "$GITHUB_WORKSPACE/control/.github/diagnostics/settings-visited-candidate.patch"
+          git diff --check
+          git diff --stat | tee "$RUNNER_TEMP/intel-settings/candidate-stat.txt"
+          # Recompile source with identical packages, without reusing transform caches.
+          rm -rf apps/desktop/node_modules/.vite apps/desktop/node_modules/.vite-temp
+      - name: Candidate full Desktop suite
+        id: candidate_desktop
+        continue-on-error: true
+        working-directory: source/apps/desktop
+        shell: bash
+        run: |
+          test "$(node --version)" = v22.23.2
+          python3 "$RUNNER_TEMP/record-settings-host.py" candidate_desktop-before
+          set +e
+          node node_modules/vitest/vitest.mjs run  --reporter=verbose --reporter=json --outputFile.json="$RUNNER_TEMP/intel-settings/candidate_desktop.json" 2>&1 | tee "$RUNNER_TEMP/intel-settings/candidate_desktop.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/intel-settings/candidate_desktop-exit.txt"
+          python3 "$RUNNER_TEMP/record-settings-host.py" candidate_desktop-after
+          exit "$result"
+      - name: Candidate category retention and target-race regressions
+        id: candidate_retention
+        continue-on-error: true
+        working-directory: source/apps/desktop
+        shell: bash
+        run: |
+          test "$(node --version)" = v22.23.2
+          python3 "$RUNNER_TEMP/record-settings-host.py" candidate_retention-before
+          set +e
+          node node_modules/vitest/vitest.mjs run src/features/RuntimeShell.test.tsx src/features/settings/SettingsPanel.races.test.tsx --reporter=verbose --reporter=json --outputFile.json="$RUNNER_TEMP/intel-settings/candidate_retention.json" 2>&1 | tee "$RUNNER_TEMP/intel-settings/candidate_retention.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/intel-settings/candidate_retention-exit.txt"
+          python3 "$RUNNER_TEMP/record-settings-host.py" candidate_retention-after
+          exit "$result"
+      - name: Revert candidate for order control
+        working-directory: source
+        shell: bash
+        run: |
+          git apply --reverse "$GITHUB_WORKSPACE/control/.github/diagnostics/settings-visited-candidate.patch"
+          git diff --exit-code
+          rm -rf apps/desktop/node_modules/.vite apps/desktop/node_modules/.vite-temp
+      - name: Original full Desktop suite after revert
+        id: original_after
+        continue-on-error: true
+        working-directory: source/apps/desktop
+        shell: bash
+        run: |
+          test "$(node --version)" = v22.23.2
+          python3 "$RUNNER_TEMP/record-settings-host.py" original_after-before
+          set +e
+          node node_modules/vitest/vitest.mjs run  --reporter=verbose --reporter=json --outputFile.json="$RUNNER_TEMP/intel-settings/original_after.json" 2>&1 | tee "$RUNNER_TEMP/intel-settings/original_after.log"
+          result=${PIPESTATUS[0]}
+          echo "$result" > "$RUNNER_TEMP/intel-settings/original_after-exit.txt"
+          python3 "$RUNNER_TEMP/record-settings-host.py" original_after-after
+          exit "$result"
+      - name: Record independent outcomes
+        if: always()
+        shell: bash
+        env:
+          ORIGINAL_BEFORE: ${{ steps.original_before.outcome }}
+          CANDIDATE_DESKTOP: ${{ steps.candidate_desktop.outcome }}
+          CANDIDATE_RETENTION: ${{ steps.candidate_retention.outcome }}
+          ORIGINAL_AFTER: ${{ steps.original_after.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/intel-settings"
+          printf 'original_before=%s\ncandidate_desktop=%s\ncandidate_retention=%s\noriginal_after=%s\n' "$ORIGINAL_BEFORE" "$CANDIDATE_DESKTOP" "$CANDIDATE_RETENTION" "$ORIGINAL_AFTER" | tee "$RUNNER_TEMP/intel-settings/outcomes.txt" >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload evidence even when tests failed
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: intel-settings-original-candidate-original
+          path: ${{ runner.temp }}/intel-settings/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Preserve every baseline and candidate failure
+        if: always()
+        env:
+          ORIGINAL_BEFORE: ${{ steps.original_before.outcome }}
+          CANDIDATE_DESKTOP: ${{ steps.candidate_desktop.outcome }}
+          CANDIDATE_RETENTION: ${{ steps.candidate_retention.outcome }}
+          ORIGINAL_AFTER: ${{ steps.original_after.outcome }}
+        run: test "$ORIGINAL_BEFORE" = success && test "$CANDIDATE_DESKTOP" = success && test "$CANDIDATE_RETENTION" = success && test "$ORIGINAL_AFTER" = success
