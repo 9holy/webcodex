@@ -40,6 +40,7 @@ export interface TunnelConnection {
   startup_timings_ms?: { cli_total: number; initial_poll: number; poll_attempts?: number | null; poll_request_ms?: number | null } | null;
   tunnel_ready: boolean | null;
   local_mcp_ready: boolean | null;
+  command_diagnostics?: { rejected_commands: number; terminal_response_delivery_failures: number } | null;
   failure_stage: string | null;
   reason_code: string | null;
   auto_proxy_used: boolean | null;

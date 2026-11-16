@@ -35,10 +35,11 @@ async fn attempted_sse_terminal_is_not_replaced_after_delivery_failure() {
     let mut mcp = Server::new().await;
     let limits = Limits {
         concurrency: 1,
-        response_attempts: 1,
+        response_attempts: 2,
         ..Limits::default()
     };
     let client = client(&cp, &mcp, limits, DeadlinePolicy::default());
+    let health = client.health();
     let mut polls = Polls::start(&mut cp, vec![json!([command("one"), command("two")])]);
     let (stop, task) = start(client);
     mcp.next().await.raw(
@@ -48,7 +49,12 @@ async fn attempted_sse_terminal_is_not_replaced_after_delivery_failure() {
     );
     let first = polls.response().await;
     assert_eq!(first.json()["resp_json"]["id"], "one");
+    let original = first.body.clone();
     first.disconnect();
+    let retried = polls.response().await;
+    assert_eq!(retried.body, original);
+    assert_eq!(health.snapshot().terminal_response_delivery_failures, 0);
+    retried.respond(503, "");
     // With one worker, seeing the second dispatch proves the first worker
     // completed; a replacement terminal must not have been queued before it.
     mcp.next()
@@ -58,6 +64,7 @@ async fn attempted_sse_terminal_is_not_replaced_after_delivery_failure() {
     assert_eq!(second.json()["request_id"], "two");
     second.respond(200, "{}");
     assert_eq!(finish(stop, task).await, Err(Error::Uncertain));
+    assert_eq!(health.snapshot().terminal_response_delivery_failures, 1);
     assert!(mcp.requests.try_recv().is_err());
 }
 

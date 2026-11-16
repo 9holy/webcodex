@@ -16,6 +16,7 @@ pub(crate) struct State {
     pub first_poll_request_ms: AtomicU64,
     pub unsettled: AtomicUsize,
     pub rejected: AtomicUsize,
+    pub terminal_response_delivery_failures: AtomicUsize,
     enqueue_timestamp_valid: AtomicU64,
     enqueue_timestamp_unverifiable: AtomicU64,
 }
@@ -29,6 +30,10 @@ pub struct HealthSnapshot {
     /// Includes both currently executing and unconfirmed exchanges.
     pub unsettled_commands: usize,
     pub rejected_commands: usize,
+    /// Commands ending with `Error::Delivery` in this process run, excluding
+    /// active work, recovered retries, and best-effort progress upload failures.
+    #[serde(default)]
+    pub terminal_response_delivery_failures: usize,
 }
 impl Health {
     /// Payload-free preflight evidence; valid syntax alone does not establish
@@ -68,6 +73,10 @@ impl Health {
             ready: self.is_ready(),
             unsettled_commands: self.0.unsettled.load(Ordering::SeqCst),
             rejected_commands: self.rejected_commands(),
+            terminal_response_delivery_failures: self
+                .0
+                .terminal_response_delivery_failures
+                .load(Ordering::Relaxed),
         }
     }
     pub fn is_ready(&self) -> bool {
@@ -121,6 +130,18 @@ impl Health {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_snapshot_defaults_terminal_response_delivery_failures() {
+        let snapshot: HealthSnapshot = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "ready": true,
+            "unsettled_commands": 0,
+            "rejected_commands": 0,
+        }))
+        .unwrap();
+        assert_eq!(snapshot.terminal_response_delivery_failures, 0);
+    }
 
     #[test]
     fn enqueue_counters_saturate_independently() {

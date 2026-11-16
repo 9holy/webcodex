@@ -137,6 +137,12 @@ impl TunnelClient {
                 .unwrap_or(Err(Error::Deadline)),
             None => operation.await,
         };
+        if result == Err(Error::Delivery) {
+            self.health
+                .0
+                .terminal_response_delivery_failures
+                .fetch_add(1, Ordering::Relaxed);
+        }
         match result {
             Err(Error::Authentication | Error::Redirect) => result,
             // Receipt remains retained even when execution/delivery could not finish.
