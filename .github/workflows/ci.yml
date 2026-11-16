@@ -38,6 +38,8 @@ jobs:
     permissions:
       contents: read
     outputs:
+      # Human-approved Windows-first fork release; other branches retain full native policy.
+      platform_scope: ${{ github.repository == '9holy/webcodex' && github.event_name == 'push' && github.ref == 'refs/heads/release/v0.5.10' && 'windows' || 'all' }}
       needs_windows: ${{ steps.classify.outputs.needs_windows }}
       needs_windows_core: ${{ steps.classify.outputs.needs_windows_core }}
       needs_windows_runner: ${{ steps.classify.outputs.needs_windows_runner }}
@@ -638,7 +640,7 @@ jobs:
 
   test-macos-core:
     needs: changes
-    if: needs.changes.outputs.needs_macos == 'true'
+    if: needs.changes.outputs.platform_scope != 'windows' && needs.changes.outputs.needs_macos == 'true'
     # Daily macOS coverage uses Apple Silicon. Intel is intentionally reserved for
     # explicit/release-time extended-native validation.
     strategy:
@@ -646,7 +648,7 @@ jobs:
       matrix:
         include:
           - platform: darwin-arm64
-            runner: macos-15
+            runner: macos-26
             host_arch: arm64
             rust_host: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
@@ -687,7 +689,7 @@ jobs:
 
   test-macos-desktop:
     needs: changes
-    if: needs.changes.outputs.needs_macos_desktop == 'true'
+    if: needs.changes.outputs.platform_scope != 'windows' && needs.changes.outputs.needs_macos_desktop == 'true'
     # Keep the common Apple-Silicon Desktop package validation path-aware. The
     # corresponding Intel DMG build/smoke lives in extended-native CI.
     strategy:
@@ -695,7 +697,7 @@ jobs:
       matrix:
         include:
           - platform: darwin-arm64
-            runner: macos-15
+            runner: macos-26
             host_arch: arm64
             rust_host: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
@@ -829,8 +831,8 @@ jobs:
         env:
           CONTRACT_RESULT: ${{ needs.contract.result }}
           CHANGES_RESULT: ${{ needs.changes.result }}
-          NEEDS_CORE: ${{ needs.changes.outputs.needs_macos }}
-          NEEDS_DESKTOP: ${{ needs.changes.outputs.needs_macos_desktop }}
+          NEEDS_CORE: ${{ needs.changes.outputs.platform_scope != 'windows' && needs.changes.outputs.needs_macos == 'true' }}
+          NEEDS_DESKTOP: ${{ needs.changes.outputs.platform_scope != 'windows' && needs.changes.outputs.needs_macos_desktop == 'true' }}
           CORE_RESULT: ${{ needs.test-macos-core.result }}
           DESKTOP_RESULT: ${{ needs.test-macos-desktop.result }}
         run: |

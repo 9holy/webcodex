@@ -9,12 +9,23 @@ on:
         description: Exact 40-character source commit to validate
         required: true
         type: string
+      platform_scope:
+        description: Reviewed delivery scope; omitted scope retains all native platforms
+        required: false
+        default: all
+        type: string
   workflow_dispatch:
     inputs:
       source_sha:
         description: Exact 40-character source commit to validate
         required: true
         type: string
+      platform_scope:
+        description: Explicit delivery scope to validate
+        required: false
+        default: all
+        type: choice
+        options: [all, windows]
 
 # Expensive/scarce native architectures live here instead of ordinary PR/main CI.
 # Release readiness calls this workflow for the exact pre-tag source, while maintainers
@@ -38,9 +49,11 @@ jobs:
         shell: bash
         env:
           SOURCE_SHA: ${{ inputs.source_sha }}
+          PLATFORM_SCOPE: ${{ inputs.platform_scope }}
         run: |
           set -euo pipefail
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$PLATFORM_SCOPE" in all|windows) ;; *) exit 2 ;; esac
 
   linux-arm64:
     needs: source
@@ -72,6 +85,7 @@ jobs:
 
   macos-intel:
     needs: source
+    if: inputs.platform_scope != 'windows'
     runs-on: macos-15-intel
     timeout-minutes: 90
     steps:
@@ -352,15 +366,21 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Require all extended native lanes
+      - name: Require selected extended native lanes
         shell: bash
         env:
           SOURCE_RESULT: ${{ needs.source.result }}
           LINUX_ARM64_RESULT: ${{ needs.linux-arm64.result }}
           MACOS_INTEL_RESULT: ${{ needs.macos-intel.result }}
           WINDOWS_ARM64_RESULT: ${{ needs.windows-arm64.result }}
+          PLATFORM_SCOPE: ${{ inputs.platform_scope }}
         run: |
           set -euo pipefail
-          for result in "$SOURCE_RESULT" "$LINUX_ARM64_RESULT" "$MACOS_INTEL_RESULT" "$WINDOWS_ARM64_RESULT"; do
+          for result in "$SOURCE_RESULT" "$LINUX_ARM64_RESULT" "$WINDOWS_ARM64_RESULT"; do
             test "$result" = success
           done
+          case "$PLATFORM_SCOPE" in
+            all) test "$MACOS_INTEL_RESULT" = success ;;
+            windows) test "$MACOS_INTEL_RESULT" = skipped ;;
+            *) exit 2 ;;
+          esac

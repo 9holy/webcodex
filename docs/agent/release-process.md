@@ -84,6 +84,16 @@ results (if any), and any deferred checks.
 
 ### GitHub-only fork distributions
 
+The explicitly approved `9holy/webcodex` `v0.5.10` first delivery is Windows
+x64/ARM64 only. Its exact release-branch push CI and source-evidence workflow
+omit macOS lanes by this reviewed delivery policy; all Windows and shared
+checks must still succeed. Other branches and repositories keep the full native
+policy. The formal build and public verification use `platform_scope=windows`,
+including all eleven Windows assets and five installation scenarios per
+architecture. Keep the previous full-platform `latest`. Missing Linux/macOS
+packages will ship in a subsequent full-platform version, without replacing
+this release's immutable manifests, checksums or installer bytes.
+
 An explicitly requested fork distribution can use `preflight --github-only
 --repo <OWNER/REPO>` and the low-level readiness, build, collect, and draft
 verification commands. This selects the publication destination; it does not
