@@ -15,6 +15,23 @@ def job(text: str, name: str) -> str:
 
 
 class ContractOwnershipTests(unittest.TestCase):
+    def test_windows_first_policy_is_fixed_to_the_approved_fork_release_source(self) -> None:
+        ci = (ROOT / ".github/workflows/ci.yml").read_text()
+        changes = job(ci, "changes")
+        self.assertIn("github.repository == '9holy/webcodex' && github.event_name == 'push' && "
+                      "github.ref == 'refs/heads/release/v0.5.10' && 'windows' || 'all'", changes)
+        for lane in ("test-macos-core", "test-macos-desktop"):
+            self.assertIn("if: needs.changes.outputs.platform_scope != 'windows' && ", job(ci, lane))
+        for lane in ("test-windows-core", "test-windows-runner", "test-windows-package", "test-windows-desktop"):
+            self.assertNotIn("platform_scope", job(ci, lane))
+        macos_gate = job(ci, "test-macos")
+        for field in ("NEEDS_CORE", "NEEDS_DESKTOP"):
+            self.assertRegex(macos_gate, field + r": \$\{\{ needs.changes.outputs.platform_scope != 'windows' && ")
+        readiness = (ROOT / ".github/workflows/release-readiness.yml").read_text()
+        self.assertIn("github.repository == '9holy/webcodex' && "
+                      "github.ref == 'refs/heads/release/v0.5.10' && 'windows' || 'all'", job(readiness, "ci-proof"))
+        self.assertIn("platform_scope: ${{ needs.ci-proof.outputs.platform_scope }}", job(readiness, "extended-native"))
+
     def test_native_ssh_runs_before_packaging_without_losing_installer_gates(self) -> None:
         lane = job((ROOT / ".github/workflows/ci.yml").read_text(), "test-windows-desktop")
         names = re.findall(r"(?m)^      - name: (.+)$", lane)
