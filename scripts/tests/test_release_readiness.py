@@ -801,7 +801,8 @@ class WorkflowContractTests(unittest.TestCase):
             block = workflow[start:end]
             with self.subTest(job=job_name):
                 self.assertIn("needs: changes", block)
-                self.assertIn(f"if: needs.changes.outputs.{output_name} == 'true'", block)
+                delivery_scope = "needs.changes.outputs.platform_scope != 'windows' && " if job_name.startswith("test-macos-") else ""
+                self.assertIn(f"if: {delivery_scope}needs.changes.outputs.{output_name} == 'true'", block)
 
         for aggregate in ("test", "test-macos", "test-windows", "test-native"):
             start = workflow.index(f"  {aggregate}:\n")

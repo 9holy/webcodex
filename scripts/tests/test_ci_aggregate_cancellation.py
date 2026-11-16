@@ -18,12 +18,12 @@ ROOT = Path(__file__).resolve().parents[2]
 AGGREGATES = ("test", "test-macos", "test-windows", "test-native")
 
 
-def aggregate(name: str) -> tuple[str, dict[str, str], str]:
-    body = job((ROOT / ".github/workflows/ci.yml").read_text(), name)
+def aggregate(name: str, workflow: str = "ci.yml") -> tuple[str, dict[str, str], str]:
+    body = job((ROOT / ".github/workflows" / workflow).read_text(), name)
     guard = re.search(r"^    if: (.+)$", body, re.MULTILINE)
     if guard is None:
         raise AssertionError(f"{name}: missing scheduler guard")
-    env = dict(re.findall(r"^          ([A-Z_]+): \$\{\{ (needs\.[^\n]+) \}\}$", body, re.MULTILINE))
+    env = dict(re.findall(r"^          ([A-Z0-9_]+): \$\{\{ (needs\.[^\n]+) \}\}$", body, re.MULTILINE))
     script = re.search(r"^        run: \|\n((?:          [^\n]*\n|\n)+)", body, re.MULTILINE)
     if script is None:
         raise AssertionError(f"{name}: missing aggregate script")
@@ -42,8 +42,8 @@ class AggregateCancellationTests(unittest.TestCase):
                 self.assertGreaterEqual(len(env), 4)
                 self.assertNotIn("continue-on-error:", job((ROOT / ".github/workflows/ci.yml").read_text(), name))
 
-    def run_gate(self, name: str, overrides: dict[str, str]) -> subprocess.CompletedProcess[str]:
-        _, fields, script = aggregate(name)
+    def run_gate(self, name: str, overrides: dict[str, str], workflow: str = "ci.yml") -> subprocess.CompletedProcess[str]:
+        _, fields, script = aggregate(name, workflow)
         env = os.environ.copy()
         env.update({key: "true" if key.startswith("NEEDS_") else "success" for key in fields})
         env.update(overrides)
@@ -73,6 +73,26 @@ class AggregateCancellationTests(unittest.TestCase):
                     self.assertEqual(self.run_gate(name, {f"NEEDS_{lane}": "false", f"{lane}_RESULT": "skipped"}).returncode, 0)
                     for result in ("failure", "cancelled", "success"):
                         self.assertNotEqual(self.run_gate(name, {f"NEEDS_{lane}": "false", f"{lane}_RESULT": result}).returncode, 0)
+
+    def test_windows_delivery_requires_both_macos_lanes_to_be_intentionally_skipped(self) -> None:
+        selected = {"NEEDS_CORE": "false", "NEEDS_DESKTOP": "false",
+                    "CORE_RESULT": "skipped", "DESKTOP_RESULT": "skipped"}
+        self.assertEqual(self.run_gate("test-macos", selected).returncode, 0)
+        for lane in ("CORE_RESULT", "DESKTOP_RESULT"):
+            for result in ("failure", "cancelled", "success"):
+                with self.subTest(lane=lane, result=result):
+                    self.assertNotEqual(self.run_gate("test-macos", {**selected, lane: result}).returncode, 0)
+
+    def test_extended_native_scope_preserves_required_selected_and_shared_lanes(self) -> None:
+        for scope in ("all", "windows", "unknown"):
+            selected = {"PLATFORM_SCOPE": scope,
+                        "MACOS_INTEL_RESULT": "skipped" if scope == "windows" else "success"}
+            self.assertEqual(self.run_gate("summary", selected, "extended-native.yml").returncode == 0,
+                             scope != "unknown")
+            for lane in ("SOURCE_RESULT", "LINUX_ARM64_RESULT", "WINDOWS_ARM64_RESULT", "MACOS_INTEL_RESULT"):
+                for result in ("failure", "cancelled"):
+                    with self.subTest(scope=scope, lane=lane, result=result):
+                        self.assertNotEqual(self.run_gate("summary", {**selected, lane: result}, "extended-native.yml").returncode, 0)
 
 
 if __name__ == "__main__":

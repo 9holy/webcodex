@@ -60,6 +60,9 @@ jobs:
   ci-proof:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    outputs:
+      # Scope is fixed by reviewed source policy, never inferred from failed jobs.
+      platform_scope: ${{ github.repository == '9holy/webcodex' && github.ref == 'refs/heads/release/v0.5.10' && 'windows' || 'all' }}
     steps:
       - name: Fence exact source and immutable evidence
         shell: bash
@@ -179,6 +182,7 @@ jobs:
     uses: ./.github/workflows/extended-native.yml
     with:
       source_sha: ${{ inputs.source_sha || github.sha }}
+      platform_scope: ${{ needs.ci-proof.outputs.platform_scope }}
 
   e2e:
     needs: ci-proof
