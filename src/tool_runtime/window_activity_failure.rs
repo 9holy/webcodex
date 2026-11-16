@@ -43,6 +43,7 @@ pub(crate) enum CallFailureReason {
     Timeout,
     ResultUnconfirmed,
     StaleState,
+    EditConflict,
     DetailsUnavailable,
 }
 
@@ -126,6 +127,7 @@ fn safe_kind(value: Option<&str>) -> Option<&'static str> {
             "match_count_mismatch",
             "multiple_matches",
             "conflict",
+            "edit_conflict",
             "not_started",
         ],
     )
@@ -186,6 +188,7 @@ fn reason(kind: Option<&str>) -> CallFailureReason {
             ProviderUnavailable
         }
         Some("command_exit_nonzero") => ExecutionError,
+        Some("edit_conflict") => EditConflict,
         Some("timeout" | "dispatch_hard_timeout" | "ssh_connection_timeout") => Timeout,
         Some("outcome_unknown" | "coding_agent_permission_response_uncertain") => ResultUnconfirmed,
         Some(
@@ -343,6 +346,21 @@ mod tests {
                 .unwrap();
         assert_eq!(post_execution.outcome, CallFailureOutcome::CallFailed);
         assert!(project_call_failure("success", &metadata("permission_denied", None)).is_none());
+    }
+
+    #[test]
+    fn edit_conflict_preserves_recorded_lifecycle_without_guessing_its_cause() {
+        for (state, outcome) in [
+            (Some("not_started"), CallFailureOutcome::Rejected),
+            (Some("outcome_unknown"), CallFailureOutcome::OutcomeUnknown),
+            (None, CallFailureOutcome::CallFailed),
+        ] {
+            let failure =
+                project_call_failure("failed", &metadata("edit_conflict", state)).unwrap();
+            assert_eq!(failure.reason, CallFailureReason::EditConflict);
+            assert_eq!(failure.error_kind, Some("edit_conflict"));
+            assert_eq!(failure.outcome, outcome);
+        }
     }
 
     #[test]
