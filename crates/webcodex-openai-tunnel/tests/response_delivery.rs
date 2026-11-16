@@ -20,6 +20,7 @@ async fn ambiguous_notification_is_not_replayed_and_final_result_is_delivered() 
     assert_eq!(terminal.json()["resp_type"], "jsonrpc_response");
     terminal.respond(200, "{}");
     settled(&health).await;
+    assert_eq!(health.snapshot().terminal_response_delivery_failures, 0);
     assert_eq!(finish(stop, task).await, Ok(()));
     assert!(polls.responses.try_recv().is_err());
 }

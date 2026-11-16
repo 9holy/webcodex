@@ -102,6 +102,10 @@ export function ConnectionCard({ profile, canStart, busy, copied, onAction, onEd
     { label: "tunnelReady", value: yesNo(profile.tunnel_ready) },
     { label: "localMcpReady", value: yesNo(profile.local_mcp_ready) },
   );
+  if (profile.command_diagnostics) detailRows.push(
+    { label: "rejectedCommands", value: profile.command_diagnostics.rejected_commands },
+    { label: "terminalDeliveryFailures", value: profile.command_diagnostics.terminal_response_delivery_failures },
+  );
   if (profile.failure_stage) detailRows.push({ label: "failureStage", value: <code>{profile.failure_stage}</code> });
   if (profile.reason_code) detailRows.push({ label: "reasonCode", value: <code>{profile.reason_code}</code> });
   if (profile.local_mcp_url) detailRows.push({ label: "mcpAddress", value: <code>{profile.local_mcp_url}</code>, path: true });

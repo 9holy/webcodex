@@ -39,6 +39,7 @@ it.each([
   ["capability_unavailable", "capability_unavailable", "The selected Runner or execution target does not support the requested capability.", "所选 Runner 或执行目标不支持所请求的能力。"],
   ["agent_capability_unavailable", "capability_unavailable", "The selected Runner or execution target does not support the requested capability.", "所选 Runner 或执行目标不支持所请求的能力。"],
   ["runtime_error", "runtime_error", "WebCodex recorded a runtime error for this call.", "WebCodex 为此次调用记录了运行时错误。"],
+  ["edit_conflict", "edit_conflict", "The file edit conflicts with the current content or its line-ending format.", "文件编辑与当前内容或换行格式存在冲突。"],
 ])("shows the recorded %s reason in English and Chinese", (code, reason, english, chinese) => {
   const failure: CallFailure = { outcome: "rejected", reason, failure_kind: code, execution_state: "not_started" };
   expect(show(failure, "run_shell")?.failure).toEqual(failure);

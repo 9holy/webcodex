@@ -159,7 +159,8 @@ async fn report_regular_tunnel_health(
     );
     loop {
         interval.tick().await;
-        let tunnel_ready = health.is_ready();
+        let transport = health.snapshot();
+        let tunnel_ready = transport.ready;
         let local_mcp_ready = probe_local_mcp(&client, local_mcp_url, bootstrap).await;
         if let Some(event) = enqueue_diagnostics.observe(health.enqueue_timestamp_counts()) {
             println!("{event}");
@@ -171,7 +172,11 @@ async fn report_regular_tunnel_health(
         if events.should_emit(Instant::now(), tunnel_ready, local_mcp_ready) {
             println!(
                 "{}",
-                json!({"event":"health", "schema_version":1, "tunnel_ready":tunnel_ready, "local_mcp_ready":local_mcp_ready})
+                json!({"event":"health", "schema_version":1, "tunnel_ready":tunnel_ready, "local_mcp_ready":local_mcp_ready,
+                "command_diagnostics":{
+                    "rejected_commands":transport.rejected_commands,
+                    "terminal_response_delivery_failures":transport.terminal_response_delivery_failures
+                }})
             );
         }
     }

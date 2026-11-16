@@ -51,6 +51,15 @@ in-flight work, not just failures. No URLs, keys, payloads or request IDs appear
 in that snapshot. `FixedMcpTarget::unauthenticated(url)` is an explicit option for
 an endpoint that requires no local header; the control-plane key is never reused.
 
+`terminal_response_delivery_failures` counts final response uploads that still
+failed after the existing attempts. Recovered retries and best-effort progress
+failures followed by a successful final response do not increment it. It does
+not count every form of uncertainty or prove execution failed. The counter and
+`rejected_commands` are cumulative for this process run; Desktop-owned Tunnel
+health streams expose them in Connection Details without changing readiness or
+replaying work. Older heartbeats omit them; malformed optional observations are
+ignored without changing readiness.
+
 ```rust,no_run
 use std::time::Duration;
 use webcodex_openai_tunnel::{

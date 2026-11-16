@@ -471,6 +471,7 @@ fn transition_capacity_is_bounded_without_history_eviction() {
     assert_eq!(cutoff, Some(16));
     assert!(!receipts.claim("old-admitted-effect").unwrap());
     owner.finish().unwrap();
+    drop(receipts);
     f.unchanged_prefixes();
 }
 
@@ -494,6 +495,7 @@ fn returning_to_an_earlier_credential_is_a_new_revision_with_a_later_cutoff() {
     assert!(!receipts.claim("old-admitted-effect").unwrap());
     assert!(!receipts.claim("admitted-under-b").unwrap());
     owner.finish().unwrap();
+    drop(receipts);
     f.unchanged_prefixes();
 }
 

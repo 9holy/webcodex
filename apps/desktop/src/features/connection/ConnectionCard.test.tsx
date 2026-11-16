@@ -22,6 +22,9 @@ describe("Connection advanced details", () => {
       local_mcp_ready: false,
       process_ready: true,
       process_started: true,
+      command_diagnostics: { rejected_commands: 2, terminal_response_delivery_failures: 1 },
+      lifecycle: "error", last_error: "tunnel_unavailable", ready: false,
+      reason_code: "tunnel_restart_uncertain", failure_stage: "tunnel_recovery",
     });
     const { container } = render(
       <LocaleProvider>
@@ -55,6 +58,7 @@ describe("Connection advanced details", () => {
       "firstControlPlanePoll", "initialPollRequests", "pollHttpTime",
       "pollRetryWait", "otherStartupWork", "tunnelReady",
       "localMcpReady", "mcpAddress", "runtimeDirectory",
+      "rejectedCommands", "terminalDeliveryFailures",
     ] as const) {
       expect(pairs.has(connectionsToolsText(locale, key))).toBe(true);
     }
@@ -62,6 +66,9 @@ describe("Connection advanced details", () => {
     expect(pairs.get(connectionsToolsText(locale, "localMcpReady"))).toBe(connectionsToolsText(locale, "no"));
     expect(pairs.get(connectionsToolsText(locale, "pollRetryWait"))).toBe("8 ms");
     expect(pairs.get(connectionsToolsText(locale, "runtimeDirectory"))).toBe(path);
+    expect(pairs.get(connectionsToolsText(locale, "rejectedCommands"))).toBe("2");
+    expect(pairs.get(connectionsToolsText(locale, "terminalDeliveryFailures"))).toBe("1");
+    expect(container.textContent).toContain(connectionsToolsText(locale, "restartUncertainRecovery"));
     expect(details?.querySelectorAll("dd.connection-meta-path code")).toHaveLength(2);
     expect(details?.querySelector("dd.connection-meta-path code:last-child")).toBeTruthy();
   });
@@ -79,6 +86,8 @@ describe("Connection advanced details", () => {
     const labels = Array.from(details.querySelectorAll("dt"), (dt) => dt.textContent);
     expect(labels).not.toContain(CONNECTIONS_TOOLS_MESSAGES.initialPollRequests[1]);
     expect(labels).not.toContain(CONNECTIONS_TOOLS_MESSAGES.runtimeDirectory[1]);
+    expect(labels).not.toContain(CONNECTIONS_TOOLS_MESSAGES.rejectedCommands[1]);
+    expect(labels).not.toContain(CONNECTIONS_TOOLS_MESSAGES.terminalDeliveryFailures[1]);
     expect(Array.from(details.querySelectorAll("dt")).find(dt => dt.textContent === CONNECTIONS_TOOLS_MESSAGES.localMcpReady[1])?.nextElementSibling?.textContent).toBe("—");
   });
 });
