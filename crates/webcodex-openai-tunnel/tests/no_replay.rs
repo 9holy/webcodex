@@ -18,6 +18,8 @@ async fn mcp_effect_is_dispatched_once_when_terminal_response_delivery_is_ambigu
     );
     let (stop, task) = start(client);
     let effect = mcp.next().await;
+    assert_eq!(health.snapshot().unsettled_commands, 1);
+    assert_eq!(health.snapshot().terminal_response_delivery_failures, 0);
     assert_eq!(effect.headers["authorization"], "Bearer local-secret");
     assert!(!effect.headers.contains_key("x-tunnel-shard-token"));
     effect.respond(200, r#"{"jsonrpc":"2.0","id":"one","result":{}}"#);
@@ -32,6 +34,7 @@ async fn mcp_effect_is_dispatched_once_when_terminal_response_delivery_is_ambigu
     assert_eq!(third.body, original);
     third.respond(200, "{}");
     settled(&health).await;
+    assert_eq!(health.snapshot().terminal_response_delivery_failures, 0);
     assert!(mcp.requests.try_recv().is_err());
     assert_eq!(finish(stop, task).await, Ok(()));
 }

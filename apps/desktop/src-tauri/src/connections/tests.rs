@@ -76,6 +76,16 @@ fn startup_timings_are_bounded_and_cannot_change_readiness() {
     }
 }
 
+#[test]
+fn command_diagnostics_reject_counts_that_cannot_be_displayed_exactly() {
+    for count in [json!(-1), json!(0.5), json!(9_007_199_254_740_992_u64)] {
+        assert!(parse_command_diagnostics(&json!({
+            "rejected_commands": count, "terminal_response_delivery_failures": 0
+        }))
+        .is_none());
+    }
+}
+
 fn metadata() -> Value {
     let directory = root().join(format!("openai-{}", uuid::Uuid::new_v4().simple()));
     json!({"directory":directory, "local_mcp_url":"http://127.0.0.1:62645/mcp"})
@@ -161,6 +171,98 @@ async fn wait_running(
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+}
+
+#[tokio::test]
+async fn optional_command_diagnostics_preserve_health_and_reset_for_a_new_process() {
+    let registry = ConnectionRuntimes::default();
+    let supervisor = Arc::new(tokio::sync::Mutex::new(ProcessSupervisor::new(
+        ActivityLog::default(),
+    )));
+    let id = TunnelProfileId::new();
+    let command = fixture(&[
+        json!({"event":"ready", "schema_version":2, "provider":"openai", "runtime":metadata()}),
+        json!({"event":"health", "schema_version":1, "tunnel_ready":true, "local_mcp_ready":true,
+            "command_diagnostics":{"rejected_commands":2,"terminal_response_delivery_failures":1}}),
+        json!({"event":"health", "schema_version":1, "tunnel_ready":true, "local_mcp_ready":true,
+            "command_diagnostics":{"rejected_commands":"PRIVATE_VALUE","terminal_response_delivery_failures":3}}),
+        // A distinct final health state proves the malformed optional observation
+        // did not stop the observer before the following legacy heartbeat.
+        json!({"event":"health", "schema_version":1, "tunnel_ready":false, "local_mcp_ready":true}),
+    ]);
+    let mut guard = supervisor.lock().await;
+    let events = guard
+        .spawn_owned(ProcessKey::RegularTunnel(id), command, true)
+        .await
+        .unwrap()
+        .unwrap();
+    let process = guard.snapshot(ProcessKey::RegularTunnel(id)).unwrap();
+    drop(guard);
+    registry.start(
+        id,
+        process,
+        events,
+        root(),
+        "http://127.0.0.1:62645/mcp".into(),
+        false,
+        supervisor.clone(),
+        ActivityLog::default(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(8);
+    let observed = loop {
+        let mut current = snapshot(&[id]);
+        registry.project(&mut current, true);
+        if current.profiles[0].runtime.tunnel_ready == Some(false) {
+            break current;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "final heartbeat was not observed: {current:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let state = &observed.profiles[0].runtime;
+    assert_eq!(state.lifecycle, ConnectionLifecycle::Running);
+    assert_eq!(state.last_error, Some(ConnectionError::TunnelUnavailable));
+    assert_eq!(
+        state.command_diagnostics,
+        Some(ConnectionCommandDiagnostics {
+            rejected_commands: 2,
+            terminal_response_delivery_failures: 1,
+        })
+    );
+    assert!(!serde_json::to_string(state).unwrap().contains("PRIVATE"));
+    assert_eq!(
+        supervisor
+            .lock()
+            .await
+            .snapshot(ProcessKey::RegularTunnel(id))
+            .unwrap()
+            .phase,
+        ProcessPhase::Running
+    );
+    registry.stopping(id);
+    supervisor
+        .lock()
+        .await
+        .stop_checked(ProcessKey::RegularTunnel(id))
+        .await
+        .unwrap();
+    registry.stopped(id, true);
+    start(&registry, &supervisor, id).await;
+    let replacement = wait_running(&registry, &[id]).await;
+    assert!(replacement.profiles[0]
+        .runtime
+        .command_diagnostics
+        .is_none());
+    registry.stopping(id);
+    supervisor
+        .lock()
+        .await
+        .stop_checked(ProcessKey::RegularTunnel(id))
+        .await
+        .unwrap();
+    registry.stopped(id, true);
 }
 
 #[tokio::test]
