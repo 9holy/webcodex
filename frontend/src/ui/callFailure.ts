@@ -51,6 +51,7 @@ const reasons: Record<string, string> = {
   timeout: "The call reached a time limit.",
   result_unconfirmed: "WebCodex could not confirm the operation's final result.",
   stale_state: "The source or observation changed before the operation could complete.",
+  edit_conflict: "The file edit conflicts with the current content or its line-ending format.",
   details_unavailable: "This activity record does not contain a specific, safely displayable failure reason.",
 };
 
@@ -82,6 +83,7 @@ export function failureNextStepText(failure: CallFailure): string {
     case "provider_unavailable": return "Open Extensions > Coding agents and check that the provider is configured, signed in, enabled, and loaded.";
     case "execution_error": return "Open the linked job or task session to inspect the command result and correct the reported problem before retrying.";
     case "stale_state": return "Refresh the file or task state and prepare the operation again against that current state.";
+    case "edit_conflict": return "Read the current file and inspect the edit diagnostics. Correct the source match or normalize mixed LF/CRLF line endings before preparing the edit again.";
     default: return "Refresh the linked job or task session and inspect call diagnostics if available. Do not assume the operation is safe to repeat.";
   }
 }

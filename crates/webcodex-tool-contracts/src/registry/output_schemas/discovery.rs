@@ -28,7 +28,7 @@ fn window_call_failure_schema() -> Value {
                 "session_unavailable","project_unavailable","invalid_input","runner_unavailable",
                 "unsupported_resource","capability_unavailable","runtime_error","approval_changed",
                 "ssh_authentication","ssh_host_key","ssh_unavailable","provider_unavailable","execution_error",
-                "timeout","result_unconfirmed","stale_state","details_unavailable"]},
+                "timeout","result_unconfirmed","stale_state","edit_conflict","details_unavailable"]},
             "error_kind":{"type":"string", "minLength":1,"maxLength":96,"pattern":"^[a-z0-9_]+$"},
             "failure_kind":{"type":"string", "minLength":1,"maxLength":96,"pattern":"^[a-z0-9_]+$"},
             "execution_state":{"type":"string", "enum":["not_started","pending","queued","running","started","outcome_unknown","completed","cancelled","timed_out"]},
