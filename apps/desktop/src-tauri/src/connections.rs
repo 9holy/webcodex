@@ -87,6 +87,25 @@ fn parse_startup_timings(value: &Value) -> Option<ConnectionStartupTimings> {
     })
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectionCommandDiagnostics {
+    pub rejected_commands: u64,
+    pub terminal_response_delivery_failures: u64,
+}
+
+fn parse_command_diagnostics(value: &Value) -> Option<ConnectionCommandDiagnostics> {
+    let count = |name: &str| {
+        value
+            .get(name)?
+            .as_u64()
+            .filter(|n| *n <= 9_007_199_254_740_991)
+    };
+    Some(ConnectionCommandDiagnostics {
+        rejected_commands: count("rejected_commands")?,
+        terminal_response_delivery_failures: count("terminal_response_delivery_failures")?,
+    })
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ConnectionRuntimeSnapshot {
     pub lifecycle: ConnectionLifecycle,
@@ -99,6 +118,8 @@ pub struct ConnectionRuntimeSnapshot {
     pub startup_timings_ms: Option<ConnectionStartupTimings>,
     pub tunnel_ready: Option<bool>,
     pub local_mcp_ready: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_diagnostics: Option<ConnectionCommandDiagnostics>,
     pub failure_stage: Option<String>,
     pub reason_code: Option<String>,
     /// Whether this exact process attempt used an Auto-resolved proxy. This is
@@ -392,6 +413,8 @@ impl ConnectionRuntimes {
                     if event["schema_version"] != 1 {
                         break ConnectionError::ProtocolInvalid;
                     }
+                    let command_diagnostics =
+                        parse_command_diagnostics(&event["command_diagnostics"]);
                     last_health = Some(Instant::now());
                     let error = if !local {
                         Some(ConnectionError::LocalMcpUnavailable)
@@ -416,6 +439,9 @@ impl ConnectionRuntimes {
                         state.ready = tunnel && local;
                         state.tunnel_ready = Some(tunnel);
                         state.local_mcp_ready = Some(local);
+                        if let Some(diagnostics) = command_diagnostics {
+                            state.command_diagnostics = Some(diagnostics);
+                        }
                         state.health = if state.ready {
                             ConnectionHealth::Healthy
                         } else {

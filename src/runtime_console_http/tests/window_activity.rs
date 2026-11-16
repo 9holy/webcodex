@@ -1,6 +1,59 @@
 use super::*;
 
 #[tokio::test]
+async fn window_activity_preserves_edit_conflict_without_exposing_raw_error() {
+    use crate::tool_runtime::model_ergonomics_telemetry::ModelErgonomicsTimer;
+
+    let (_tmp, db, runtime) = test_runtime_with_window_db();
+    let auth = test_bootstrap_auth();
+    let client_window = crate::client_window::ClientWindow::for_test("edit-conflict-details");
+    record_window_event_with_activity(
+        &db,
+        &auth,
+        client_window.key(),
+        None,
+        None,
+        1000,
+        "edit_project_files",
+        true,
+    );
+    let result = ToolResult::err_with_output(
+        "PRIVATE_PATH: file contains mixed LF and CRLF line endings",
+        json!({"error_kind":"edit_conflict", "execution_state":"not_started", "state_changed":false}),
+    );
+    let mut timer = ModelErgonomicsTimer::start("edit_project_files").unwrap();
+    timer.capture_canonical_result(&result);
+    let telemetry = timer.finish().record_for_tool_result(&result).unwrap();
+    let summary = json!({"model_ergonomics":telemetry}).to_string();
+    db.conn_for_tests().execute(
+        "UPDATE action_events SET status='failed', http_status=200, error_summary='PRIVATE_PATH', summary_json=?1 WHERE server_trace_id='trace-1000'",
+        [&summary],
+    ).unwrap();
+    let detail = window_for_auth(
+        &runtime,
+        &auth,
+        WindowInput {
+            client_window_key: client_window.key().to_string(),
+            activity_limit: None,
+            session_limit: None,
+            detail_level: WindowDetailLevel::Full,
+        },
+    )
+    .await
+    .unwrap();
+    let value = serde_json::to_value(&detail.activity[0]).unwrap();
+    assert_eq!(value["failure"]["outcome"], "rejected");
+    assert_eq!(value["failure"]["reason"], "edit_conflict");
+    assert_eq!(value["failure"]["error_kind"], "edit_conflict");
+    assert_eq!(value["failure"]["execution_state"], "not_started");
+    assert!(!value.to_string().contains("PRIVATE"));
+    let schema =
+        crate::tool_runtime::registry::output_schema_for_tool("read_current_window_activity");
+    let item = &schema["properties"]["output"]["properties"]["events"]["items"];
+    crate::tool_runtime::startup_brief::validate_schema_instance_for_test(&value, item).unwrap();
+}
+
+#[tokio::test]
 async fn window_activity_preserves_shell_rejection_codes_from_canonical_telemetry() {
     use crate::tool_runtime::model_ergonomics_telemetry::ModelErgonomicsTimer;
 

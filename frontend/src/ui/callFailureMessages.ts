@@ -4,6 +4,22 @@ export const CALL_FAILURE_LANGUAGES = ["zh-CN", "zh-TW", "ja-JP", "ko-KR", "de-D
 type Translations = readonly [string, string, string, string, string, string];
 
 export const CALL_FAILURE_MESSAGES: Readonly<Record<string, Translations>> = {
+  "The file edit conflicts with the current content or its line-ending format.": [
+    "文件编辑与当前内容或换行格式存在冲突。",
+    "檔案編輯與目前內容或換行格式存在衝突。",
+    "ファイルの編集が現在の内容または改行形式と競合しています。",
+    "파일 편집이 현재 내용 또는 줄바꿈 형식과 충돌합니다.",
+    "Die Dateiänderung steht im Konflikt mit dem aktuellen Inhalt oder Zeilenumbruchformat.",
+    "La modification du fichier entre en conflit avec le contenu actuel ou le format des fins de ligne.",
+  ],
+  "Read the current file and inspect the edit diagnostics. Correct the source match or normalize mixed LF/CRLF line endings before preparing the edit again.": [
+    "读取当前文件并查看编辑诊断。修正原文匹配，或统一混用的 LF/CRLF 换行符后，再重新准备编辑。",
+    "讀取目前檔案並查看編輯診斷。修正原文比對，或統一混用的 LF/CRLF 換行符後，再重新準備編輯。",
+    "現在のファイルと編集の診断を確認してください。元のテキストの一致条件を修正するか、混在する LF/CRLF 改行を統一してから、編集を準備し直してください。",
+    "현재 파일을 읽고 편집 진단을 확인하세요. 원문 일치 조건을 수정하거나 혼용된 LF/CRLF 줄바꿈을 통일한 후 편집을 다시 준비하세요.",
+    "Lesen Sie die aktuelle Datei und prüfen Sie die Bearbeitungsdiagnose. Korrigieren Sie den Textabgleich oder vereinheitlichen Sie gemischte LF/CRLF-Zeilenumbrüche, bevor Sie die Änderung neu vorbereiten.",
+    "Lisez le fichier actuel et consultez le diagnostic de modification. Corrigez la correspondance du texte ou uniformisez les fins de ligne LF/CRLF mélangées avant de préparer à nouveau la modification.",
+  ],
   "Call succeeded": ["调用成功", "呼叫成功", "呼び出しに成功しました", "호출 성공", "Aufruf erfolgreich", "Appel réussi"],
   "Call cancelled": ["调用已取消", "呼叫已取消", "呼び出しはキャンセルされました", "호출 취소됨", "Aufruf abgebrochen", "Appel annulé"],
   "Result not confirmed": ["结果尚未确认", "結果尚未確認", "結果は未確認です", "결과 미확인", "Ergebnis nicht bestätigt", "Résultat non confirmé"],
