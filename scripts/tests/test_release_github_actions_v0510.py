@@ -9,20 +9,22 @@ from pathlib import Path
 import runpy
 import tempfile
 import unittest
-import zipfile
 from unittest import mock
 
 from scripts import release_github_actions as base
-from scripts import release_github_actions_v054 as previous
+from scripts import release_github_actions_v054 as v054
+from scripts import release_github_actions_v055 as v055
+from scripts import release_github_actions_v056 as v056
+from scripts import release_github_actions_v058 as previous
 from scripts import release_github_actions_v0510 as staged
 from scripts import release_windows_acceptance as worker
 from scripts.tests import test_release_github_actions as old
-from scripts.tests import test_release_github_actions_v054 as previous_tests
+from scripts.tests import test_release_github_actions_v058 as previous_tests
 from scripts.tests import test_release_windows_acceptance as fixtures
 
 
-class V0510StagedPublicationTests(previous_tests.StagedPublicationTests):
-    """Run the existing staged failure/recovery suite against the new authority."""
+class V0510StagedPublicationTests(previous_tests.V058StagedPublicationTests):
+    """Run the reviewed Windows failure/recovery suite with the new authority."""
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -46,7 +48,8 @@ class V0510StagedPublicationTests(previous_tests.StagedPublicationTests):
         self.c.context = {**old._context(), "workflow_path": self.spec.workflow_path}
         self.c.state = base.new_journal(self.c.request, self.c.request_digest, self.c.context)
         self.c.state.update(release_id=234, tag_object_sha="a" * 40,
-                            bundle={"workflow_run_id": 345}, assets=fixtures.assets("0.5.10"))
+                            bundle={"workflow_run_id": 345, "platform_scope": "windows"},
+                            assets=fixtures.assets("0.5.10", "windows"))
         self.c.state["effects"]["draft"] = old._effect(self.c._draft_intent(), status="succeeded")
         self.release = {**self.c._draft_intent(), "id": 234, "published_at": None,
             "author": {"id": base.BOT_ID, "login": base.BOT_LOGIN},
@@ -57,6 +60,8 @@ class V0510StagedPublicationTests(previous_tests.StagedPublicationTests):
         self.c._find_release = mock.Mock(side_effect=lambda: copy.deepcopy(self.release))
         self.c._verify_tag = mock.Mock()
         self.c._expected_assets = mock.Mock(return_value=self.c.state["assets"])
+        self.latest = {"id": 123, "tag_name": "v0.5.3", "draft": False, "prerelease": False}
+        self.c.client.fetch_json.side_effect = lambda suffix: copy.deepcopy(self.latest) if suffix == "/releases/latest" else None
         self.c._save()
         self.output = contextlib.redirect_stdout(io.StringIO())
         self.output.__enter__()
@@ -81,80 +86,54 @@ class V0510StagedPublicationTests(previous_tests.StagedPublicationTests):
         self.assertNotIn("prepare-publish", staged.StagedController.stages)
         self.assertIn("publish", base.Controller.stages)
 
-    def test_finalized_entry_uses_the_original_authenticated_dispatcher(self):
-        with mock.patch.object(base.Controller, "run", return_value=17) as dispatch:
-            self.assertEqual(self.c.run("status-acceptance", 1), 17)
-        dispatch.assert_called_once_with(self.c, "status-acceptance", 1)
+    def test_all_earlier_entries_and_crossed_workflows_fail_the_v0510_guard(self):
+        for module in (v054, v055, v056, previous):
+            with self.subTest(tag=module.SPEC.pinned_request["tag"]), self.assertRaises(base.ReleaseControlError):
+                staged.require_finalized(module.SPEC)
+            wrong = base.ReleaseSpec(dict(self.spec.pinned_request), self.spec.request_path,
+                                     module.SPEC.workflow_path)
+            with self.assertRaises(base.ReleaseControlError):
+                staged.require_finalized(wrong)
 
-    def test_another_fixed_entry_cannot_pass_the_v0510_guard(self):
-        with self.assertRaises(base.ReleaseControlError):
-            staged.require_finalized(previous.SPEC)
-        wrong_workflow = base.ReleaseSpec(dict(self.spec.pinned_request), self.spec.request_path,
-                                         previous.SPEC.workflow_path)
-        with self.assertRaises(base.ReleaseControlError):
-            staged.require_finalized(wrong_workflow)
-
-    def test_v054_report_cannot_satisfy_the_v0510_acceptance_request(self):
+    def test_v058_report_and_rebound_digest_cannot_authorize_v0510(self):
         self.acceptance()
         request = self.c._windows_request()
-        previous_report = fixtures.report(fixtures.request())
-        with self.assertRaises(base.ReleaseControlError):
-            worker.validate_report(previous_report, request, "win32-x64", 456, 1)
-        previous_report["request_sha256"] = worker.request_digest(request)
-        with self.assertRaises(base.ReleaseControlError):
-            worker.validate_report(previous_report, request, "win32-x64", 456, 1)
+        value = fixtures.report(fixtures.fixed_request(previous.SPEC))
+        for changed_digest in (False, True):
+            if changed_digest:
+                value["request_sha256"] = worker.request_digest(request)
+            with self.subTest(changed_digest=changed_digest), self.assertRaises(base.ReleaseControlError):
+                worker.validate_report(value, request, "win32-x64", 456, 1)
 
-
-    def test_missing_or_invalid_v054_native_evidence_blocks_promotion(self):
-        self.acceptance()
-        request = self.c._windows_request()
-        for mutate in (lambda r: r["scenarios"].pop("v054_unconfigured"),
-                       lambda r: r["scenario_exit_codes"].update(v054_configured=2),
-                       lambda r: r["v054_configured"]["upstream_runtime"].update(git_commit="f" * 40),
-                       lambda r: r["v054_configured"]["cleanup"].update(complete=False)):
-            value = fixtures.report(request, "win32-x64")
-            mutate(value)
-            buffer = io.BytesIO()
-            with zipfile.ZipFile(buffer, "w") as archive:
-                archive.writestr("report.json", base._json_bytes(value))
-            data = buffer.getvalue()
-            self.archives[1] = data
-            self.artifacts[0].update(size_in_bytes=len(data), digest="sha256:" + hashlib.sha256(data).hexdigest())
-            with mock.patch.object(self.c, "_mutate") as effect, self.assertRaises(base.ReleaseControlError):
-                self.c.prepare_promotion()
-            effect.assert_not_called()
-            self.assertNotIn("promote", self.c.state["effects"])
-
-    def test_all_platform_scope_and_fixed_five_scenario_authority(self):
-        self.assertEqual(self.spec.platform_scope, "all")
-        self.assertGreater(len(self.c.state["assets"]), 11)
+    def test_windows_scope_requires_exact_eleven_assets_and_five_scenarios(self):
+        expected = {"SHA256SUMS", "manifest.json", "webcodex-release-manifest.json"}
+        for platform in worker.PLATFORMS:
+            expected.update((f"webcodex-v0.5.10-{platform}.tar.gz",
+                             f"webcodex-desktop-v0.5.10-{platform}-setup.exe",
+                             f"webcodex-unified-v0.5.10-{platform}.exe",
+                             f"webcodex-source-v0.5.10-{platform}.json"))
+        self.assertEqual(set(self.c.state["assets"]), expected)
+        self.assertEqual(len(expected), 11)
         self.acceptance()
         request = self.c._windows_request()
         self.assertEqual(worker.scenarios_for_request(request), worker.V056_SCENARIOS)
         with mock.patch.object(staged, "SPEC", self.spec):
             self.assertIs(worker.select_release_spec(request), self.spec)
-        wrong = base.ReleaseSpec({**dict(self.spec.pinned_request), "platform_scope": "windows"},
-                                 self.spec.request_path, self.spec.workflow_path)
-        with self.assertRaises(base.ReleaseControlError):
-            staged.require_finalized(wrong)
 
-
-    def test_prior_windows_authority_and_reports_cannot_authorize_all_platform_release(self):
-        from scripts import release_github_actions_v058 as windows_entry
-        with self.assertRaises(base.ReleaseControlError):
-            staged.require_finalized(windows_entry.SPEC)
-        self.acceptance()
-        request = self.c._windows_request()
-        value = fixtures.report(fixtures.fixed_request(windows_entry.SPEC))
-        for rebound in (False, True):
-            if rebound:
-                value["request_sha256"] = worker.request_digest(request)
-            with self.subTest(rebound=rebound), self.assertRaises(base.ReleaseControlError):
-                worker.validate_report(value, request, "win32-x64", 456, 1)
+    def test_all_platform_and_implicit_scope_reject_before_dispatch(self):
+        for explicit in (True, False):
+            request = {**dict(self.spec.pinned_request), "platform_scope": "all"}
+            if not explicit:
+                request.pop("platform_scope")
+            self.c.spec = base.ReleaseSpec(request, self.spec.request_path, self.spec.workflow_path)
+            with self.subTest(explicit=explicit), mock.patch.object(base.Controller, "run") as dispatch, \
+                    self.assertRaises(base.ReleaseControlError):
+                self.c.run("preflight")
+            dispatch.assert_not_called()
 
 
 class V0510FixedWorkflowContractTests(unittest.TestCase):
-    def test_script_and_shared_worker_keep_the_same_validation_error_identity(self):
+    def test_script_and_worker_preserve_one_error_class_and_windows_controller(self):
         root = Path(__file__).resolve().parents[2]
         entry = runpy.run_path(str(root / "scripts/release_github_actions_v0510.py"), run_name="v0510_entry_fixture")
         self.assertIs(entry["base"].ReleaseControlError, worker.control.ReleaseControlError)
@@ -167,20 +146,27 @@ class V0510FixedWorkflowContractTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(notes).hexdigest(), staged.SPEC.pinned_request["notes_sha256"])
         self.assertEqual(staged.SPEC.pinned_request["tag"], "v0.5.10")
         self.assertEqual(staged.SPEC.pinned_request["source_ref"], "release/v0.5.10")
+        self.assertEqual(staged.SPEC.platform_scope, "windows")
 
-    def test_existing_staged_gates_are_inherited_without_policy_overrides(self):
+    def test_only_fixed_entry_guard_is_overridden(self):
+        self.assertEqual({name for name, value in vars(staged.StagedController).items() if callable(value)}, {"run"})
         self.assertIs(staged.StagedController.stages, previous.StagedController.stages)
-        for name in ("_authenticate", "_lock", "restore_state", "_source", "prepare_preview", "publish_preview",
-                     "verify_preview", "prepare_acceptance", "dispatch_acceptance", "_acceptance_reports",
-                     "status_acceptance", "prepare_promotion", "promote", "verify_public", "status_post"):
+        for name in ("_authenticate", "_lock", "restore_state", "_source", "_proofs", "publish_preview",
+                     "_windows_request", "prepare_acceptance", "dispatch_acceptance", "_acceptance_reports",
+                     "status_acceptance", "_require_publication_intent", "_validate_release_identity",
+                     "_latest_identity", "_preserved_latest", "_verify_preserved_latest", "_publication_intent",
+                     "prepare_preview", "verify_preview", "prepare_promotion", "_verify_latest", "promote",
+                     "verify_public", "_post_scope", "_require_windows_post_scope", "prepare_post",
+                     "dispatch_post", "status_post"):
             with self.subTest(method=name):
                 self.assertIs(getattr(staged.StagedController, name), getattr(previous.StagedController, name))
 
     def test_publisher_preserves_all_reviewed_steps_permissions_and_checkpoints(self):
         root = Path(__file__).resolve().parents[2]
-        original = (root / ".github/workflows/release-publish-v059.yml").read_text()
-        expected = original.replace("v0.5.9", "v0.5.10").replace("v059", "v0510")
+        original = (root / previous.SPEC.workflow_path).read_text()
+        expected = original.replace("v0.5.8", "v0.5.10").replace("v058", "v0510")
         expected = expected.replace("          scripts.tests.test_release_github_actions_v0510\n",
+            "          scripts.tests.test_release_github_actions_v058\n"
             "          scripts.tests.test_release_github_actions_v059\n"
             "          scripts.tests.test_release_github_actions_v0510\n")
         actual = (root / staged.SPEC.workflow_path).read_text()

@@ -355,7 +355,7 @@ jobs:
           path: ${{ runner.temp }}/webcodex-release-control/*.json
           if-no-files-found: error
           retention-days: 90
-      - name: Promote the same Release to stable and latest once
+      - name: Promote the same Windows Release while preserving all-platform latest
         run: >-
           python3 scripts/release_github_actions_v0510.py promote --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
       - name: Retain stable-promoted
@@ -375,7 +375,7 @@ jobs:
           path: ${{ runner.temp }}/webcodex-release-control/*.json
           if-no-files-found: error
           retention-days: 90
-      - name: Freeze image and Intel Desktop dispatches after promotion
+      - name: Freeze Windows completion with image and Intel marked not applicable
         run: >-
           python3 scripts/release_github_actions_v0510.py prepare-post --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
       - name: Retain post-intent
@@ -385,7 +385,7 @@ jobs:
           path: ${{ runner.temp }}/webcodex-release-control/*.json
           if-no-files-found: error
           retention-days: 90
-      - name: Dispatch the existing post-publication workflows
+      - name: Confirm no cross-platform workflows are dispatched
         run: >-
           python3 scripts/release_github_actions_v0510.py dispatch-post --request "$CONTROL_REQUEST" --source-root "$SOURCE_ROOT" --state-dir "$STATE_DIR" --bundle-dir "$BUNDLE_DIR"
       - name: Retain post-dispatched
@@ -395,7 +395,7 @@ jobs:
           path: ${{ runner.temp }}/webcodex-release-control/*.json
           if-no-files-found: error
           retention-days: 90
-      - name: Require image verification and completed Intel DMG publication
+      - name: Require Windows public bytes and preserved all-platform latest
         run: |
           set -euo pipefail
           deadline=$((SECONDS + 7200))
