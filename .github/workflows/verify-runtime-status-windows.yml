@@ -1,0 +1,55 @@
+name: Verify cached ChatGPT runtime status on Windows
+
+on:
+  push:
+    branches: [fix/chatgpt-runtime-status-native-verification]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    if: github.repository == '9holy/webcodex'
+    runs-on: windows-latest
+    timeout-minutes: 55
+    env:
+      CANDIDATE_SHA: 6682e0630c3c8cdee507121eb640a8640a0bce5e
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+        with:
+          toolchain: stable
+          components: rustfmt
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          shared-key: windows-desktop-ci
+          save-if: false
+      - name: Build the reviewed source and test the direct MCP routes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD) -ne $env:CANDIDATE_SHA -or (git status --porcelain)) { throw 'Unexpected source' }
+          cargo fmt --all -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --locked --profile dogfood -p webcodex --bin webcodex-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --profile dogfood -p webcodex --lib runtime_status
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $directory = Join-Path $env:RUNNER_TEMP 'verified-runtime-status'
+          New-Item -ItemType Directory -Path $directory | Out-Null
+          $binary = Join-Path $directory 'webcodex-server.exe'
+          Copy-Item -LiteralPath 'target/dogfood/webcodex-server.exe' -Destination $binary
+          $info = & $binary --build-info-json | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $info.version -ne '0.5.10' -or $info.git_commit -ne $env:CANDIDATE_SHA -or $info.git_dirty -ne $false) { throw 'Unexpected executable identity' }
+          [pscustomobject]@{source=$info.git_commit;version=$info.version;sha256=(Get-FileHash -LiteralPath $binary).Hash.ToLowerInvariant()} |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $directory 'receipt.json') -Encoding UTF8
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: verified-runtime-status-6682e06-windows-x64
+          path: ${{ runner.temp }}/verified-runtime-status/
+          if-no-files-found: error
+          retention-days: 3
