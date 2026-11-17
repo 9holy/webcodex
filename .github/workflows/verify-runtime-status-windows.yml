@@ -7,13 +7,17 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: verify-chatgpt-runtime-status-windows
+  cancel-in-progress: true
+
 jobs:
   verify:
     if: github.repository == '9holy/webcodex'
     runs-on: windows-latest
     timeout-minutes: 55
     env:
-      CANDIDATE_SHA: 6682e0630c3c8cdee507121eb640a8640a0bce5e
+      CANDIDATE_SHA: 318baa63a08cda6d59cdcee53b62eaa32ddf01ed
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -39,6 +43,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test --locked --profile dogfood -p webcodex --lib runtime_status
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test --locked --profile dogfood -p webcodex --lib mcp_route_recovery
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $directory = Join-Path $env:RUNNER_TEMP 'verified-runtime-status'
           New-Item -ItemType Directory -Path $directory | Out-Null
           $binary = Join-Path $directory 'webcodex-server.exe'
@@ -49,7 +55,7 @@ jobs:
             ConvertTo-Json | Set-Content -LiteralPath (Join-Path $directory 'receipt.json') -Encoding UTF8
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: verified-runtime-status-6682e06-windows-x64
+          name: verified-runtime-status-318baa6-windows-x64
           path: ${{ runner.temp }}/verified-runtime-status/
           if-no-files-found: error
           retention-days: 3
