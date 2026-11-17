@@ -75,6 +75,7 @@ The following code is retained for concrete consumers:
 | Update metadata absence and unsupported-format handling | A release or development build without verified installer metadata must not be treated as a safe automatic installation candidate. |
 | Retired-config rejection and sensitive-path exclusions | Reject retired authority/registry settings before use; do not silently select a different default. Old secret/config paths stay protected even when discovery is retired. |
 | Direct MCP `import_conversation_files_to_project` calls | Active ChatGPT conversations retain this Host file descriptor after refresh. Resolve its unchanged wire contract to `import_host_files` only at the MCP adapter boundary; see below. |
+| Direct MCP `runtime_status` calls | The older ChatGPT `webcodex` connector retains this name. Resolve it to the read-only `get_runtime_status` before canonical MCP admission, with the same inputs. Current discovery and gateway targets use the canonical name. |
 | MCP dated revisions and Runner/management protocol checks | These serve external Hosts and independently upgraded components. Their lifecycle follows observed protocol consumers, not the v0.5 package number. |
 | `ActionAudit`, `ActionSession`, `ActionEvent` | Current tool audit and history infrastructure. The removed GPT Actions HTTP adapter does not make this domain obsolete. |
 

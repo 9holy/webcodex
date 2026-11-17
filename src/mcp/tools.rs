@@ -274,12 +274,12 @@ pub(super) struct McpToolCallParams {
     pub(super) arguments: Value,
 }
 
-/// ChatGPT sessions can retain the pre-rename Host file descriptor even after
-/// tools/list refresh. Its argument and fileParams contracts are identical.
-/// Resolve only that direct MCP spelling; never registry names or gateway targets.
+/// ChatGPT can retain these pre-rename direct descriptors with the same inputs.
+/// Resolve only direct MCP calls, before the canonical tool's admission checks.
 fn canonical_direct_tool_name(name: &str) -> &str {
     match name {
         "import_conversation_files_to_project" => "import_host_files",
+        "runtime_status" => "get_runtime_status",
         _ => name,
     }
 }
