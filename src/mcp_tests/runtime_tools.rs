@@ -70,7 +70,6 @@ async fn mcp_tools_list_exposes_canonical_coding_bootstrap_and_runtime_status_ux
         tools.iter().all(|tool| tool["name"] != "start_coding_task"),
         "retired start_coding_task must stay out of MCP tools/list"
     );
-    assert!(tools.iter().all(|tool| tool["name"] != "runtime_status"));
     let description = tool("work_on_project")["description"].as_str().unwrap();
     assert_eq!(
         description,
@@ -413,10 +412,11 @@ async fn mcp_runtime_status_defaults_sparse_preserves_explicit_full_and_gateway_
             true
         )
     );
-    for (name, gateway) in [
-        ("get_runtime_status", false),
-        ("runtime_status", false),
-        ("get_runtime_status", true),
+    for (name, gateway, stateless) in [
+        ("get_runtime_status", false, false),
+        ("runtime_status", false, false),
+        ("runtime_status", false, true),
+        ("get_runtime_status", true, false),
     ] {
         for (arguments, sparse) in [
             (json!({}), true),
@@ -429,6 +429,11 @@ async fn mcp_runtime_status_defaults_sparse_preserves_explicit_full_and_gateway_
                 adaptive_runtime_gateway_params(name, arguments)
             } else {
                 json!({"name": name, "arguments": arguments})
+            };
+            let params = if stateless {
+                mcp_2026_params(params)
+            } else {
+                params
             };
             let McpOutcome::Ok(value) =
                 handle_mcp_request(&runtime, rpc("tools/call", Some(json!(1)), params), None).await
