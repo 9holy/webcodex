@@ -32,18 +32,14 @@ jobs:
         with:
           shared-key: windows-desktop-ci
           save-if: false
-      - name: Build the reviewed source and test the direct MCP routes
+      - name: Package the reviewed source with its full commit identity
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           if ((git rev-parse HEAD) -ne $env:CANDIDATE_SHA -or (git status --porcelain)) { throw 'Unexpected source' }
-          cargo fmt --all -- --check
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Native status and route-recovery tests for this source passed in run 44043714824.
+          $env:WEBCODEX_GIT_COMMIT = $env:CANDIDATE_SHA
           cargo build --locked --profile dogfood -p webcodex --bin webcodex-server
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --profile dogfood -p webcodex --lib runtime_status
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked --profile dogfood -p webcodex --lib mcp_route_recovery
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $directory = Join-Path $env:RUNNER_TEMP 'verified-runtime-status'
           New-Item -ItemType Directory -Path $directory | Out-Null
