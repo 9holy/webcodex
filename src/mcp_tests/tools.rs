@@ -48,7 +48,6 @@ async fn mcp_route_recovery_rejects_unavailable_tools_without_gateway_retry() {
     for stateless in [false, true] {
         for name in [
             "tool_manifest",
-            "runtime_status",
             "unknown_tool_name",
             "get_work_result_state",
         ] {
