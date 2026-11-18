@@ -285,11 +285,10 @@ impl ParsedCall {
         // adapter-owned invocation metadata is removed. Specialized gateways keep
         // their existing bounded audit projections below.
         let raw_mcp_arguments = params.arguments.clone();
-        // ChatGPT can retain these direct review callables, whose current route is the gateway.
-        let cached_gateway_target = match (stateless_2026 && !cli, params.name.as_str()) {
-            (true, "finish_coding_task") => Some("finish_coding_task"),
-            (true, "show_changes") => Some("read_workspace_changes"),
-            _ => None,
+        let cached_gateway_target = if stateless_2026 && !cli {
+            cached_adaptive_gateway_target(&params.name)
+        } else {
+            None
         };
         let via_adaptive_runtime_gateway =
             params.name == ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME || cached_gateway_target.is_some();

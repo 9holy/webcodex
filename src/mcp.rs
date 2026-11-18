@@ -620,7 +620,7 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
 
     guard.set_jsonrpc_id(jsonrpc_id_safe(request.id.as_ref()));
     guard.set_method(request.method.clone());
-    let tool_name = if request.method == "tools/call" {
+    let mut tool_name = if request.method == "tools/call" {
         tools::tool_name_from_params(&request.params)
     } else {
         None
@@ -681,6 +681,18 @@ pub async fn mcp_post(req: &mut Request, depot: &mut Depot, res: &mut Response) 
                 return;
             }
         };
+    if request.method == "tools/call"
+        && protocol_era == McpProtocolEra::Stateless2026
+        && surface == request_policy::McpSurface::Adaptive
+    {
+        if let Some(target) = request.params["name"]
+            .as_str()
+            .and_then(tools::cached_adaptive_gateway_target)
+        {
+            tool_name = Some(target.to_owned());
+            guard.set_tool_name(tool_name.clone());
+        }
+    }
     let policy = policy_selection.effective;
     // Equal explicit profiles still have request-header provenance. Clone only
     // the lightweight view when policy or its diagnostic source differs; shared

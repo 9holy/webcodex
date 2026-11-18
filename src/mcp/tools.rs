@@ -285,6 +285,15 @@ fn canonical_direct_tool_name(name: &str) -> &str {
     }
 }
 
+/// Cached direct ChatGPT calls on the stateless Adaptive surface.
+pub(super) fn cached_adaptive_gateway_target(name: &str) -> Option<&'static str> {
+    match name {
+        "finish_coding_task" => Some("finish_coding_task"),
+        "show_changes" => Some("read_workspace_changes"),
+        _ => None,
+    }
+}
+
 pub(super) fn tool_name_from_params(params: &Value) -> Option<String> {
     let name = params.get("name").and_then(Value::as_str)?;
     if name == ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME {
