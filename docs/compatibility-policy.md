@@ -77,6 +77,7 @@ The following code is retained for concrete consumers:
 | Direct MCP `import_conversation_files_to_project` calls | Active ChatGPT conversations retain this Host file descriptor after refresh. Resolve its unchanged wire contract to `import_host_files` only at the MCP adapter boundary; see below. |
 | Direct MCP `runtime_status` calls | The older ChatGPT `webcodex` connector retains this name. Resolve it to the read-only `get_runtime_status` before canonical MCP admission, with the same inputs. Current discovery and gateway targets use the canonical name. |
 | Direct MCP `tool_manifest` calls | The same connector retains this discovery name. Resolve it to `read_tool_manifest` before canonical MCP admission. Catalog results use current tool names and routes. |
+| Cached MCP `finish_coding_task` and `show_changes` calls | The retained ChatGPT calls use canonical gateway admission on the stateless Adaptive surface. `show_changes` targets `read_workspace_changes`. These cached calls and the gateway's exact `finish_coding_task` target accept the legacy `recording_session_id` through the canonical recorder checks. |
 | MCP dated revisions and Runner/management protocol checks | These serve external Hosts and independently upgraded components. Their lifecycle follows observed protocol consumers, not the v0.5 package number. |
 | `ActionAudit`, `ActionSession`, `ActionEvent` | Current tool audit and history infrastructure. The removed GPT Actions HTTP adapter does not make this domain obsolete. |
 
