@@ -280,6 +280,7 @@ fn canonical_direct_tool_name(name: &str) -> &str {
     match name {
         "import_conversation_files_to_project" => "import_host_files",
         "runtime_status" => "get_runtime_status",
+        "tool_manifest" => "read_tool_manifest",
         _ => name,
     }
 }

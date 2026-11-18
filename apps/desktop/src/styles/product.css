@@ -599,6 +599,7 @@ input[type="checkbox"].desktop-switch:hover:not(:disabled):not(:checked) { backg
 .connection-route strong { font-weight: 500; overflow-wrap: anywhere; }
 .connection-context > button { margin-left: auto; }
 .connection-list { gap: 16px; border-top: 0; }
+.connection-list:not(:empty) + .first-read-guide { margin-top: 16px; }
 .connection-profile { padding: var(--desktop-panel-inset); border: 1px solid var(--ui-border-subtle); border-radius: var(--ui-radius-lg); background: var(--ui-content); box-shadow: var(--ui-shadow-surface); }
 .connection-profile .workspace-section-heading { align-items: flex-start; flex-wrap: wrap; gap: 8px 16px; margin-bottom: 16px; }
 .connection-profile .workspace-section-heading > div { min-width: 0; flex: 1 1 200px; }

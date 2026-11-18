@@ -46,11 +46,7 @@ fn mcp_extension_route_lookup_preserves_membership_without_schema_materializatio
 async fn mcp_route_recovery_rejects_unavailable_tools_without_gateway_retry() {
     let runtime = test_runtime_with_mcp_settings(true, false);
     for stateless in [false, true] {
-        for name in [
-            "tool_manifest",
-            "unknown_tool_name",
-            "get_work_result_state",
-        ] {
+        for name in ["unknown_tool_name", "get_work_result_state"] {
             let params = json!({"name": name, "arguments": {}});
             let params = if stateless {
                 mcp_2026_params(params)
@@ -140,11 +136,27 @@ async fn mcp_route_recovery_current_discovery_matches_callable_contracts() {
             .is_none());
     }
     assert!(bootstrap["inputSchema"]["properties"].get("_wc").is_some());
-    for (name, arguments) in [
-        ("get_runtime_status", json!({"compact": true})),
-        ("read_tool_manifest", json!({"tool_name": "read_files"})),
+    for (descriptor_name, name, arguments) in [
+        (
+            "get_runtime_status",
+            "get_runtime_status",
+            json!({"compact": true}),
+        ),
+        (
+            "read_tool_manifest",
+            "read_tool_manifest",
+            json!({"tool_name": "read_files"}),
+        ),
+        (
+            "read_tool_manifest",
+            "tool_manifest",
+            json!({"tool_name": "read_files"}),
+        ),
     ] {
-        let descriptor = tools.iter().find(|tool| tool["name"] == name).unwrap();
+        let descriptor = tools
+            .iter()
+            .find(|tool| tool["name"] == descriptor_name)
+            .unwrap();
         for key in arguments.as_object().unwrap().keys() {
             assert!(descriptor["inputSchema"]["properties"].get(key).is_some());
         }
