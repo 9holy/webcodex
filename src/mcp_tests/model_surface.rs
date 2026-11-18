@@ -743,16 +743,17 @@ async fn closeout_helpers_remain_visible_with_exact_gateway_contracts() {
 async fn cached_finish_coding_task_uses_gateway_and_canonical_recording() {
     let runtime = test_runtime();
     let session = runtime.sessions.start_session(None, None);
+    let recorder = runtime.sessions.start_session(None, None);
     let arguments = json!({
         "project": "missing-project",
         "session_id": session.session_id
     });
     let mut cached = json!({"name": "finish_coding_task", "arguments": arguments.clone()});
-    cached["arguments"]["recording_session_id"] = json!(session.session_id);
+    cached["arguments"]["recording_session_id"] = json!(recorder.session_id);
     let mut gateway = adaptive_runtime_gateway_params("finish_coding_task", arguments);
     let mut cached_gateway = gateway.clone();
-    cached_gateway["arguments"]["recording_session_id"] = json!(session.session_id);
-    gateway["arguments"]["_wc"] = json!({"record": session.session_id});
+    cached_gateway["arguments"]["recording_session_id"] = json!(recorder.session_id);
+    gateway["arguments"]["_wc"] = json!({"record": recorder.session_id});
     for params in [cached.clone(), cached_gateway.clone(), gateway] {
         let outcome = handle_mcp_request(
             &runtime,
@@ -771,7 +772,7 @@ async fn cached_finish_coding_task_uses_gateway_and_canonical_recording() {
     assert_eq!(
         runtime
             .sessions
-            .summary(&session.session_id, Some(10))
+            .summary(&recorder.session_id, Some(10))
             .unwrap()
             .counts
             .tool_calls,
@@ -805,7 +806,7 @@ async fn cached_finish_coding_task_uses_gateway_and_canonical_recording() {
         .unwrap()
         .contains("not directly callable on Adaptive Runtime"));
 
-    cached["arguments"]["_wc"] = json!({"record": session.session_id});
+    cached["arguments"]["_wc"] = json!({"record": recorder.session_id});
     let conflicting = handle_mcp_request(
         &runtime,
         rpc("tools/call", Some(json!(67)), mcp_2026_params(cached)),
