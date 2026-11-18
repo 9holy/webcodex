@@ -406,7 +406,18 @@ async fn adaptive_mcp_work_on_project_recovery_is_immediately_gateway_callable()
 #[tokio::test]
 async fn mcp_runtime_status_defaults_sparse_preserves_explicit_full_and_gateway_parity() {
     let runtime = test_runtime();
-    for gateway in [false, true] {
+    assert!(
+        !crate::mcp::tools::adaptive_runtime_gateway_target_admitted_for_test(
+            "runtime_status",
+            true
+        )
+    );
+    for (name, gateway, stateless) in [
+        ("get_runtime_status", false, false),
+        ("runtime_status", false, false),
+        ("runtime_status", false, true),
+        ("get_runtime_status", true, false),
+    ] {
         for (arguments, sparse) in [
             (json!({}), true),
             (Value::Null, true),
@@ -415,9 +426,14 @@ async fn mcp_runtime_status_defaults_sparse_preserves_explicit_full_and_gateway_
             (json!({"compact": false, "summary_only": true}), true),
         ] {
             let params = if gateway {
-                adaptive_runtime_gateway_params("get_runtime_status", arguments)
+                adaptive_runtime_gateway_params(name, arguments)
             } else {
-                json!({"name": "get_runtime_status", "arguments": arguments})
+                json!({"name": name, "arguments": arguments})
+            };
+            let params = if stateless {
+                mcp_2026_params(params)
+            } else {
+                params
             };
             let McpOutcome::Ok(value) =
                 handle_mcp_request(&runtime, rpc("tools/call", Some(json!(1)), params), None).await

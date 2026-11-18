@@ -285,7 +285,34 @@ impl ParsedCall {
         // adapter-owned invocation metadata is removed. Specialized gateways keep
         // their existing bounded audit projections below.
         let raw_mcp_arguments = params.arguments.clone();
-        let via_adaptive_runtime_gateway = params.name == ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME;
+        let cached_gateway_target = if stateless_2026 && !cli {
+            cached_adaptive_gateway_target(&params.name)
+        } else {
+            None
+        };
+        let via_adaptive_runtime_gateway =
+            params.name == ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME || cached_gateway_target.is_some();
+        let cached_recorder = cached_gateway_target.is_some()
+            || (stateless_2026
+                && !cli
+                && params.name == ADAPTIVE_RUNTIME_GATEWAY_TOOL_NAME
+                && params.arguments["tool"].as_str().map(str::trim) == Some("finish_coding_task"));
+        if cached_recorder {
+            if let Some(arguments) = params
+                .arguments
+                .as_object_mut()
+                .filter(|arguments| !arguments.contains_key(MCP_INVOCATION_ENVELOPE_FIELD))
+            {
+                if let Some(record) = arguments
+                    .remove(crate::tool_runtime::sessions::TOOL_CALL_RECORDING_SESSION_ID_FIELD)
+                {
+                    arguments.insert(
+                        MCP_INVOCATION_ENVELOPE_FIELD.into(),
+                        json!({"record": record}),
+                    );
+                }
+            }
+        }
         if cli && params.arguments.get("_wc").is_some() {
             return Err(McpOutcome::BadRequest(rpc_error(
                 id,
@@ -305,7 +332,7 @@ impl ParsedCall {
             }
         }
         let invocation = match parse_mcp_invocation_envelope(
-            &params.name,
+            cached_gateway_target.unwrap_or(&params.name),
             &mut params.arguments,
             stateless_2026 && !cli,
         ) {
@@ -353,13 +380,16 @@ impl ParsedCall {
             )));
         }
         if via_adaptive_runtime_gateway {
-            let (target, arguments) =
+            let (target, arguments) = if let Some(target) = cached_gateway_target {
+                (target.to_owned(), params.arguments)
+            } else {
                 match unwrap_adaptive_runtime_gateway_arguments(params.arguments) {
                     Ok(target) => target,
                     Err(message) => {
                         return Err(McpOutcome::BadRequest(rpc_error(id, -32602, message)));
                     }
-                };
+                }
+            };
             if !context.exposure.allows(&target) || (cli && !crate::mcp::cli::admits(&target)) {
                 return Err(McpOutcome::BadRequest(rpc_error(
                     id,

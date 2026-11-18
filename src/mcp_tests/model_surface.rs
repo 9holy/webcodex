@@ -740,6 +740,164 @@ async fn closeout_helpers_remain_visible_with_exact_gateway_contracts() {
 }
 
 #[tokio::test]
+async fn cached_finish_coding_task_uses_gateway_and_canonical_recording() {
+    let runtime = test_runtime();
+    let session = runtime.sessions.start_session(None, None);
+    let recorder = runtime.sessions.start_session(None, None);
+    let arguments = json!({
+        "project": "missing-project",
+        "session_id": session.session_id
+    });
+    let mut cached = json!({"name": "finish_coding_task", "arguments": arguments.clone()});
+    cached["arguments"]["recording_session_id"] = json!(recorder.session_id);
+    let mut gateway = adaptive_runtime_gateway_params("finish_coding_task", arguments);
+    let mut cached_gateway = gateway.clone();
+    cached_gateway["arguments"]["recording_session_id"] = json!(recorder.session_id);
+    gateway["arguments"]["_wc"] = json!({"record": recorder.session_id});
+    for params in [cached.clone(), cached_gateway.clone(), gateway] {
+        let outcome = handle_mcp_request(
+            &runtime,
+            rpc("tools/call", Some(json!(67)), mcp_2026_params(params)),
+            None,
+        )
+        .await;
+        let McpOutcome::Ok(value) = outcome else {
+            panic!("expected canonical closeout validation: {outcome:?}");
+        };
+        assert_eq!(
+            value["result"]["structuredContent"]["output"]["error_kind"],
+            "unknown_project"
+        );
+    }
+    assert_eq!(
+        runtime
+            .sessions
+            .summary(&recorder.session_id, Some(10))
+            .unwrap()
+            .counts
+            .tool_calls,
+        3
+    );
+
+    let scoped = crate::auth::AuthContext::new(crate::auth::AuthKind::OAuth2Token);
+    let denied = handle_mcp_request(
+        &runtime,
+        rpc(
+            "tools/call",
+            Some(json!(67)),
+            mcp_2026_params(cached.clone()),
+        ),
+        Some(&scoped),
+    )
+    .await;
+    assert!(matches!(denied, McpOutcome::Forbidden { .. }), "{denied:?}");
+
+    let older_protocol = handle_mcp_request(
+        &runtime,
+        rpc("tools/call", Some(json!(67)), cached.clone()),
+        None,
+    )
+    .await;
+    let McpOutcome::BadRequest(value) = older_protocol else {
+        panic!("older MCP protocols must still require the gateway: {older_protocol:?}");
+    };
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not directly callable on Adaptive Runtime"));
+
+    cached["arguments"]["_wc"] = json!({"record": recorder.session_id});
+    let conflicting = handle_mcp_request(
+        &runtime,
+        rpc("tools/call", Some(json!(67)), mcp_2026_params(cached)),
+        None,
+    )
+    .await;
+    let McpOutcome::BadRequest(value) = conflicting else {
+        panic!("expected rejection for duplicate recorder provenance: {conflicting:?}");
+    };
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("legacy MCP invocation field 'recording_session_id'"));
+
+    cached_gateway["arguments"]["recording_session_id"] = json!(false);
+    let invalid = handle_mcp_request(
+        &runtime,
+        rpc(
+            "tools/call",
+            Some(json!(67)),
+            mcp_2026_params(cached_gateway),
+        ),
+        None,
+    )
+    .await;
+    let McpOutcome::BadRequest(value) = invalid else {
+        panic!("expected canonical recorder validation: {invalid:?}");
+    };
+    assert_eq!(
+        value["error"]["message"],
+        "field '_wc.record' must be a non-empty string"
+    );
+}
+
+#[tokio::test]
+async fn cached_show_changes_uses_canonical_gateway_route() {
+    let runtime = test_runtime();
+    let arguments = json!({"project": "missing-project", "include_diff": false});
+    let alias = handle_mcp_request(
+        &runtime,
+        rpc(
+            "tools/call",
+            Some(json!(68)),
+            mcp_2026_params(json!({"name": "show_changes", "arguments": arguments.clone()})),
+        ),
+        None,
+    )
+    .await;
+    let McpOutcome::Ok(alias) = alias else {
+        panic!("cached descriptor should reach canonical project validation: {alias:?}");
+    };
+    let gateway = handle_mcp_request(
+        &runtime,
+        rpc(
+            "tools/call",
+            Some(json!(68)),
+            mcp_2026_params(adaptive_runtime_gateway_params(
+                "read_workspace_changes",
+                arguments.clone(),
+            )),
+        ),
+        None,
+    )
+    .await;
+    let McpOutcome::Ok(gateway) = gateway else {
+        panic!("canonical read_workspace_changes gateway: {gateway:?}");
+    };
+    let canonical_result = &gateway["result"]["structuredContent"];
+    assert_eq!(canonical_result["success"], false);
+    assert_eq!(alias["result"]["structuredContent"], *canonical_result);
+
+    let direct = handle_mcp_request(
+        &runtime,
+        rpc(
+            "tools/call",
+            Some(json!(68)),
+            mcp_2026_params(json!({"name": "read_workspace_changes", "arguments": arguments})),
+        ),
+        None,
+    )
+    .await;
+    let McpOutcome::BadRequest(value) = direct else {
+        panic!("current descriptor still requires the gateway: {direct:?}");
+    };
+    assert!(value["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("not directly callable on Adaptive Runtime"));
+}
+
+#[tokio::test]
 async fn long_tail_direct_call_is_rejected_with_gateway_guidance() {
     let runtime = test_runtime();
     let outcome = handle_mcp_request(
