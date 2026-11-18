@@ -23,12 +23,12 @@ else:
 SPEC = base.ReleaseSpec(
     {**base.PINNED_REQUEST,
      "version": "0.5.11", "tag": "v0.5.11", "source_ref": "release/v0.5.11",
-     "source_sha": "0" * 40,
-     "source_tree": "0" * 40,
-     "ci_run_id": 1, "ci_run_attempt": 1,
-     "evidence_run_id": 1, "evidence_run_attempt": 1,
+     "source_sha": "0793e6774fa52e9d85e3f1d428c979cb7fa44abc",
+     "source_tree": "95529b5bbc03d9a487a43294afcc9325ad2eb00e",
+     "ci_run_id": 44360542135, "ci_run_attempt": 1,
+     "evidence_run_id": 44360542548, "evidence_run_attempt": 1,
      "notes_path": ".github/release-requests/v0.5.11-notes.md",
-     "notes_sha256": "0" * 64},
+     "notes_sha256": "5210425a7dd1722a46e7cb5428ce44cc81cce505e54a349c70bb43faa23572f4"},
     ".github/release-requests/v0.5.11.json",
     ".github/workflows/release-publish-v0511.yml",
 )
