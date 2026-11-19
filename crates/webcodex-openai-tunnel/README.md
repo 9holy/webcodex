@@ -320,6 +320,10 @@ live OpenAI service or real ChatGPT end-to-end acceptance.
 `GET /health` returns the same snapshot as the library. These are loopback-only,
 read-only observations: they do not claim that the target MCP server or ChatGPT
 connector is ready. HTTP connections, request sizes and waits are bounded.
+Poll readiness expires after one configured poll timeout without a new
+successful poll, including when a full batch delays admission. Transport
+failures clear readiness immediately. Within the existing retry policy the client
+uses short polls until one succeeds, then returns to ordinary long polling.
 The CLI owns a per-tunnel run marker using the same default location/key as the
 embedded WebCodex host. Normal observed shutdown clears it. A crash or unconfirmed
 effect retains it; first resolve prior work rather than deleting the marker or

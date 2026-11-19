@@ -17,7 +17,7 @@ impl TunnelClient {
         struct ReadinessGuard(crate::Health);
         impl Drop for ReadinessGuard {
             fn drop(&mut self) {
-                self.0.ready(false);
+                self.0.clear_poll_readiness();
             }
         }
         let _readiness_guard = ReadinessGuard(self.health.clone());
@@ -53,7 +53,8 @@ impl TunnelClient {
                 let poll = async move {
                     sleep_until(next_poll).await;
                     let started = Instant::now();
-                    (self.poll(hint, startup).await, started.elapsed())
+                    let short_poll = !self.health.is_ready();
+                    (self.poll(hint, short_poll).await, started.elapsed())
                 };
                 // Snapshot size above instead of borrowing work throughout poll.
                 tokio::pin!(poll);
@@ -68,12 +69,13 @@ impl TunnelClient {
                             }
                             match result {
                                 Ok((received, commands)) => {
+                                    // Accept only a batch with valid correlation keys as readiness evidence.
+                                    if commands.iter().any(|c| c.request_id.is_empty() || c.request_id.len() > 256) { break 'run Err(Error::Protocol); }
                                     if startup {
                                         self.health.record_initial_poll(startup_clock.elapsed(), startup_attempts, startup_request_time);
                                     }
-                                    self.health.ready(true); startup = false; failures = 0; next_poll = Instant::now();
-                                    // Validate the batch's correlation keys before admitting any item.
-                                    if commands.iter().any(|c| c.request_id.is_empty() || c.request_id.len() > 256) { break 'run Err(Error::Protocol); }
+                                    self.health.poll_succeeded(self.limits.poll_timeout);
+                                    startup = false; failures = 0; next_poll = Instant::now();
                                     for command in commands {
                                         if !receipts.insert(command.request_id.clone()) { continue; }
                                         match validate(&command) {
@@ -83,7 +85,7 @@ impl TunnelClient {
                                     }
                                 }
                                 Err(failure) => {
-                                    self.health.ready(false);
+                                    self.health.clear_poll_readiness();
                                     if failure.error != Error::Transport { break 'run Err(failure.error); }
                                     next_poll = Instant::now() + backoff(failures).max(failure.delay);
                                     failures = failures.saturating_add(1);
@@ -108,7 +110,7 @@ impl TunnelClient {
         // No more control-plane admission. Keep the same workers and original
         // receive timestamps while settling both queued and dispatched commands.
         // In particular, stopping ingress does not cancel response delivery.
-        self.health.ready(false);
+        self.health.clear_poll_readiness();
         let drain = async {
             loop {
                 while work.len() < self.limits.concurrency {

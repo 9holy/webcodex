@@ -255,13 +255,26 @@ async fn optional_command_diagnostics_preserve_health_and_reset_for_a_new_proces
         .runtime
         .command_diagnostics
         .is_none());
-    registry.stopping(id);
+    // End the child without cancelling the observer, as on an unexpected exit.
     supervisor
         .lock()
         .await
         .stop_checked(ProcessKey::RegularTunnel(id))
         .await
         .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(8);
+    loop {
+        let mut current = snapshot(&[id]);
+        registry.project(&mut current, true);
+        let state = &current.profiles[0].runtime;
+        if state.lifecycle == ConnectionLifecycle::Error {
+            assert_eq!(state.tunnel_ready, None);
+            assert_eq!(state.local_mcp_ready, None);
+            break;
+        }
+        assert!(Instant::now() < deadline, "child exit was not observed: {current:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     registry.stopped(id, true);
 }
 
@@ -292,6 +305,11 @@ async fn concurrent_observers_are_independent_and_stale_generation_cannot_kill_r
         .await
         .unwrap();
     registry.stopped(a, true);
+    let mut stopped = snapshot(&[a, b]);
+    registry.project(&mut stopped, true);
+    assert_eq!(stopped.profiles[0].runtime.tunnel_ready, None);
+    assert_eq!(stopped.profiles[0].runtime.local_mcp_ready, None);
+    assert_eq!(stopped.profiles[1].runtime.tunnel_ready, Some(true));
     assert_eq!(
         supervisor
             .lock()

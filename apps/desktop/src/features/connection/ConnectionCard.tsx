@@ -55,11 +55,13 @@ export function ConnectionCard({ profile, canStart, busy, copied, onAction, onEd
   const failed = !profile.ready && Boolean(profile.last_error || profile.lifecycle === "error");
   const recovery = recoveryFor(profile);
   const healthStale = profile.last_error === "health_stale";
+  const waitingForPoll = profile.lifecycle === "running" && profile.last_error === "tunnel_unavailable"
+    && profile.reason_code === "tunnel_unavailable" && profile.tunnel_ready === false && profile.local_mcp_ready === true;
   const status = profile.server_restart_required
     ? c("pendingServerRestart")
     : profile.ready
       ? p("running")
-      : failed
+      : waitingForPoll ? c("awaitingStatus") : failed
         ? c("connectionUnavailable")
         : profile.lifecycle === "starting"
           ? p("starting")
@@ -111,11 +113,14 @@ export function ConnectionCard({ profile, canStart, busy, copied, onAction, onEd
   if (profile.local_mcp_url) detailRows.push({ label: "mcpAddress", value: <code>{profile.local_mcp_url}</code>, path: true });
   if (profile.runtime_directory) detailRows.push({ label: "runtimeDirectory", value: <code>{profile.runtime_directory}</code>, path: true });
   return <article className="connection-profile" aria-labelledby={`connection-${profile.id}`} data-tunnel-profile-id={profile.id}>
-    <header className="workspace-section-heading"><div><h2 id={`connection-${profile.id}`}>{profile.name}</h2><span className="workspace-observation">{owner}</span></div><span className={`connection-state ${profile.ready ? "ready" : ""}`} role="status"><i className={`status-dot ${profile.ready ? "ready" : failed ? "error" : "unknown"}`} aria-hidden="true" />{status}</span></header>
-    {(active || failed) && <dl className="connection-checks">{([[c("secureTunnel"), healthStale ? null : profile.tunnel_ready], [c("localMcp"), healthStale ? null : profile.local_mcp_ready]] as const).map(([label, ready]) => <div key={label}><dt>{label}</dt><dd><i className={`status-dot ${ready === true ? "ready" : ready === false ? "error" : "unknown"}`} aria-hidden="true" />{ready === true ? c("reachable") : ready === false ? c("unreachable") : healthStale ? c("awaitingStatus") : p("unknown")}</dd></div>)}</dl>}
+    <header className="workspace-section-heading"><div><h2 id={`connection-${profile.id}`}>{profile.name}</h2><span className="workspace-observation">{owner}</span></div><span className={`connection-state ${profile.ready ? "ready" : ""}`} role="status"><i className={`status-dot ${profile.ready ? "ready" : failed && !waitingForPoll ? "error" : "unknown"}`} aria-hidden="true" />{status}</span></header>
+    {(active || failed) && <dl className="connection-checks">{([
+      [c("secureTunnel"), healthStale || waitingForPoll ? null : profile.tunnel_ready, c("pollResponsive"), waitingForPoll ? c("pollRecovering") : undefined],
+      [c("localMcp"), healthStale ? null : profile.local_mcp_ready, c("reachable")],
+    ] as const).map(([label, ready, readyLabel, waitingLabel]) => <div key={label}><dt>{label}</dt><dd><i className={`status-dot ${ready === true ? "ready" : ready === false ? "error" : "unknown"}`} aria-hidden="true" />{ready === true ? readyLabel : ready === false ? c("unreachable") : waitingLabel ?? (healthStale ? c("awaitingStatus") : p("unknown"))}</dd></div>)}</dl>}
     <div className="connection-id"><span>{c("tunnelId")}</span><code>{profile.tunnel_id || "—"}</code>{profile.tunnel_id && <button type="button" className="text-button" aria-label={`${c("copyId")} ${profile.name}`} onClick={onCopy}>{copied ? p("copied") : c("copyId")}</button>}</div>
     {profile.server_restart_required && <div className="connection-apply-note" role="status"><strong>{c("pendingServerRestart")}</strong><span>{c("profileRestartHelp")}</span></div>}
-    {failed && <div className="connection-recovery" role="status"><strong>{c(recovery.title)}</strong><p>{c(recovery.action)}</p>{autoProxyRecovery && <p>{c("autoProxyHint")}</p>}
+    {failed && !waitingForPoll && <div className="connection-recovery" role="status"><strong>{c(recovery.title)}</strong><p>{c(recovery.action)}</p>{autoProxyRecovery && <p>{c("autoProxyHint")}</p>}
       <button type="button" className="secondary-button" onClick={() => onSettings(recovery.settings)}>{recovery.settings === "network" ? c("proxySettings") : s(recovery.settings === "runtime" ? "Runtime" : "Troubleshooting")}</button>
       <p className="connection-impact">{c("chatgptImpact")}</p>
     </div>}

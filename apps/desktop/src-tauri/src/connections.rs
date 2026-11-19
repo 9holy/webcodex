@@ -289,6 +289,8 @@ impl ConnectionRuntimes {
                 ConnectionLifecycle::Error
             };
             entry.state.ready = false;
+            entry.state.tunnel_ready = None;
+            entry.state.local_mcp_ready = None;
             entry.state.health = ConnectionHealth::Unknown;
             entry.state.last_error = if success {
                 None
@@ -489,6 +491,8 @@ impl ConnectionRuntimes {
         if self.update(id, generation, |state| {
             state.lifecycle = ConnectionLifecycle::Error;
             state.ready = false;
+            state.tunnel_ready = None;
+            state.local_mcp_ready = None;
             state.health = ConnectionHealth::Degraded;
             state.last_error = Some(failure);
             if state.reason_code.is_none() {
