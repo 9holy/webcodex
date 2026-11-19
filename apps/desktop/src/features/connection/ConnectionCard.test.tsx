@@ -18,8 +18,8 @@ describe("Connection advanced details", () => {
     const profile = connectionFixture({
       runtime_directory: path,
       startup_timings_ms: { cli_total: 5540, initial_poll: 5510, poll_attempts: 1, poll_request_ms: 5502 },
-      tunnel_ready: true,
-      local_mcp_ready: false,
+      tunnel_ready: null,
+      local_mcp_ready: null,
       process_ready: true,
       process_started: true,
       command_diagnostics: { rejected_commands: 2, terminal_response_delivery_failures: 1 },
@@ -63,7 +63,7 @@ describe("Connection advanced details", () => {
       expect(pairs.has(connectionsToolsText(locale, key))).toBe(true);
     }
     expect(pairs.get(connectionsToolsText(locale, "processReady"))).toBe(connectionsToolsText(locale, "yes"));
-    expect(pairs.get(connectionsToolsText(locale, "localMcpReady"))).toBe(connectionsToolsText(locale, "no"));
+    expect(pairs.get(connectionsToolsText(locale, "localMcpReady"))).toBe("—");
     expect(pairs.get(connectionsToolsText(locale, "pollRetryWait"))).toBe("8 ms");
     expect(pairs.get(connectionsToolsText(locale, "runtimeDirectory"))).toBe(path);
     expect(pairs.get(connectionsToolsText(locale, "rejectedCommands"))).toBe("2");
@@ -71,6 +71,26 @@ describe("Connection advanced details", () => {
     expect(container.textContent).toContain(connectionsToolsText(locale, "restartUncertainRecovery"));
     expect(details?.querySelectorAll("dd.connection-meta-path code")).toHaveLength(2);
     expect(details?.querySelector("dd.connection-meta-path code:last-child")).toBeTruthy();
+  });
+
+  it.each(["tunnel_unavailable", null] as const)("distinguishes local access and automatic poll recovery with reason %s", (reason_code) => {
+    localStorage.setItem("webcodex.desktop.locale", "zh-CN");
+    const ready = connectionFixture({ lifecycle: "running", ready: true, tunnel_ready: true, local_mcp_ready: true });
+    const card = (profile: typeof ready) => <LocaleProvider>
+      <ConnectionCard profile={profile} canStart={true} busy={false} copied={false}
+        onAction={() => undefined} onEdit={() => undefined} onDelete={() => undefined}
+        onCopy={() => undefined} onSettings={() => undefined} />
+    </LocaleProvider>;
+    const { container, rerender } = render(card(ready));
+    const checks = () => Array.from(container.querySelectorAll("dl.connection-checks dd"), (check) => check.textContent);
+    expect(checks()).toEqual(["轮询正常", "可访问"]);
+
+    rerender(card({ ...ready, ready: false, tunnel_ready: false, last_error: "tunnel_unavailable", reason_code }));
+    expect(checks()).toEqual(["等待轮询自动恢复", "可访问"]);
+    expect(container.querySelector(".connection-recovery")).toBeNull();
+
+    rerender(card(ready));
+    expect(checks()).toEqual(["轮询正常", "可访问"]);
   });
 
   it("omits unavailable optional diagnostics without creating empty labels", () => {

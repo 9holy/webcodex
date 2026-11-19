@@ -1,5 +1,6 @@
 mod support;
 use serde_json::json;
+use std::time::Duration;
 use support::*;
 use webcodex_openai_tunnel::{
     policy::{DeadlinePolicy, Limits},
@@ -35,6 +36,60 @@ async fn excess_over_poll_hint_is_drained_with_bounded_concurrency() {
         );
         polls.response().await.respond(200, "{}");
     }
+    settled(&health).await;
+    assert_eq!(finish(stop, task).await, Ok(()));
+}
+
+#[tokio::test]
+async fn readiness_expires_during_backpressure_and_recovers_when_polling_resumes() {
+    let mut cp = Server::new().await;
+    let mut mcp = Server::new().await;
+    let limits = Limits {
+        concurrency: 1,
+        ..Limits::default()
+    };
+    let poll_timeout = limits.poll_timeout;
+    let client = client(&cp, &mcp, limits, DeadlinePolicy::default());
+    let health = client.health();
+    let (stop, task) = start(client);
+
+    cp.next().await.respond(
+        200,
+        &json!({"commands":[command("a"),command("b")]}).to_string(),
+    );
+    let active = mcp.next().await;
+    assert_eq!(active.json()["id"], "a");
+    assert!(health.is_ready());
+
+    // Advance only while both peers are held, then use real time for socket I/O.
+    tokio::time::pause();
+    let normal_poll_wait = Duration::from_secs(15);
+    tokio::time::advance(normal_poll_wait).await;
+    assert!(health.is_ready());
+    tokio::time::advance(poll_timeout - normal_poll_wait).await;
+    assert!(!health.is_ready());
+    tokio::time::resume();
+    assert!(cp.requests.try_recv().is_err());
+    assert!(mcp.requests.try_recv().is_err());
+
+    active.respond(200, r#"{"jsonrpc":"2.0","id":"a","result":{}}"#);
+    let result = cp.next().await;
+    assert_eq!(result.json()["request_id"], "a");
+    result.respond(200, "{}");
+    let recovery = cp.next().await;
+    assert!(recovery.path.contains("timeout_ms=1000"));
+    assert!(!health.is_ready());
+    recovery.respond(204, "");
+
+    let steady = cp.next().await;
+    assert!(steady.path.contains("timeout_ms=15000"));
+    assert!(health.is_ready());
+    let queued = mcp.next().await;
+    assert_eq!(queued.json()["id"], "b");
+    queued.respond(200, r#"{"jsonrpc":"2.0","id":"b","result":{}}"#);
+    let result = cp.next().await;
+    assert_eq!(result.json()["request_id"], "b");
+    result.respond(200, "{}");
     settled(&health).await;
     assert_eq!(finish(stop, task).await, Ok(()));
 }

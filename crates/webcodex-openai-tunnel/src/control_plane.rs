@@ -40,16 +40,26 @@ pub(crate) fn backoff(attempt: u32) -> Duration {
 }
 pub(crate) struct PollFailure {
     pub error: Error,
-    pub delay: Duration,
+    /// A retryable HTTP response, including those without a Retry-After header.
+    pub retry_after: Option<Duration>,
 }
 impl From<Error> for PollFailure {
     fn from(error: Error) -> Self {
         Self {
             error,
-            delay: Duration::ZERO,
+            retry_after: None,
         }
     }
 }
+
+pub(crate) enum PollPhase {
+    Short,
+    Steady,
+    FastRecovery,
+}
+
+const RECOVERY_HEADER_TIMEOUT: Duration = Duration::from_secs(6);
+
 impl TunnelClient {
     pub(crate) fn endpoint(&self, operation: &str) -> String {
         format!(
@@ -60,12 +70,15 @@ impl TunnelClient {
     pub(crate) async fn poll(
         &self,
         limit: usize,
-        startup: bool,
+        phase: PollPhase,
     ) -> Result<(Instant, Vec<Command>), PollFailure> {
-        // OpenAI's empty long poll can hold the first ready signal for 15s.
-        // A bounded 1s initial poll still requires a real successful response.
-        let timeout_ms = if startup { "1000" } else { "15000" };
-        let response = self
+        // Avoid waiting for an empty 15s long poll to confirm startup or recovery.
+        let timeout_ms = if matches!(phase, PollPhase::Steady) {
+            "15000"
+        } else {
+            "1000"
+        };
+        let request = self
             .control
             .get(self.endpoint("poll"))
             .query(&[
@@ -73,9 +86,15 @@ impl TunnelClient {
                 ("timeout_ms", timeout_ms.into()),
             ])
             .timeout(self.limits.poll_timeout)
-            .send()
-            .await
-            .map_err(|_| Error::Transport)?;
+            .send();
+        // Once headers arrive, preserve the configured budget for reading the body.
+        let response = match phase {
+            PollPhase::FastRecovery => tokio::time::timeout(RECOVERY_HEADER_TIMEOUT, request)
+                .await
+                .map_err(|_| Error::Transport)?,
+            _ => request.await,
+        }
+        .map_err(|_| Error::Transport)?;
         // Capture headers receipt before decoding, including all time spent reading the body.
         let received = Instant::now();
         let status = response.status().as_u16();
@@ -94,7 +113,7 @@ impl TunnelClient {
             300..=399 => Err(Error::Redirect.into()),
             408 | 429 | 500..=599 => Err(PollFailure {
                 error: Error::Transport,
-                delay: retry_after(response.headers()),
+                retry_after: Some(retry_after(response.headers())),
             }),
             _ => Err(Error::Protocol.into()),
         }

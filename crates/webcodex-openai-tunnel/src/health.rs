@@ -1,14 +1,18 @@
-use std::sync::{
-    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
-    Arc,
+use std::{
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        Arc, Mutex,
+    },
+    time::Duration,
 };
+use tokio::time::Instant;
 
 /// Safe, payload-free process-local observations. Readiness requires a successful poll.
 #[derive(Clone, Default)]
 pub struct Health(pub(crate) Arc<State>);
 #[derive(Default)]
 pub(crate) struct State {
-    pub ready: AtomicBool,
+    poll_ready_until: Mutex<Option<Instant>>,
     /// Elapsed milliseconds until first successful control-plane poll (+1).
     pub first_poll_ms_plus_one: AtomicU64,
     /// Total requests and HTTP time before the first successful poll.
@@ -80,7 +84,11 @@ impl Health {
         }
     }
     pub fn is_ready(&self) -> bool {
-        self.0.ready.load(Ordering::SeqCst)
+        self.0
+            .poll_ready_until
+            .lock()
+            .unwrap()
+            .is_some_and(|until| Instant::now() < until)
     }
     /// Payload-free, monotonic duration to the first successful remote poll.
     pub fn initial_poll_ms(&self) -> Option<u64> {
@@ -122,8 +130,12 @@ impl Health {
     pub fn rejected_commands(&self) -> usize {
         self.0.rejected.load(Ordering::Relaxed)
     }
-    pub(crate) fn ready(&self, ready: bool) {
-        self.0.ready.store(ready, Ordering::SeqCst);
+    pub(crate) fn poll_succeeded(&self, valid_for: Duration) {
+        *self.0.poll_ready_until.lock().unwrap() = Some(Instant::now() + valid_for);
+    }
+
+    pub(crate) fn clear_poll_readiness(&self) {
+        *self.0.poll_ready_until.lock().unwrap() = None;
     }
 }
 
