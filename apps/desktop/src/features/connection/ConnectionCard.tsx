@@ -56,12 +56,15 @@ export function ConnectionCard({ profile, canStart, busy, copied, onAction, onEd
   const recovery = recoveryFor(profile);
   const healthStale = profile.last_error === "health_stale";
   const waitingForPoll = profile.lifecycle === "running" && profile.last_error === "tunnel_unavailable"
-    && profile.reason_code === "tunnel_unavailable" && profile.tunnel_ready === false && profile.local_mcp_ready === true;
+    && (profile.reason_code == null || profile.reason_code === "tunnel_unavailable")
+    && profile.tunnel_ready === false && profile.local_mcp_ready === true;
   const status = profile.server_restart_required
     ? c("pendingServerRestart")
     : profile.ready
       ? p("running")
-      : waitingForPoll ? c("awaitingStatus") : failed
+      : waitingForPoll
+        ? c("awaitingStatus")
+        : failed
         ? c("connectionUnavailable")
         : profile.lifecycle === "starting"
           ? p("starting")

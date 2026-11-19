@@ -73,7 +73,7 @@ describe("Connection advanced details", () => {
     expect(details?.querySelector("dd.connection-meta-path code:last-child")).toBeTruthy();
   });
 
-  it("shows polling separately from local access and waits for automatic recovery while the process is running", () => {
+  it.each(["tunnel_unavailable", null] as const)("distinguishes local access and automatic poll recovery with reason %s", (reason_code) => {
     localStorage.setItem("webcodex.desktop.locale", "zh-CN");
     const ready = connectionFixture({ lifecycle: "running", ready: true, tunnel_ready: true, local_mcp_ready: true });
     const card = (profile: typeof ready) => <LocaleProvider>
@@ -85,7 +85,7 @@ describe("Connection advanced details", () => {
     const checks = () => Array.from(container.querySelectorAll("dl.connection-checks dd"), (check) => check.textContent);
     expect(checks()).toEqual(["轮询正常", "可访问"]);
 
-    rerender(card({ ...ready, ready: false, tunnel_ready: false, last_error: "tunnel_unavailable", reason_code: "tunnel_unavailable" }));
+    rerender(card({ ...ready, ready: false, tunnel_ready: false, last_error: "tunnel_unavailable", reason_code }));
     expect(checks()).toEqual(["等待轮询自动恢复", "可访问"]);
     expect(container.querySelector(".connection-recovery")).toBeNull();
 
