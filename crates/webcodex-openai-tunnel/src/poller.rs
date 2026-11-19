@@ -1,4 +1,8 @@
-use crate::{command::validate, control_plane::backoff, Error, TunnelClient};
+use crate::{
+    command::validate,
+    control_plane::{backoff, PollPhase},
+    Error, TunnelClient,
+};
 use futures_util::{stream::FuturesUnordered, StreamExt};
 use std::{
     collections::{HashSet, VecDeque},
@@ -7,6 +11,10 @@ use std::{
     time::Duration,
 };
 use tokio::time::{sleep_until, Instant};
+
+// Keep a bounded exponential delay and jitter during transport recovery.
+const RECOVERY_BACKOFF_STEP: u32 = 4;
+const FULL_RECOVERY_BUDGET_EVERY: u32 = 3;
 
 impl TunnelClient {
     pub(crate) async fn poller(
@@ -53,8 +61,17 @@ impl TunnelClient {
                 let poll = async move {
                     sleep_until(next_poll).await;
                     let started = Instant::now();
-                    let short_poll = !self.health.is_ready();
-                    (self.poll(hint, short_poll).await, started.elapsed())
+                    let phase = if self.health.is_ready() {
+                        PollPhase::Steady
+                    } else if startup
+                        || (failures != 0 && failures.is_multiple_of(FULL_RECOVERY_BUDGET_EVERY))
+                    {
+                        // Periodic full-budget probes let slow but usable routes recover.
+                        PollPhase::Short
+                    } else {
+                        PollPhase::FastRecovery
+                    };
+                    (self.poll(hint, phase).await, started.elapsed())
                 };
                 // Snapshot size above instead of borrowing work throughout poll.
                 tokio::pin!(poll);
@@ -87,7 +104,12 @@ impl TunnelClient {
                                 Err(failure) => {
                                     self.health.clear_poll_readiness();
                                     if failure.error != Error::Transport { break 'run Err(failure.error); }
-                                    next_poll = Instant::now() + backoff(failures).max(failure.delay);
+                                    let attempt = if !startup && failure.retry_after.is_none() {
+                                        failures.min(RECOVERY_BACKOFF_STEP)
+                                    } else {
+                                        failures
+                                    };
+                                    next_poll = Instant::now() + backoff(attempt).max(failure.retry_after.unwrap_or_default());
                                     failures = failures.saturating_add(1);
                                 }
                             }
